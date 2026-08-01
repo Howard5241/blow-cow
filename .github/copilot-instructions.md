@@ -1,5 +1,8 @@
 # Project Guidelines
 
+Workspace guidance for Copilot in this repo. `CLAUDE.md` at the repository root is the Claude Code
+counterpart; keep the two in sync when project-wide guidance changes.
+
 ## Product Goal
 - Build Blow Cow, a turn-based online multiplayer browser card game inspired by BS.
 - Use boardgame.io for game rules, turn flow, multiplayer state sync, and server authority.
@@ -22,8 +25,13 @@
 - Start only the multiplayer server with `npm run dev:server`.
 - Build the production website with `npm run build`.
 - Preview the production build locally with `npm run preview`.
+- Start the multiplayer server without watch mode with `npm run server`.
+- Run ESLint across the repo with `npm run lint`.
 - Run the targeted gameplay checks with `npm run check:gameplay`.
+- After changing anything under `src/game/`, run `npm run check:gameplay` and `npx tsc -b`. The check script is the only automated test harness in this repo.
+- When a rule changes, add a matching check to `scripts/check-blowcow-gameplay.ts` and register it in the `checks` array at the bottom of that file.
 - In PowerShell, if port `8000` is already in use, start the server on a different port with `$env:PORT=8001; npm run dev:server`.
+- Vite proxies `/games` and `/socket.io` to `http://localhost:8000`, so the client needs the server running for lobby and match traffic.
 
 ## Architecture
 - Keep all game rules deterministic and serializable.
@@ -40,6 +48,7 @@
 - Keep preview-only UI behavior clearly separated from eventual boardgame.io move logic.
 - Character card sprites already include the character name and description, so the UI should not duplicate that description text outside the sprite unless explicitly requested.
 - Character sprites live under `character_card_sprites/`, and filename matching should tolerate suffixes after the character name, such as `The Cat 2.png`.
+- Sprite folders live at the repository root, not in `public/`, and are loaded through `import.meta.glob`: `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, and `avatar_sprites/`.
 
 ## UI Documentation
 - Before making frontend or layout changes, read the relevant page docs under `docs/ui-pages/` to understand the current page structure, element aliases, and UI relationships.
@@ -49,8 +58,9 @@
 ## Code Organization
 - Prefer small focused modules.
 - Put rules and helpers under a game-focused area such as `src/game/`.
-- Put UI under a frontend-focused area such as `src/ui/` or `src/components/`.
+- Put UI under a frontend-focused area such as `src/ui/`.
 - Keep shared types and constants in dedicated files.
+- Current layout: `src/game/` holds the game definition and characters, `src/ui/` holds the board and sprite helpers, `server/server.cjs` is the local server runtime, `server/completedGameArchive.ts` archives finished matches to `data/completed-games/`, and `scripts/check-blowcow-gameplay.ts` holds the gameplay checks.
 
 ## Implementation Priorities
 - Add brief comments only where card rules, bluffing flow, or hidden-information handling would be non-obvious.
@@ -68,10 +78,14 @@
 - Use `phases` for large rule changes across the game and `stages` for per-player substeps inside a turn.
 - Relevant docs areas for this project: Multiplayer, Turn Order, Phases, Stages, Events, Secret State, Randomness, Testing, Deployment, Game, Client, Server, and Lobby.
 
-## Repository Notes
+## Upstream boardgame.io Notes
 - boardgame.io is an engine for turn-based games that provides state management, realtime multiplayer sync, lobby support, storage integration, AI bots, logs, time travel, and plugins.
-- The repo README emphasizes that you describe state transitions as simple move functions and boardgame.io handles networking and storage.
-- The repository includes `examples/`, `docs/`, and `packages/`, which are useful references when scaffolding this project.
+- Its README emphasizes that you describe state transitions as simple move functions while boardgame.io handles networking and storage.
+- The upstream repository includes `examples/`, `docs/`, and `packages/`, which are useful references. Those directories belong to boardgame.io, not to this repository.
 - The upstream project is TypeScript-heavy, so prefer TypeScript-first examples and patterns when choosing between JS and TS implementations.
-- The current repository uses `concurrently` to run the Vite client and local boardgame.io server together during development.
-- The current in-game screen is wired to real gameplay state and multiplayer flow, and page-level UI docs live under `docs/ui-pages/`.
+
+## Repository Notes
+- This repository uses `concurrently` to run the Vite client and local boardgame.io server together during development.
+- The in-game screen is wired to real gameplay state and multiplayer flow, and page-level UI docs live under `docs/ui-pages/`.
+- Finished matches are archived locally under `data/completed-games/`, with detailed snapshots in `matches/` and compact analysis lines in `index/games.ndjson` and `index/player-games.ndjson`.
+- `npm run lint` currently reports pre-existing problems in `src/ui/BlowCowBoard.tsx` and `src/App.tsx`. Those are not caused by new work and should not be fixed unless asked.

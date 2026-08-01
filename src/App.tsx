@@ -179,7 +179,6 @@ function App() {
   const [serverState, setServerState] = useState<ServerState>('checking')
   const [statusMessage, setStatusMessage] = useState('Checking the lobby service...')
   const [errorMessage, setErrorMessage] = useState('')
-  const [tableShellAccent, setTableShellAccent] = useState('amber')
 
   const defaultRankCount = getDefaultStandardRankCount(numPlayers)
   const trimmedPlayerName = playerName.trim()
@@ -498,13 +497,12 @@ function App() {
   if (activeRoom) {
     return (
       <main className="app-shell table-mode">
-        <section className="table-shell" data-ambient-accent={tableShellAccent}>
+        <section className="table-shell">
           <BlowCowClient
             credentials={activeRoom.credentials}
             isLeaving={busyAction === 'leave'}
             matchID={activeRoom.matchID}
             onLeaveRoom={handleLeaveRoom}
-            onTableShellAccentChange={setTableShellAccent}
             playerID={activeRoom.playerID}
             playerName={activeRoom.playerName}
             roomPlayers={activeRoomPlayers}

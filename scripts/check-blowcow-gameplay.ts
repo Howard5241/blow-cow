@@ -342,6 +342,78 @@ function runPunishmentScoredOutImmediateLeaveCheck() {
   assert.match(state.tableStatus, /last player remaining/i)
 }
 
+function runLeaveRemovesTableCardsCheck() {
+  const state = createScenarioState(3)
+  state.players['0'].hand = [card('clubs_ace.png')]
+  state.players['1'].hand = []
+  state.players['2'].hand = [card('spades_king.png')]
+  state.round.trumpRank = 'Q'
+  state.round.lastNonPassingPlayerID = '1'
+  state.table.plays = [
+    {
+      id: 'play-0',
+      playerID: '0',
+      cards: [card('clubs_07.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: 1,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-1',
+      playerID: '1',
+      cards: [card('diamonds_queen.png'), card('hearts_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-2',
+      playerID: '2',
+      cards: [card('spades_07.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 3,
+      revealedAtTurn: 3,
+      wasTrumpSelection: false,
+    },
+  ]
+  state.players['1'].pendingRevealPlayID = 'play-1'
+
+  const { events, record } = createEventRecorder()
+  beginTurn({
+    G: state,
+    ctx: {
+      currentPlayer: '1',
+      turn: 4,
+    },
+    events,
+  })
+
+  assert.equal(state.players['1'].hasLeft, true)
+  assert.equal(state.gameStatus, 'active')
+  assert.equal(record.nextPlayerID, '2')
+  assert.deepEqual(state.table.plays.map((play) => play.id), ['play-0', 'play-2'])
+  assertCardSet(state.table.plays.flatMap((play) => play.cards), ['clubs_07.png', 'spades_07.png'])
+  assert.equal(state.players['1'].hand.length, 0)
+  assert.equal(state.players['1'].points, 0)
+  assert.equal(state.players['0'].hand.length, 1)
+  assert.equal(state.players['2'].hand.length, 1)
+  assert.match(
+    state.history.find((event) => event.playerID === '1' && event.kind === 'system')?.detail ?? '',
+    /removed from the game entirely/i,
+  )
+
+  const leaveAction = state.archive.turns
+    .filter((archivedTurn) => archivedTurn.turnNumber === 4 && archivedTurn.playerID === '1')
+    .flatMap((archivedTurn) => archivedTurn.actions)
+    .find((action) => action.kind === 'leave')
+  assertCardSet(leaveAction?.cards ?? [], ['diamonds_queen.png', 'hearts_queen.png'])
+}
+
 function runAllPassResetCheck() {
   const state = createScenarioState()
   state.players['0'].hand = [card('clubs_ace.png')]
@@ -2681,6 +2753,7 @@ function runLeaveCharacterEffectsCheck() {
 const checks = [
   ['BS resolution', runBSResolutionCheck],
   ['punishment scored-out immediate leave', runPunishmentScoredOutImmediateLeaveCheck],
+  ['leave removes table cards', runLeaveRemovesTableCardsCheck],
   ['all-pass reset', runAllPassResetCheck],
   ['reset redistribution', runResetRedistributionCheck],
   ['final-two resolution window', runFinalTwoResolutionWindowCheck],

@@ -11,7 +11,6 @@ import {
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
   type BlowCowFinalizeResetResolutionArgs,
-  type BlowCowHistoryEventKind,
   type BlowCowPassArgs,
   type BlowCowPlayArgs,
   type BlowCowPlayRandomArgs,
@@ -22,22 +21,47 @@ import {
 } from '../game/blowCowGame.ts'
 import { getCharacterCardSprite } from './characterCardSprites.ts'
 import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
+import { getAvatarSprite } from './avatarSprites.ts'
+import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
+import { PlayerRing } from './PlayerRing.tsx'
+import { SeatBlock } from './SeatBlock.tsx'
+import { PASS_ICON_SPRITE, PLAY_ICON_SPRITE, RESET_ICON_SPRITE } from './iconSprites.ts'
+import { TableCenterHub } from './TableCenterHub.tsx'
+import { CharacterStripOverlay, HistoryOverlay } from './BoardOverlays.tsx'
+import { useTransientMessage } from './useTransientMessage.ts'
+import {
+  getCatHiddenCardIDSet,
+  getCatHiddenOverlayCardIDs,
+  getDisplayedPlayCardCount,
+  getExplicitlyRevealedCardIDSet,
+  getHiddenOverlayCardIDs,
+  getLatestHiddenPlay,
+  getRevealedOverlayCardIDs,
+} from './tablePlays.ts'
+import {
+  canUseClientGrandmasterBSOverride,
+  getClientDefaultBSTargetSeatID,
+  getClientPendingPlay,
+  getDreamerCheatForPlay,
+  getDreamerCheatLabel,
+  resolveClientBSTargetSelection,
+} from './bsTargeting.ts'
+import type {
+  CharacterCardOverlay,
+  HistoryEvent,
+  MatchAnnouncement,
+  MatchPlayer,
+  SeatRow,
+} from './boardTypes.ts'
 
-type MatchPlayer = {
-  id: string | number
-  name?: string
-  isConnected?: boolean
-}
-
-type FrontCard = {
-  id: string
-  cardID: string
-  sprite: string
-  faceDown: boolean
-  isDeparted: boolean
-  isFlipping: boolean
-  isTargeted: boolean
-  isCatActionable: boolean
+/** Shared by all four action-button render branches so the icon markup is written once. */
+function ActionButtonContent({ icon, label }: { icon: string; label: string }) {
+  return (
+    <>
+      {icon ? <img alt="" aria-hidden="true" className="action-button-icon" src={icon} /> : null}
+      <span className="action-button-label">{label}</span>
+    </>
+  )
 }
 
 type HandCard = {
@@ -70,31 +94,6 @@ type FrontCardEntryCard = {
   moveX: number
   moveY: number
   delayMs: number
-}
-
-type SeatRow = {
-  id: string
-  seatIndex: number
-  characterName: BlowCowState['players'][string]['character']
-  frontCards: FrontCard[]
-  handCount: number
-  hasLeft: boolean
-  isActingPlayer: boolean
-  isConnected: boolean
-  isTargetPlayer: boolean
-  isViewingPlayer: boolean
-  name: string
-  pointRanks: string[]
-  points: number
-}
-
-type HistoryEventKind = BlowCowHistoryEventKind
-
-type HistoryEvent = {
-  id: string
-  kind: HistoryEventKind
-  title: string
-  detail: string
 }
 
 type EndGameRow = {
@@ -184,22 +183,6 @@ type FrontCardEntrySequence = {
   durationMs: number
 }
 
-type MatchAnnouncementTone = 'warning' | 'info' | 'verdict'
-
-type MatchAnnouncement = {
-  tone: MatchAnnouncementTone
-  title: string
-  detail: string
-}
-
-type CharacterCardOverlay = {
-  playerName: string
-  seatLabel: string
-  characterName: string
-  sprite: string
-}
-
-type InlineInfoAlignment = 'center' | 'start' | 'end'
 type BoardServerState = 'checking' | 'online' | 'offline'
 
 const BS_TARGET_REVEAL_AT_MS = 2000
@@ -228,6 +211,8 @@ const FRONT_CARD_ENTRY_STAGGER_MS = 120
 const FRONT_CARD_FLIP_DURATION_MS = 380
 const PLAYER_POINTS_FLASH_DURATION_MS = 1600
 const PLAYER_PLAY_CALLOUT_DURATION_MS = 2400
+// Deliberately not scaled by G.speedMultiplier: this reports a UI mistake, not a game sequence.
+const BOARD_FAIL_MESSAGE_DURATION_MS = 2400
 const DEFAULT_HAND_CARD_WIDTH = 88
 const ENDGAME_CHART_WIDTH = 960
 const ENDGAME_CHART_HEIGHT = 280
@@ -238,12 +223,9 @@ const ENDGAME_CHART_PADDING = {
   left: 40,
 } as const
 const ENDGAME_CHART_COLORS = ['#ffcf67', '#4fd2a3', '#7ebdff', '#ff8d7b', '#d9b8ff', '#7fe4ff', '#ffb36b', '#c7eb6c'] as const
-const TABLE_SHELL_ACCENT_KEYS = ['amber', 'coral', 'teal', 'cobalt', 'lime'] as const
 const BS_PLAYER_CALLOUT_OPTIONS = ['BS!', "That's a lie!", "That's BS!", 'I call BS!', "You're lying!", 'BS!!!!!'] as const
 const PASS_PLAYER_CALLOUT_OPTIONS = ['Pass', 'Skip', 'I pass', "I'll pass"] as const
 const FOREIGNER_SUIT_ORDER = ['spades', 'hearts', 'diamonds', 'clubs'] as const
-
-type TableShellAccentKey = (typeof TABLE_SHELL_ACCENT_KEYS)[number]
 
 function getForeignerRankLabel(rank: BlowCowRank) {
   if (rank === 'A') {
@@ -284,19 +266,9 @@ const FOREIGNER_CARD_OPTIONS = [
   },
 ] as const
 
-const HISTORY_EVENT_LABELS: Record<HistoryEventKind, string> = {
-  system: 'System',
-  action: 'Action',
-  verdict: 'Verdict',
-  punishment: 'Punishment',
-  point: 'Point',
-  leave: 'Leave',
-}
-
 type BlowCowBoardProps = BoardProps<BlowCowState> & {
   isLeaving: boolean
   onLeaveRoom: () => void
-  onTableShellAccentChange?: (accentKey: TableShellAccentKey) => void
   playerName: string
   roomPlayers: MatchPlayer[]
   roomError: string
@@ -457,96 +429,8 @@ function buildPlayCalloutText(claimedRank: BlowCowRank, cardCount: number) {
   return `${countLabel} ${getPlayCalloutRankLabel(claimedRank, cardCount)}`
 }
 
-function getDisplayedPlayCardCount(play: BlowCowState['table']['plays'][number]) {
-  return play.declaredCardCount ?? play.cards.length
-}
-
-function getExplicitlyRevealedCardIDSet(play: BlowCowState['table']['plays'][number]) {
-  return new Set(play.revealedCardIDs ?? [])
-}
-
-function getCatHiddenCardIDSet(play: BlowCowState['table']['plays'][number]) {
-  return new Set(play.rehiddenCardIDs ?? [])
-}
-
-function getHiddenOverlayCardIDs(play: BlowCowState['table']['plays'][number]) {
-  if (play.revealedAtTurn !== null) {
-    return [] as string[]
-  }
-
-  const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
-  return play.cards
-    .filter((card) => !revealedCardIDSet.has(card.id))
-    .map((card) => `${play.id}-${card.id}`)
-}
-
-function getRevealedOverlayCardIDs(play: BlowCowState['table']['plays'][number]) {
-  if (play.revealedAtTurn !== null) {
-    return play.cards.map((card) => `${play.id}-${card.id}`)
-  }
-
-  const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
-  return play.cards
-    .filter((card) => revealedCardIDSet.has(card.id))
-    .map((card) => `${play.id}-${card.id}`)
-}
-
-function getCatHiddenOverlayCardIDs(play: BlowCowState['table']['plays'][number]) {
-  const catHiddenCardIDSet = getCatHiddenCardIDSet(play)
-
-  return play.cards
-    .filter((card) => catHiddenCardIDSet.has(card.id))
-    .map((card) => `${play.id}-${card.id}`)
-}
-
-function getLatestHiddenPlay(tablePlays: BlowCowState['table']['plays'], playerID: string | null | undefined) {
-  if (!playerID) {
-    return null
-  }
-
-  for (let playIndex = tablePlays.length - 1; playIndex >= 0; playIndex -= 1) {
-    const play = tablePlays[playIndex]
-    if (play.playerID === playerID && getHiddenOverlayCardIDs(play).length > 0) {
-      return play
-    }
-  }
-
-  return null
-}
-
-function getPawnEnPassantTargetPlay(
-  tablePlays: BlowCowState['table']['plays'],
-  defaultTargetPlay: BlowCowState['table']['plays'][number] | null,
-  currentSeatID: string | null,
-) {
-  if (!defaultTargetPlay || defaultTargetPlay.cards.length !== 2) {
-    return null
-  }
-
-  const defaultTargetPlayIndex = tablePlays.findIndex((play) => play.id === defaultTargetPlay.id)
-  if (defaultTargetPlayIndex <= 0) {
-    return null
-  }
-
-  const previousPlay = tablePlays[defaultTargetPlayIndex - 1]
-  if (previousPlay.playerID === currentSeatID || getHiddenOverlayCardIDs(previousPlay).length === 0) {
-    return null
-  }
-
-  const latestTargetPlay = getLatestHiddenPlay(tablePlays, previousPlay.playerID)
-  return latestTargetPlay?.id === previousPlay.id ? latestTargetPlay : null
-}
-
 function pickRandomCalloutText(options: readonly string[]) {
   return options[Math.floor(Math.random() * options.length)] ?? ''
-}
-
-function pickNextTableShellAccent(previousAccent: TableShellAccentKey | null) {
-  const candidateAccentKeys = previousAccent === null
-    ? [...TABLE_SHELL_ACCENT_KEYS]
-    : TABLE_SHELL_ACCENT_KEYS.filter((accentKey) => accentKey !== previousAccent)
-
-  return candidateAccentKeys[Math.floor(Math.random() * candidateAccentKeys.length)] ?? 'amber'
 }
 
 function getBSSequenceRevealedPlayIDs(
@@ -712,15 +596,6 @@ function getResetSequenceRevealedCardIDs(
   return revealedCardIDs
 }
 
-function InlineInfoTooltip({ alignment = 'center', tooltip }: { alignment?: InlineInfoAlignment, tooltip: string }) {
-  return (
-    <span aria-label={tooltip} className={`inline-info-trigger align-${alignment}`} tabIndex={0}>
-      <span aria-hidden="true" className="inline-info-icon">i</span>
-      <span className="inline-info-tooltip" role="tooltip">{tooltip}</span>
-    </span>
-  )
-}
-
 function scaleSequenceDelay(delayMs: number, speedMultiplier: number) {
   return Math.max(0, Math.round(delayMs / speedMultiplier))
 }
@@ -742,8 +617,8 @@ function getPunishmentMoveTargetPosition(
 }
 
 function getResetPileAnchorPosition(boardElement: HTMLElement, boardRect: DOMRect) {
-  const pileAnchorElement = boardElement.querySelector<HTMLElement>('.player-info-layout')
-    ?? boardElement.querySelector<HTMLElement>('.game-table-shell')
+  const pileAnchorElement = boardElement.querySelector<HTMLElement>('.table-center-hub')
+    ?? boardElement.querySelector<HTMLElement>('.player-ring')
     ?? boardElement
   const pileAnchorRect = pileAnchorElement.getBoundingClientRect()
 
@@ -831,7 +706,6 @@ export function BlowCowBoard({
   matchID,
   moves,
   onLeaveRoom,
-  onTableShellAccentChange,
   playerID,
   playerName,
   roomPlayers,
@@ -870,8 +744,6 @@ export function BlowCowBoard({
   const hasMountedPassCalloutWatcherRef = useRef(false)
   const lastSeenPassEventIDRef = useRef<string | null>(null)
   const playCalloutTimeoutIDRef = useRef<number | null>(null)
-  const previousRoundNumberRef = useRef<number | null>(null)
-  const lastTableShellAccentRef = useRef<TableShellAccentKey | null>(null)
   const playersFromRoom = roomPlayers.length > 0
     ? roomPlayers
     : ((matchData as MatchPlayer[] | undefined) ?? [])
@@ -889,7 +761,7 @@ export function BlowCowBoard({
   } | null>(null)
   const [selectedTrumpRank, setSelectedTrumpRank] = useState<BlowCowRank>('Q')
   const [selectedDrunkardRandomPlayCardCount, setSelectedDrunkardRandomPlayCardCount] = useState(1)
-  const [selectedGrandmasterBSTargetSeatID, setSelectedGrandmasterBSTargetSeatID] = useState<string | null>(null)
+  const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [bsSequenceProgress, setBSSequenceProgress] = useState<BSSequenceProgress | null>(null)
@@ -903,8 +775,13 @@ export function BlowCowBoard({
   const [resetDealSequence, setResetDealSequence] = useState<PunishmentMoveSequence | null>(null)
   const [departedResetCardIDs, setDepartedResetCardIDs] = useState<string[]>([])
   const [selectedCharacterCard, setSelectedCharacterCard] = useState<CharacterCardOverlay | null>(null)
-  const [isCharacterStripCollapsed, setIsCharacterStripCollapsed] = useState(false)
+  const [isCharacterStripOpen, setIsCharacterStripOpen] = useState(false)
   const [copyRoomCodeStatus, setCopyRoomCodeStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const {
+    message: failMessage,
+    showMessage: showFailMessage,
+    clearMessage: clearFailMessage,
+  } = useTransientMessage(BOARD_FAIL_MESSAGE_DURATION_MS)
   const hasMountedPunishmentWatcherRef = useRef(false)
   const lastSeenPunishmentEventIDRef = useRef<string | null>(null)
   const finalizeBSResolutionRef = useRef(moves.finalizeBSResolution)
@@ -927,21 +804,6 @@ export function BlowCowBoard({
   useEffect(() => {
     latestTablePlaysRef.current = G.table.plays
   }, [G.table.plays])
-
-  useEffect(() => {
-    if (!onTableShellAccentChange) {
-      return
-    }
-
-    if (previousRoundNumberRef.current === G.round.roundNumber) {
-      return
-    }
-
-    previousRoundNumberRef.current = G.round.roundNumber
-    const nextAccent = pickNextTableShellAccent(lastTableShellAccentRef.current)
-    lastTableShellAccentRef.current = nextAccent
-    onTableShellAccentChange(nextAccent)
-  }, [G.round.roundNumber, onTableShellAccentChange])
 
   useEffect(() => {
     return () => {
@@ -986,15 +848,38 @@ export function BlowCowBoard({
     }
   }, [copyRoomCodeStatus])
 
+  const hasEscapableLayer = Boolean(
+    selectedCharacterCard || isHistoryOpen || isCharacterStripOpen || selectedTargetSeatID,
+  )
+
+  // Escape closes one layer at a time, innermost first.
   useEffect(() => {
-    if (!selectedCharacterCard) {
+    if (!hasEscapableLayer) {
       return
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setSelectedCharacterCard(null)
+      if (event.key !== 'Escape') {
+        return
       }
+
+      if (selectedCharacterCard) {
+        setSelectedCharacterCard(null)
+        return
+      }
+
+      if (isCharacterStripOpen) {
+        setIsCharacterStripOpen(false)
+        return
+      }
+
+      if (isHistoryOpen) {
+        setIsHistoryOpen(false)
+        return
+      }
+
+      setSelectedTargetSeatID(null)
+      clearFailMessage()
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -1002,7 +887,7 @@ export function BlowCowBoard({
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [selectedCharacterCard])
+  }, [hasEscapableLayer, selectedCharacterCard, isCharacterStripOpen, isHistoryOpen, clearFailMessage])
 
   useEffect(() => {
     if (G.gameStatus === 'staging' || !G.useCharacters || G.gameStatus === 'finished') {
@@ -1012,7 +897,7 @@ export function BlowCowBoard({
 
   useEffect(() => {
     if (G.gameStatus !== 'active' || !G.useCharacters) {
-      setIsCharacterStripCollapsed(false)
+      setIsCharacterStripOpen(false)
     }
   }, [G.gameStatus, G.useCharacters])
 
@@ -1674,44 +1559,26 @@ export function BlowCowBoard({
   )
   const isInteractiveTurn = isCurrentPlayersTurn && !isResolutionSequenceActive
   const isGrandmaster = currentPlayerState?.character === 'The Grandmaster'
-  const isPawn = currentPlayerState?.character === 'The Pawn'
   const isContrarian = currentPlayerState?.character === 'The Contrarian'
-  const hasGrandmasterBSOverrideAvailable = isGrandmaster && !currentPlayerState?.hasUsedGrandmasterBSOverride
-  const defaultBSTargetSeatID = currentTrump
-    && G.round.lastNonPassingPlayerID
-    && G.players[G.round.lastNonPassingPlayerID]?.pendingRevealPlayID
-    && getLatestHiddenPlay(G.table.plays, G.round.lastNonPassingPlayerID)
-    ? G.round.lastNonPassingPlayerID
+  const hasGrandmasterBSOverrideAvailable = canUseClientGrandmasterBSOverride(G, currentSeatID)
+  const defaultBSTargetSeatID = getClientDefaultBSTargetSeatID(G, currentSeatID)
+  // The Pawn's en-passant target needs no separate control: it is one of the seats
+  // `resolveClientBSTargetSelection` accepts, so clicking that block and pressing Call BS
+  // exercises the power.
+  // Any other seat can be clicked. Whether the challenge is legal is decided on the attempt,
+  // so a wrong pick explains itself instead of leaving a dead button.
+  // Any live opponent can be clicked at any time, on or off your turn. The Call BS and Accuse
+  // buttons explain why an attempt is illegal rather than the block refusing to be selected.
+  const selectableTargetSeatIDSet = new Set(
+    G.seatOrder.filter((seatID) => seatID !== currentSeatID && !G.players[seatID].hasLeft),
+  )
+  const resolvedTargetSeatID = selectedTargetSeatID && selectableTargetSeatIDSet.has(selectedTargetSeatID)
+    ? selectedTargetSeatID
     : null
-  const defaultBSTargetPlay = getLatestHiddenPlay(G.table.plays, defaultBSTargetSeatID)
-  const pawnEnPassantTargetPlay = isInteractiveTurn && isPawn
-    ? getPawnEnPassantTargetPlay(G.table.plays, defaultBSTargetPlay, currentSeatID)
-    : null
-  const pawnEnPassantTargetSeatID = pawnEnPassantTargetPlay?.playerID ?? null
-  const grandmasterBSTargetSeatIDs = isInteractiveTurn && isGrandmaster
-    ? G.seatOrder.filter((seatID) => {
-        if (seatID === currentSeatID || !G.players[seatID]?.pendingRevealPlayID) {
-          return false
-        }
-
-        return Boolean(getLatestHiddenPlay(G.table.plays, seatID))
-      })
-    : []
-  const selectableGrandmasterBSTargetSeatIDs = isGrandmaster
-    ? hasGrandmasterBSOverrideAvailable
-      ? grandmasterBSTargetSeatIDs
-      : defaultBSTargetSeatID
-      ? [defaultBSTargetSeatID]
-      : []
-    : []
-  const selectableGrandmasterBSTargetSeatIDSet = new Set(selectableGrandmasterBSTargetSeatIDs)
-  const selectableGrandmasterBSTargetSeatIDsKey = selectableGrandmasterBSTargetSeatIDs.join('|')
-  const resolvedSelectedGrandmasterBSTargetSeatID = selectedGrandmasterBSTargetSeatID
-    && selectableGrandmasterBSTargetSeatIDSet.has(selectedGrandmasterBSTargetSeatID)
-    ? selectedGrandmasterBSTargetSeatID
-    : null
+  // Only a selection made on your own turn re-points the BS target highlight, so browsing
+  // blocks out of turn never makes another player look like the live target.
   const visibleTargetSeatID = bsResolution?.targetPlayerID
-    ?? resolvedSelectedGrandmasterBSTargetSeatID
+    ?? (isInteractiveTurn ? resolvedTargetSeatID : null)
     ?? defaultBSTargetSeatID
   const actionableBSTargetSeatID = visibleTargetSeatID && visibleTargetSeatID !== currentSeatID
     ? visibleTargetSeatID
@@ -1730,27 +1597,6 @@ export function BlowCowBoard({
   const isForeigner = currentPlayerState?.character === 'The Foreigner'
   const isRepeatingPreviousTrump = selectedTrumpRank === G.round.previousTrumpRank
   const canDreamerRepeatPreviousTrump = isDreamer && isRepeatingPreviousTrump
-  const actionableBSTargetPlay = getLatestHiddenPlay(G.table.plays, actionableBSTargetSeatID)
-  const actionableBSTargetCaughtByDreamerRepeatTrump = Boolean(
-    actionableBSTargetPlay
-      && actionableBSTargetPlay.wasTrumpSelection
-      && G.players[actionableBSTargetPlay.playerID]?.character === 'The Dreamer'
-      && G.round.previousTrumpRank !== null
-      && actionableBSTargetPlay.claimedRank === G.round.previousTrumpRank,
-  )
-  const actionableBSTargetCaughtByDreamerIllegalCount = Boolean(
-    actionableBSTargetPlay
-      && G.players[actionableBSTargetPlay.playerID]?.character === 'The Dreamer'
-      && (
-        actionableBSTargetPlay.cards.length > getDisplayedPlayCardCount(actionableBSTargetPlay)
-        || totalCardsOnTable > maxCardsOnTable
-      ),
-  )
-  const actionableBSTargetCaughtByDreamerDirectionChange = Boolean(
-    actionableBSTargetPlay
-      && G.players[actionableBSTargetPlay.playerID]?.character === 'The Dreamer'
-      && actionableBSTargetPlay.usedDreamerDirectionChange,
-  )
   const canSelectTrumpAndPlay = isInteractiveTurn
     && !isFinalTwoResolutionTurn
     && currentTrump === null
@@ -1778,23 +1624,16 @@ export function BlowCowBoard({
     && !isFinalTwoResolutionTurn
     && maxRandomPlayCardCount > 0
     && (currentTrump !== null || !isRepeatingPreviousTrump)
-  const canCallBS = isInteractiveTurn && hasBSTarget
-  const canEnPassant = isInteractiveTurn && Boolean(pawnEnPassantTargetSeatID)
   const canToggleDirection = isInteractiveTurn && (isContrarian || isDreamer)
   const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn
   const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable
   const canUseCat = isInteractiveTurn && currentPlayerState?.character === 'The Cat' && !isResolutionSequenceActive
   const selectedForeignerCardLabel = FOREIGNER_CARD_OPTIONS.find((option) => option.value === selectedForeignerCardCode)?.label ?? 'the selected card'
-  const grandmasterOverrideTargetSelected = Boolean(
-    actionableBSTargetSeatID
-      && resolvedSelectedGrandmasterBSTargetSeatID
-      && actionableBSTargetSeatID !== defaultBSTargetSeatID,
-  )
   const displayedTrumpRank = currentTrump ?? selectedTrumpRank
   const displayedTrumpLabel = currentTrump ? 'Live trump' : 'Selected rank'
   const currentPlayerLabel = playerName.trim() || (isSpectator ? 'Spectator' : getSeatLabel(currentPlayerState?.seatIndex))
   const actingSeatLabel = getSeatDisplayName(actingPlayerID, currentSeatID, playerName, playersFromRoom)
-  const playerColumnTooltip = `You are ${currentPlayerLabel}. The current player is ${actingSeatLabel}`
+  const tableStatusTooltip = `${G.tableStatus}\n\nYou are ${currentPlayerLabel}. The current player is ${actingSeatLabel}.`
   const frontCardsColumnTooltip = canUseCat
     ? `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}. Because you are The Cat, you may click any face-up front card to flip it face down.`
     : `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}`
@@ -1805,12 +1644,6 @@ export function BlowCowBoard({
     ? 'Could not copy room code'
     : 'Copy room code'
   const drunkardRandomPlayCountOptionsKey = drunkardRandomPlayCardCountOptions.join('|')
-
-  useEffect(() => {
-    setSelectedGrandmasterBSTargetSeatID((previousSeatID) => previousSeatID && selectableGrandmasterBSTargetSeatIDSet.has(previousSeatID)
-      ? previousSeatID
-      : null)
-  }, [selectableGrandmasterBSTargetSeatIDsKey])
 
   useEffect(() => {
     if (!isDrunkard) {
@@ -1859,12 +1692,14 @@ export function BlowCowBoard({
     ? resetPileState.cards.slice(dealtResetCardCount)
     : []
   const targetPlayID = bsResolution?.targetPlayID ?? getLatestHiddenPlay(G.table.plays, visibleTargetSeatID)?.id ?? null
-  const directionArrowOrientation = G.round.direction === 'counterclockwise' ? 'up' : 'down'
+  // Seats advance bottom -> left -> top -> right around the ring, so the game's clockwise
+  // direction is also clockwise on screen and the arrow sprite can be read literally.
+  const directionArrowOrientation = G.round.direction
   const directionIndicatorLabel = canToggleDirection
     ? isContrarian
-      ? `Turn direction points ${directionArrowOrientation}. Click to use The Contrarian and flip the direction.`
-      : `Turn direction points ${directionArrowOrientation}. Click to use The Dreamer and change the direction. BS can catch it if the direction stays changed by the end of your turn.`
-    : `Turn direction points ${directionArrowOrientation}.`
+      ? `Turn direction is ${directionArrowOrientation}. Click to use The Contrarian and flip the direction.`
+      : `Turn direction is ${directionArrowOrientation}. Click to use The Dreamer and change the direction. BS can catch it if the direction stays changed by the end of your turn.`
+    : `Turn direction is ${directionArrowOrientation}.`
   const latestTablePlay = G.table.plays[G.table.plays.length - 1] ?? null
   const tableRevealKey = G.table.plays.map((play) => `${play.id}:${play.revealedAtTurn ?? 'hidden'}:${(play.revealedCardIDs ?? []).join(',')}`).join('|')
   const catHiddenKey = G.table.plays.map((play) => `${play.id}:${(play.rehiddenCardIDs ?? []).join(',')}`).join('|')
@@ -2273,7 +2108,9 @@ export function BlowCowBoard({
     return {
       id: seatID,
       seatIndex: player.seatIndex,
+      avatarSprite: getAvatarSprite(matchID, seatID),
       characterName: player.character,
+      characterSprite: G.useCharacters ? getCharacterCardSprite(player.character) : '',
       frontCards,
       handCount: player.hand.length,
       hasLeft: player.hasLeft,
@@ -2286,6 +2123,10 @@ export function BlowCowBoard({
       points: player.points,
     }
   })
+
+  // The viewing player's block sits in the hand row rather than on the ring, which frees the
+  // ring's bottom arc and keeps the whole board shorter. Spectators have no block to dock.
+  const dockedSeatRow = seatRows.find((seat) => seat.id === currentSeatID) ?? null
 
   const frontCardIDsKey = seatRows.map((seat) => `${seat.id}:${seat.frontCards.map((card) => card.id).join(',')}`).join('|')
   const enteringFrontCardIDSet = new Set(enteringFrontCardIDs)
@@ -2497,10 +2338,6 @@ export function BlowCowBoard({
       : [...previousIDs, cardID])
   }
 
-  const clearSelection = () => {
-    setSelectedCardIDs([])
-  }
-
   const sendSelectionToTable = (nextTrump: BlowCowRank | null) => {
     if (selectedCards.length === 0 || (!isDreamer && selectedCards.length > 2)) {
       return
@@ -2540,31 +2377,96 @@ export function BlowCowBoard({
     setSelectedCardIDs([])
   }
 
-  const handleGrandmasterBSTargetSelect = (seatID: string) => {
-    if (!isGrandmaster || !isInteractiveTurn || !selectableGrandmasterBSTargetSeatIDSet.has(seatID)) {
+  const handleSeatSelect = (seatID: string) => {
+    if (!selectableTargetSeatIDSet.has(seatID)) {
       return
     }
 
-    setSelectedGrandmasterBSTargetSeatID((previousSeatID) => previousSeatID === seatID ? null : seatID)
+    clearFailMessage()
+    setSelectedTargetSeatID((previousSeatID) => previousSeatID === seatID ? null : seatID)
   }
 
-  const handleCallBS = () => {
-    if (!canCallBS) {
+  /**
+   * Mirrors every server precondition for `callBS` so an illegal attempt can explain itself.
+   * Returns null when the move should be dispatched. See `src/ui/bsTargeting.ts`.
+   */
+  const getCallBSFailure = (seatID: string) => {
+    const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
+
+    if (G.gameStatus !== 'active') {
+      return 'The match is not running.'
+    }
+
+    if (isResolutionSequenceActive) {
+      return 'Wait for the current resolution to finish.'
+    }
+
+    if (!isCurrentPlayersTurn) {
+      return 'You can only call BS on your own turn.'
+    }
+
+    if (!currentTrump) {
+      return 'No trump rank yet, so there is nothing to challenge.'
+    }
+
+    if (seatID === currentSeatID) {
+      return 'You cannot call BS on yourself.'
+    }
+
+    if (!getClientPendingPlay(G, seatID)) {
+      return `${seatName} has no hidden cards to challenge.`
+    }
+
+    if (resolveClientBSTargetSelection(G, currentSeatID, seatID)) {
+      return null
+    }
+
+    if (isGrandmaster && !hasGrandmasterBSOverrideAvailable) {
+      return 'You already used The Grandmaster override this match.'
+    }
+
+    return defaultBSTargetSeatID
+      ? `Only ${getSeatDisplayName(defaultBSTargetSeatID, currentSeatID, playerName, playersFromRoom)} can be challenged right now.`
+      : 'Only the latest non-passing player can be challenged right now.'
+  }
+
+  /** Accuse is the same move, so it inherits every Call BS precondition plus a real cheat. */
+  const getAccuseFailure = (seatID: string) => {
+    const callBSFailure = getCallBSFailure(seatID)
+    if (callBSFailure) {
+      return callBSFailure
+    }
+
+    const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seatID)
+    if (getDreamerCheatForPlay(G, targetSelection?.targetPlay ?? null)) {
+      return null
+    }
+
+    const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
+    return `Nothing to accuse. ${seatName} did not break a Dreamer rule on that play.`
+  }
+
+  const handleSeatCallBS = (seatID: string) => {
+    const failure = getCallBSFailure(seatID)
+    if (failure) {
+      showFailMessage(failure)
       return
     }
 
-    moves.callBS(actionableBSTargetSeatID ? { targetPlayerID: actionableBSTargetSeatID } : undefined)
-    setSelectedGrandmasterBSTargetSeatID(null)
+    moves.callBS({ targetPlayerID: seatID })
+    setSelectedTargetSeatID(null)
     setSelectedCardIDs([])
   }
 
-  const handleEnPassant = () => {
-    if (!canEnPassant || !pawnEnPassantTargetSeatID) {
+  const handleSeatAccuse = (seatID: string) => {
+    const failure = getAccuseFailure(seatID)
+    if (failure) {
+      showFailMessage(failure)
       return
     }
 
-    moves.callBS({ targetPlayerID: pawnEnPassantTargetSeatID })
-    setSelectedGrandmasterBSTargetSeatID(null)
+    moves.callBS({ targetPlayerID: seatID })
+    setSelectedTargetSeatID(null)
     setSelectedCardIDs([])
   }
 
@@ -2591,6 +2493,80 @@ export function BlowCowBoard({
     }
 
     moves.catHideCard({ cardID })
+  }
+
+  // These two nodes are measured by the card-travel animations, so every seat must keep a
+  // real, visible element registered for as long as it is on the board.
+  const registerFrontCard = (overlayCardID: string, element: HTMLDivElement | null) => {
+    if (element) {
+      frontCardRefs.current.set(overlayCardID, element)
+      return
+    }
+
+    frontCardRefs.current.delete(overlayCardID)
+  }
+
+  const registerHandCountPill = (seatID: string, element: HTMLSpanElement | null) => {
+    if (element) {
+      handCountPillRefs.current.set(seatID, element)
+      return
+    }
+
+    handCountPillRefs.current.delete(seatID)
+  }
+
+  const handleOpenCharacterCard = (seat: SeatRow) => {
+    if (!seat.characterSprite) {
+      return
+    }
+
+    setSelectedCharacterCard({
+      playerName: seat.name,
+      seatLabel: getSeatLabel(seat.seatIndex),
+      characterName: seat.characterName ?? 'Unknown character',
+      sprite: seat.characterSprite,
+    })
+  }
+
+  const renderSeatTargetActions = (seat: SeatRow) => {
+    const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seat.id)
+    const dreamerCheat = getDreamerCheatForPlay(G, targetSelection?.targetPlay ?? null)
+    const callBSFailure = getCallBSFailure(seat.id)
+
+    return (
+      <div className="seat-target-actions">
+        <button
+          className="seat-target-button"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleSeatCallBS(seat.id)
+          }}
+          title={callBSFailure
+            ?? (targetSelection?.kind === 'pawnEnPassant'
+              ? `Use The Pawn to challenge ${seat.name}'s earlier hidden play.`
+              : targetSelection?.kind === 'grandmasterOverride'
+              ? `Challenge ${seat.name}. This spends The Grandmaster override.`
+              : `Challenge ${seat.name}, the latest non-passing player.`)}
+          type="button"
+        >
+          Call BS
+        </button>
+
+        <button
+          className="seat-target-button accuse"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleSeatAccuse(seat.id)
+          }}
+          title={dreamerCheat
+            ? `Accuse ${seat.name}: as The Dreamer they ${getDreamerCheatLabel(dreamerCheat)}.`
+            : `Accuse ${seat.name} of cheating as The Dreamer.`}
+          type="button"
+        >
+          Accuse
+        </button>
+      </div>
+    )
   }
 
   const handleCopyRoomCode = () => {
@@ -2663,6 +2639,7 @@ export function BlowCowBoard({
         : `Choose ${selectedTrumpRank} as trump and play up to 2 selected cards.`
       : `Trump is already ${currentTrump}. Use Play to make the claim.`,
     disabled: !canSelectTrumpAndPlay,
+    icon: PLAY_ICON_SPRITE,
     key: 'select-trump',
     label: 'Select Trump + Play',
     onClick: () => {
@@ -2679,6 +2656,7 @@ export function BlowCowBoard({
         : `Play the selected cards and claim they are ${currentTrump}.`
       : 'Pick a trump rank first.',
     disabled: !canPlayCards,
+    icon: PLAY_ICON_SPRITE,
     key: 'play',
     label: 'Play',
     onClick: () => {
@@ -2697,54 +2675,17 @@ export function BlowCowBoard({
       ? 'Need cards in hand and room on the table to use Play Random.'
       : `Use The Drunkard to randomly select ${selectedDrunkardRandomPlayCardCount} card(s) from your hand and claim they are ${currentTrump}. If you only ever use Play Random before leaving, you lose 3 points.`,
     disabled: !canPlayRandomCards,
+    icon: PLAY_ICON_SPRITE,
     key: 'play-random',
     label: 'Play Random',
     onClick: handlePlayRandom,
   }
 
-  const enPassantAction = {
-    description: isResolutionSequenceActive
-      ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
-      : pawnEnPassantTargetSeatID && defaultBSTargetSeatID
-      ? `Use The Pawn to call BS on ${getSeatDisplayName(pawnEnPassantTargetSeatID, currentSeatID, playerName, playersFromRoom)} because ${getSeatDisplayName(defaultBSTargetSeatID, currentSeatID, playerName, playersFromRoom)} just played 2 cards.`
-      : defaultBSTargetSeatID && defaultBSTargetPlay && defaultBSTargetPlay.cards.length !== 2
-      ? `${getSeatDisplayName(defaultBSTargetSeatID, currentSeatID, playerName, playersFromRoom)} did not just play 2 cards, so En Passant is unavailable.`
-      : defaultBSTargetSeatID
-      ? `En Passant needs another earlier hidden non-passing play before ${getSeatDisplayName(defaultBSTargetSeatID, currentSeatID, playerName, playersFromRoom)}.`
-      : 'No valid En Passant target in the current state.',
-    disabled: !canEnPassant,
-    key: 'en-passant',
-    label: 'En Passant',
-    onClick: handleEnPassant,
-  }
-
+  // Call BS and Accuse are not here: they live on the player blocks, because both need a
+  // clicked target. See `renderSeatTargetActions`.
   const actionButtons = [
     currentTrump === null ? selectTrumpAction : playAction,
     ...(isDrunkard ? [playRandomAction] : []),
-    {
-      description: isResolutionSequenceActive
-        ? `${isBSSequenceActive ? 'A BS call is already being resolved for everyone at the table.' : 'Reset is already being resolved for everyone at the table.'}`
-        : hasBSTarget && actionableBSTargetSeatID
-        ? `${grandmasterOverrideTargetSelected
-            ? `Challenge ${getSeatDisplayName(actionableBSTargetSeatID, currentSeatID, playerName, playersFromRoom)}. This uses The Grandmaster because they were not the latest non-passing player.`
-            : `Challenge ${getSeatDisplayName(actionableBSTargetSeatID, currentSeatID, playerName, playersFromRoom)}, the latest non-passing player.`}${actionableBSTargetCaughtByDreamerRepeatTrump
-            ? ' Because they are The Dreamer and reused the previous trump on the opening play, BS also catches that cheat.'
-          : actionableBSTargetCaughtByDreamerDirectionChange
-          ? ' Because they are The Dreamer and changed the turn direction during that hidden play, BS also catches that cheat.'
-            : actionableBSTargetCaughtByDreamerIllegalCount
-            ? ' Because they are The Dreamer and broke the normal card-count limits, BS also catches that cheat.'
-            : hasGrandmasterBSOverrideAvailable && grandmasterBSTargetSeatIDs.length > 1
-            ? ' As The Grandmaster, you may click any player row with hidden cards to change the BS target once.'
-            : ''}`
-        : isGrandmaster && selectableGrandmasterBSTargetSeatIDs.length > 0
-        ? 'Click a player row with hidden cards to choose the BS target.'
-        : 'No valid BS target in the current state.',
-      disabled: !canCallBS,
-      key: 'call-bs',
-      label: 'Call BS',
-      onClick: handleCallBS,
-    },
-    ...(isPawn ? [enPassantAction] : []),
     {
       description: isResolutionSequenceActive
         ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
@@ -2756,6 +2697,7 @@ export function BlowCowBoard({
         ? 'Pass. As The Foreigner, you may also choose one outside card to add to your hand, or leave the selector on None.'
         : 'End your turn without playing cards. If everyone passes, the table cards return to their owners and the round restarts.',
       disabled: !canPass,
+      icon: PASS_ICON_SPRITE,
       key: 'pass',
       label: 'Pass',
       onClick: handlePass,
@@ -2769,6 +2711,7 @@ export function BlowCowBoard({
         ? 'Reset is legal because the table is at capacity.'
         : `Need ${maxCardsOnTable - totalCardsOnTable} more card(s) on the table before reset is legal.`,
       disabled: !canCallReset,
+      icon: RESET_ICON_SPRITE,
       key: 'call-reset',
       label: 'Call Reset',
       onClick: handleCallReset,
@@ -3000,6 +2943,49 @@ export function BlowCowBoard({
         </div>
       ) : null}
 
+      {!isStaging && isHistoryOpen ? (
+        <HistoryOverlay
+          historyEvents={historyEvents}
+          onClose={() => {
+            setIsHistoryOpen(false)
+          }}
+        />
+      ) : null}
+
+      {!isStaging && isCharacterStripOpen && G.useCharacters ? (
+        <CharacterStripOverlay
+          getSeatLabel={getSeatLabel}
+          onClose={() => {
+            setIsCharacterStripOpen(false)
+          }}
+          onOpenCharacterCard={handleOpenCharacterCard}
+          seats={seatRows}
+        />
+      ) : null}
+
+      {/*
+        * Washes the mono felt red while a BS call is being resolved. Keyed on the resolution id
+        * so a fresh call restarts the animation, which means no state and no timeout to manage.
+        */}
+      {bsResolution ? (
+        <div aria-hidden="true" className="board-bs-flash" key={bsResolution.id} />
+      ) : null}
+
+      {/*
+        * Board level rather than inside the hub, so appearing and clearing never reflows the
+        * trump badge or the direction control underneath it.
+        */}
+      {activeAnnouncement ? (
+        <div
+          aria-live="polite"
+          className={`match-announcement board-announcement ${activeAnnouncement.tone}`}
+          role="status"
+        >
+          <strong>{activeAnnouncement.title}</strong>
+          <span>{activeAnnouncement.detail}</span>
+        </div>
+      ) : null}
+
       {roomError ? (
         <div className="board-error-toast error-banner" role="alert">
           {roomError}
@@ -3083,6 +3069,37 @@ export function BlowCowBoard({
           </div>
         </div>
         <div className="board-hero-actions">
+          {!isStaging ? (
+            <>
+              <button
+                aria-expanded={isHistoryOpen}
+                aria-haspopup="dialog"
+                className={`subtle-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
+                onClick={() => {
+                  setIsHistoryOpen((previousValue) => !previousValue)
+                }}
+                type="button"
+              >
+                History
+                <span className="history-count-pill">{historyEvents.length}</span>
+              </button>
+
+              {G.useCharacters ? (
+                <button
+                  aria-expanded={isCharacterStripOpen}
+                  aria-haspopup="dialog"
+                  className={`subtle-button character-strip-toggle ${isCharacterStripOpen ? 'active' : ''}`}
+                  onClick={() => {
+                    setIsCharacterStripOpen((previousValue) => !previousValue)
+                  }}
+                  type="button"
+                >
+                  Characters
+                </button>
+              ) : null}
+            </>
+          ) : null}
+
           <span className={`status-pill ${isConnected ? 'online' : 'offline'}`}>
             {isConnected ? 'Socket Connected' : 'Socket Reconnecting'}
           </span>
@@ -3188,313 +3205,47 @@ export function BlowCowBoard({
         </section>
       ) : (
       <>
-      <div className="player-info-layout">
-        <section className="game-table-shell">
-        <div className="table-board-header game-table-header">
-          <div className="header-title-with-info">
-            <h2>Player Info</h2>
-            <InlineInfoTooltip tooltip={G.tableStatus} />
-          </div>
-          <div className="game-table-header-actions">
-            <button
-              aria-controls="table-history-panel"
-              aria-expanded={isHistoryOpen}
-              className={`subtle-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
-              onClick={() => {
-                setIsHistoryOpen((previousValue) => !previousValue)
-              }}
-              type="button"
-            >
-              {isHistoryOpen ? 'Hide History' : 'History'}
-              <span className="history-count-pill">{historyEvents.length}</span>
-            </button>
-            {G.useCharacters ? (
-              <button
-                aria-controls="character-strip-content"
-                aria-expanded={!isCharacterStripCollapsed}
-                className="subtle-button character-strip-toggle"
-                onClick={() => {
-                  setIsCharacterStripCollapsed((previousValue) => !previousValue)
-                }}
-                type="button"
-              >
-                {isCharacterStripCollapsed ? 'Show Character Cards' : 'Hide Character Cards'}
-              </button>
-            ) : null}
-            <div aria-label={`${displayedTrumpLabel}: ${displayedTrumpRank}`} className="trump-rank-inline">
-              <span>{displayedTrumpLabel}</span>
-              <strong>{displayedTrumpRank}</strong>
-            </div>
-          </div>
-        </div>
-
-        {G.useCharacters ? (
-        <div className={`character-strip-panel${isCharacterStripCollapsed ? ' collapsed' : ''}`}>
-          <span className="room-note character-strip-count">
-            {seatRows.length} public character {seatRows.length === 1 ? 'card' : 'cards'}
-          </span>
-
-          {!isCharacterStripCollapsed ? (
-          <div className="character-strip" id="character-strip-content" role="list">
-            {seatRows.map((seat) => {
-              const characterSprite = getCharacterCardSprite(seat.characterName)
-
-              return (
-                <article
-                  className={`character-card-item${seat.isViewingPlayer ? ' viewing-player' : ''}${seat.hasLeft ? ' left' : ''}`}
-                  key={`character-${seat.id}`}
-                  role="listitem"
-                >
-                  <div className="character-card-player">
-                    <strong>{seat.name}</strong>
-                    <span className="room-note character-card-seat">{getSeatLabel(seat.seatIndex)}</span>
-                  </div>
-
-                  {characterSprite ? (
-                    <button
-                      aria-haspopup="dialog"
-                      aria-label={`Open ${seat.name}'s ${seat.characterName ?? 'character'} card`}
-                      className="character-card-trigger"
-                      onClick={() => {
-                        setSelectedCharacterCard({
-                          playerName: seat.name,
-                          seatLabel: getSeatLabel(seat.seatIndex),
-                          characterName: seat.characterName ?? 'Unknown character',
-                          sprite: characterSprite,
-                        })
-                      }}
-                      type="button"
-                    >
-                      <img
-                        alt={`${seat.name}: ${seat.characterName ?? 'No character assigned'}`}
-                        className="character-card-image"
-                        src={characterSprite}
-                      />
-                    </button>
-                  ) : (
-                    <div className="character-card-fallback">
-                      {seat.characterName ?? 'No character assigned'}
-                    </div>
-                  )}
-                </article>
-              )
-            })}
-          </div>
-          ) : null}
-        </div>
-        ) : null}
-
-        {isHistoryOpen ? (
-          <div className="history-panel" id="table-history-panel">
-            <div className="history-panel-header">
-              <strong>Major Events</strong>
-              <span className="room-note">Scroll from the start of the game to the latest action.</span>
-            </div>
-
-            <div className="history-scroll">
-              {historyEvents.map((event) => (
-                <article className={`history-entry ${event.kind}`} key={event.id}>
-                  <span className={`history-entry-label ${event.kind}`}>
-                    {HISTORY_EVENT_LABELS[event.kind]}
-                  </span>
-                  <h3>{event.title}</h3>
-                  <p>{event.detail}</p>
-                </article>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        <div className="player-table-wrap">
-          <table className="player-table">
-            <colgroup>
-              <col className="player-table-col player-table-col-player" />
-              <col className="player-table-col player-table-col-points" />
-              <col className="player-table-col player-table-col-hand" />
-              <col className="player-table-col player-table-col-front" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>
-                  <span className="table-header-with-info">
-                    <span>Player</span>
-                    <InlineInfoTooltip alignment="start" tooltip={playerColumnTooltip} />
-                  </span>
-                </th>
-                <th>Points</th>
-                <th>Cards In Hand</th>
-                <th>
-                  <span className="table-header-with-info">
-                    <span>Cards In Front</span>
-                    <InlineInfoTooltip alignment="end" tooltip={frontCardsColumnTooltip} />
-                  </span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {seatRows.map((seat) => (
-                <tr
-                  className={[
-                    seat.isActingPlayer ? 'current-player-row' : '',
-                    selectableGrandmasterBSTargetSeatIDSet.has(seat.id) ? 'grandmaster-targetable-row' : '',
-                    seat.isTargetPlayer ? 'target-player-row' : '',
-                    seat.isViewingPlayer ? 'viewing-player-row' : '',
-                  ].filter(Boolean).join(' ')}
-                  key={seat.id}
-                  onClick={selectableGrandmasterBSTargetSeatIDSet.has(seat.id) ? () => {
-                    handleGrandmasterBSTargetSelect(seat.id)
-                  } : undefined}
-                  onKeyDown={selectableGrandmasterBSTargetSeatIDSet.has(seat.id) ? (event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault()
-                      handleGrandmasterBSTargetSelect(seat.id)
-                    }
-                  } : undefined}
-                  role={selectableGrandmasterBSTargetSeatIDSet.has(seat.id) ? 'button' : undefined}
-                  tabIndex={selectableGrandmasterBSTargetSeatIDSet.has(seat.id) ? 0 : undefined}
-                  title={selectableGrandmasterBSTargetSeatIDSet.has(seat.id)
-                    ? `Select ${seat.name} as the BS target`
-                    : undefined}
-                >
-                  <td>
-                    <div className="player-row-main">
-                      <div className="player-row-identity">
-                        <strong data-punishment-target-name={seat.id}>
-                          {seat.name}
-                        </strong>
-                      </div>
-                      <div className="player-row-meta">
-                        <span className="seat-tag">{getSeatLabel(seat.seatIndex)}</span>
-                        {seat.isTargetPlayer ? <span className="seat-tag target">BS Target</span> : null}
-                        {seat.hasLeft ? (
-                          <span className="seat-tag offline">Left</span>
-                        ) : (
-                          <span className={`seat-tag ${seat.isConnected ? 'online' : 'offline'}`}>
-                            {seat.isConnected ? 'Connected' : 'Offline'}
-                          </span>
-                        )}
-                      </div>
-                      {activePlayerCallout?.seatID === seat.id ? (
-                        <span aria-live="polite" className="player-play-callout" role="status">
-                          {activePlayerCallout.text}
-                        </span>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="points-cell">
-                      <span
-                        aria-label={`Points: ${seat.points}. ${seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet.'}`}
-                        className={`hand-count-pill points-pill${flashingPointSeatIDSet.has(seat.id) ? ' flashing' : ''}`}
-                        title={seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet'}
-                      >
-                        {seat.points}
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    <span
-                      className="hand-count-pill"
-                      ref={(element) => {
-                        if (element) {
-                          handCountPillRefs.current.set(seat.id, element)
-                          return
-                        }
-
-                        handCountPillRefs.current.delete(seat.id)
-                      }}
-                    >
-                      {seat.handCount}
-                    </span>
-                  </td>
-                  <td>
-                    {seat.frontCards.length > 0 ? (
-                      <div className="front-card-row">
-                        {seat.frontCards.map((card) => {
-                          const catHideLabel = `Use The Cat to flip ${getCardLabel(card.sprite)} face down`
-
-                          return (
-                            <div
-                              aria-label={card.isCatActionable ? catHideLabel : undefined}
-                              className={`front-card ${card.faceDown ? 'face-down' : 'face-up'}${card.isDeparted ? ' departed-placeholder' : ''}${card.isFlipping ? ' flipping' : ''}${card.isTargeted ? ' target-card' : ''}${enteringFrontCardIDSet.has(card.id) ? ' entering-placeholder' : ''}${card.isCatActionable ? ' cat-actionable' : ''}`}
-                              key={card.id}
-                              onClick={card.isCatActionable ? () => {
-                                handleCatHideCard(card.cardID)
-                              } : undefined}
-                              onKeyDown={card.isCatActionable ? (event) => {
-                                if (event.key !== 'Enter' && event.key !== ' ') {
-                                  return
-                                }
-
-                                event.preventDefault()
-                                handleCatHideCard(card.cardID)
-                              } : undefined}
-                              ref={(element) => {
-                                if (element) {
-                                  frontCardRefs.current.set(card.id, element)
-                                  return
-                                }
-
-                                frontCardRefs.current.delete(card.id)
-                              }}
-                              role={card.isCatActionable ? 'button' : undefined}
-                              tabIndex={card.isCatActionable ? 0 : undefined}
-                              title={card.isCatActionable ? catHideLabel : undefined}
-                            >
-                              <img
-                                alt={card.faceDown ? 'Face-down card' : getCardLabel(card.sprite)}
-                                src={getFrontCardSprite(card.faceDown ? CARD_BACK_FILENAME : card.sprite)}
-                              />
-                            </div>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      <span className="front-card-empty">No cards in front</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        </section>
-
-        <button
-          aria-label={directionIndicatorLabel}
-          className={`turn-direction-indicator ${directionArrowOrientation}${canToggleDirection ? ' contrarian-ready' : ''}`}
-          disabled={!canToggleDirection}
-          onClick={handleToggleDirection}
-          title={canToggleDirection
+      <PlayerRing
+        anchorSeatID={currentSeatID}
+        calloutSeatID={activePlayerCallout?.seatID ?? null}
+        calloutText={activePlayerCallout?.text ?? ''}
+        dockedSeatID={dockedSeatRow?.id ?? null}
+        enteringCardIDSet={enteringFrontCardIDSet}
+        flashingPointSeatIDSet={flashingPointSeatIDSet}
+        getSeatLabel={getSeatLabel}
+        onCatHideCard={handleCatHideCard}
+        onOpenCharacterCard={handleOpenCharacterCard}
+        onSelectSeat={handleSeatSelect}
+        registerFrontCard={registerFrontCard}
+        registerHandCountPill={registerHandCountPill}
+        renderTargetActions={renderSeatTargetActions}
+        seats={seatRows}
+        selectableSeatIDSet={selectableTargetSeatIDSet}
+        selectedSeatID={resolvedTargetSeatID}
+      >
+        <TableCenterHub
+          canToggleDirection={canToggleDirection}
+          directionArrowOrientation={directionArrowOrientation}
+          directionIndicatorLabel={directionIndicatorLabel}
+          directionToggleTitle={canToggleDirection
             ? isContrarian
               ? 'Use The Contrarian to flip the turn direction.'
               : 'Use The Dreamer to change the direction. BS can catch this if the direction stays changed.'
             : undefined}
-          type="button"
-        >
-          <span className="turn-direction-caption">Direction</span>
-          <div aria-hidden="true" className="turn-direction-arrow" />
-        </button>
-      </div>
+          failMessage={failMessage}
+          frontCardsTooltip={frontCardsColumnTooltip}
+          maxCardsOnTable={maxCardsOnTable}
+          onToggleDirection={handleToggleDirection}
+          tableStatus={tableStatusTooltip}
+          totalCardsOnTable={totalCardsOnTable}
+          trumpLabel={displayedTrumpLabel}
+          trumpRank={displayedTrumpRank}
+        />
+      </PlayerRing>
 
       <section className="bottom-play-strip">
         <div className={`hand-stage${isInteractiveTurn ? ' active-turn' : ''}${isPunishmentFlashActive ? ' punishment-flash' : ''}`}>
-          <div className="table-board-header hand-stage-header">
-            <h2>{isSpectator ? 'Spectator view' : 'Your cards'}</h2>
-            <div className="hand-stage-tools">
-              <span className="hand-selection-count">{selectedCardIDs.length} selected</span>
-              <span className="hand-sort-pill">Rank sorted</span>
-              <button
-                className="subtle-button"
-                disabled={selectedCardIDs.length === 0}
-                onClick={clearSelection}
-                type="button"
-              >
-                Clear
-              </button>
-            </div>
-          </div>
-
+          <div className="hand-play-row">
           <div className="hand-scroll-viewport">
             {removingHandCards.length > 0 ? (
               <div aria-hidden="true" className="hand-scroll-animation-layer">
@@ -3544,25 +3295,26 @@ export function BlowCowBoard({
               })}
             </div>
           </div>
-        </div>
 
-        <aside className={`action-stage${isInteractiveTurn ? ' active-turn' : ''}${isPunishmentFlashActive ? ' punishment-flash' : ''}${activeAnnouncement ? ' has-announcement-overlay' : ''}`}>
-          {activeAnnouncement ? (
-            <div
-              aria-live="polite"
-              className={`match-announcement action-stage-announcement-overlay ${activeAnnouncement.tone}`}
-              role="status"
-            >
-              <strong>{activeAnnouncement.title}</strong>
-              <span>{activeAnnouncement.detail}</span>
-            </div>
+          {dockedSeatRow ? (
+            <SeatBlock
+              calloutText={activePlayerCallout?.seatID === dockedSeatRow.id ? activePlayerCallout.text : null}
+              enteringCardIDSet={enteringFrontCardIDSet}
+              isDocked
+              isPointsFlashing={flashingPointSeatIDSet.has(dockedSeatRow.id)}
+              isSelectable={false}
+              isSelected={false}
+              onCatHideCard={handleCatHideCard}
+              onOpenCharacterCard={handleOpenCharacterCard}
+              onSelect={handleSeatSelect}
+              registerFrontCard={registerFrontCard}
+              registerHandCountPill={registerHandCountPill}
+              seat={dockedSeatRow}
+              seatLabel={getSeatLabel(dockedSeatRow.seatIndex)}
+            />
           ) : null}
 
-          <div className="action-stage-header">
-            <h2>Actions</h2>
-          </div>
-
-          <div className="action-button-list">
+          <div className="hand-action-row">
             {actionButtons.map((action) => (
               <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
                 {action.key === 'select-trump' ? (
@@ -3589,7 +3341,7 @@ export function BlowCowBoard({
                       title={action.description}
                       type="button"
                     >
-                      {action.label}
+                      <ActionButtonContent icon={action.icon} label={action.label} />
                     </button>
                   </div>
                 ) : action.key === 'play-random' && isDrunkard ? (
@@ -3633,7 +3385,7 @@ export function BlowCowBoard({
                       title={action.description}
                       type="button"
                     >
-                      {action.label}
+                      <ActionButtonContent icon={action.icon} label={action.label} />
                     </button>
                   </div>
                 ) : action.key === 'pass' && isForeigner ? (
@@ -3660,7 +3412,7 @@ export function BlowCowBoard({
                       title={action.description}
                       type="button"
                     >
-                      {action.label}
+                      <ActionButtonContent icon={action.icon} label={action.label} />
                     </button>
                   </div>
                 ) : (
@@ -3671,7 +3423,7 @@ export function BlowCowBoard({
                     title={action.description}
                     type="button"
                   >
-                    {action.label}
+                    <ActionButtonContent icon={action.icon} label={action.label} />
                   </button>
                 )}
                 <div className="action-button-tooltip" role="tooltip">
@@ -3680,7 +3432,8 @@ export function BlowCowBoard({
               </div>
             ))}
           </div>
-        </aside>
+          </div>
+        </div>
       </section>
 
       </>

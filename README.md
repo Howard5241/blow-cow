@@ -40,7 +40,9 @@ See `RULES.md` for the current game rules draft.
 - `src/ui/` contains the game board UI and card sprite helpers
 - `server/server.cjs` contains the local boardgame.io server runtime
 - `data/completed-games/` is generated locally when finished matches are archived
+- `scripts/check-blowcow-gameplay.ts` contains the targeted gameplay checks
 - `.github/copilot-instructions.md` contains workspace guidance for Copilot in this repo
+- `CLAUDE.md` contains the equivalent workspace guidance for Claude Code
 
 ## Completed Match Archives
 

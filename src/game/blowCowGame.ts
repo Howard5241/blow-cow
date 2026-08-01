@@ -1884,6 +1884,17 @@ function applyLeaveCharacterEffect(state: BlowCowState, playerID: string, turnNu
   }
 }
 
+function removeLeftPlayerTableCards(state: BlowCowState, playerID: string) {
+  const removedCards = getPlayerFrontCards(state, playerID)
+  if (removedCards.length === 0) {
+    return removedCards
+  }
+
+  state.table.plays = state.table.plays.filter((play) => play.playerID !== playerID)
+
+  return removedCards
+}
+
 function markPlayerLeft(
   state: BlowCowState,
   playerID: string,
@@ -1898,6 +1909,7 @@ function markPlayerLeft(
   player.hasLeft = true
   player.leaveOrder = Object.values(state.players).filter((entry) => entry.hasLeft).length
   player.pendingRevealPlayID = null
+  const removedTableCards = removeLeftPlayerTableCards(state, playerID)
   appendHistoryEvent(
     state,
     'leave',
@@ -1910,7 +1922,20 @@ function markPlayerLeft(
     kind: 'leave',
     detail,
     leaveOrder: player.leaveOrder,
+    cards: removedTableCards,
   })
+
+  if (removedTableCards.length > 0) {
+    appendHistoryEvent(
+      state,
+      'system',
+      `${removedTableCards.length} card(s) left the game with ${formatPlayerLabel(state, playerID)}`,
+      `${removedTableCards.map((card) => formatCardLabel(card)).join(', ')} sat in front of them on the table and were removed from the game entirely.`,
+      playerID,
+      turnNumber,
+    )
+  }
+
   applyLeaveCharacterEffect(state, playerID, turnNumber)
   updateRoundCapacity(state)
 }

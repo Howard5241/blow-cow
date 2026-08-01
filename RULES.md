@@ -138,6 +138,9 @@
 - At the start of every new round, before the first turn begins, each player with no cards in hand immediately leaves the game.
 - During a round, if the current player starts their turn with no cards in hand, that player immediately leaves the game.
 - Before that exact moment, the player still counts toward `n`, pass counting, `MaxCardsOnTable`, and next-round setup.
+- When a player leaves, any cards in front of that player on the table disappear and are removed from the game entirely.
+- Those removed cards no longer count toward `MaxCardsOnTable`, and they are never returned, redistributed by `Call Reset`, or taken as punishment.
+- Because the round-start leave check happens after the previous round has been fully resolved, a player leaving at round start normally has no cards on the table.
 - When that happens, `n` is reduced by 1.
 - The current round immediately starts using the new `MaxCardsOnTable` value for the updated `n`.
 - A player who leaves no longer participates in future rounds.
