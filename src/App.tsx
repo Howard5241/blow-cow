@@ -17,6 +17,7 @@ import {
   type BlowCowSetupData,
 } from './game/blowCowGame.ts'
 import {
+  BLOW_COW_CHARACTER_DESCRIPTIONS,
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   type BlowCowImplementedCharacterName,
 } from './game/blowCowCharacters.ts'
@@ -666,20 +667,28 @@ function App() {
                   {BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.map((characterName) => {
                     const isSelected = effectiveCharacterPool.includes(characterName)
                     const isConfusedLocked = characterName === 'The Confused' && !isConfusedAvailableInManualDeck
+                    const tooltip = `${BLOW_COW_CHARACTER_DESCRIPTIONS[characterName]}${isConfusedLocked ? ' Requires J to be in the manual deck.' : ''}`
 
                     return (
                       <button
                         aria-pressed={isSelected}
+                        aria-describedby={`character-chip-tooltip-${characterName.replaceAll(' ', '-').toLowerCase()}`}
                         className={`character-chip ${isSelected ? 'selected' : ''}`}
                         disabled={isBusy || isConfusedLocked}
                         key={characterName}
                         onClick={() => {
                           toggleCharacterPoolCharacter(characterName)
                         }}
-                        title={isConfusedLocked ? 'The Confused requires J to be in the manual deck.' : undefined}
                         type="button"
                       >
                         {characterName}
+                        <span
+                          className="character-chip-tooltip"
+                          id={`character-chip-tooltip-${characterName.replaceAll(' ', '-').toLowerCase()}`}
+                          role="tooltip"
+                        >
+                          {tooltip}
+                        </span>
                       </button>
                     )
                   })}

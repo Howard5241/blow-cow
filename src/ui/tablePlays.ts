@@ -25,6 +25,35 @@ export function getHiddenOverlayCardIDs(play: BlowCowTablePlay) {
     .map((card) => `${play.id}-${card.id}`)
 }
 
+/**
+ * Everything the table is actually showing face down, Cat-rehidden cards included. Mirrors the
+ * server's `getFaceDownCardsForPlay`, which the BS reveal procedure walks. This is deliberately
+ * not `getHiddenOverlayCardIDs`: that one ignores `rehiddenCardIDs` because re-hiding a card must
+ * not make its owner challengeable again.
+ */
+export function getFaceDownOverlayCardIDs(play: BlowCowTablePlay) {
+  const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
+  const catHiddenCardIDSet = getCatHiddenCardIDSet(play)
+
+  return play.cards
+    .filter((card) => catHiddenCardIDSet.has(card.id)
+      || (play.revealedAtTurn === null && !revealedCardIDSet.has(card.id)))
+    .map((card) => `${play.id}-${card.id}`)
+}
+
+/**
+ * The exact complement of `getFaceDownOverlayCardIDs`. The flip animation watches this rather than
+ * `getRevealedOverlayCardIDs` so that un-rehiding a Cat-hidden card still animates: such a card is
+ * already in `revealedCardIDs`, so only the rehidden set moves when the BS reveal opens it.
+ */
+export function getFaceUpOverlayCardIDs(play: BlowCowTablePlay) {
+  const faceDownOverlayCardIDSet = new Set(getFaceDownOverlayCardIDs(play))
+
+  return play.cards
+    .map((card) => `${play.id}-${card.id}`)
+    .filter((overlayCardID) => !faceDownOverlayCardIDSet.has(overlayCardID))
+}
+
 export function getRevealedOverlayCardIDs(play: BlowCowTablePlay) {
   if (play.revealedAtTurn !== null) {
     return play.cards.map((card) => `${play.id}-${card.id}`)

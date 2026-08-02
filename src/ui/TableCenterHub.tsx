@@ -1,13 +1,11 @@
 import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
 import { DIRECTION_ARROW_ICON_SPRITE } from './iconSprites.ts'
-import type { TransientMessage } from './useTransientMessage.ts'
 
 type TableCenterHubProps = {
   canToggleDirection: boolean
   directionArrowOrientation: string
   directionIndicatorLabel: string
   directionToggleTitle: string | undefined
-  failMessage: TransientMessage | null
   frontCardsTooltip: string
   maxCardsOnTable: number
   onToggleDirection: () => void
@@ -22,7 +20,6 @@ export function TableCenterHub({
   directionArrowOrientation,
   directionIndicatorLabel,
   directionToggleTitle,
-  failMessage,
   frontCardsTooltip,
   maxCardsOnTable,
   onToggleDirection,
@@ -66,12 +63,6 @@ export function TableCenterHub({
         <InlineInfoTooltip tooltip={tableStatus} />
         <InlineInfoTooltip alignment="end" tooltip={frontCardsTooltip} />
       </div>
-
-      {failMessage ? (
-        <div className="board-fail-message" key={failMessage.id} role="alert">
-          {failMessage.text}
-        </div>
-      ) : null}
     </div>
   )
 }

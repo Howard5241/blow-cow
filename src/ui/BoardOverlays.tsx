@@ -1,5 +1,5 @@
 import { HISTORY_EVENT_LABELS } from './historyLabels.ts'
-import type { HistoryEvent, SeatRow } from './boardTypes.ts'
+import type { HistoryEvent } from './boardTypes.ts'
 
 type BoardOverlayProps = {
   children: React.ReactNode
@@ -76,66 +76,6 @@ export function HistoryOverlay({
             </span>
             <h3>{event.title}</h3>
             <p>{event.detail}</p>
-          </article>
-        ))}
-      </div>
-    </BoardOverlay>
-  )
-}
-
-export function CharacterStripOverlay({
-  getSeatLabel,
-  onClose,
-  onOpenCharacterCard,
-  seats,
-}: {
-  getSeatLabel: (seatIndex: number) => string
-  onClose: () => void
-  onOpenCharacterCard: (seat: SeatRow) => void
-  seats: SeatRow[]
-}) {
-  return (
-    <BoardOverlay
-      kicker="Public Information"
-      onClose={onClose}
-      panelClassName="character-overlay-panel"
-      subtitle={`${seats.length} public character ${seats.length === 1 ? 'card' : 'cards'}.`}
-      title="Character Cards"
-      titleID="character-strip-overlay-title"
-    >
-      <div className="character-strip" role="list">
-        {seats.map((seat) => (
-          <article
-            className={`character-card-item${seat.isViewingPlayer ? ' viewing-player' : ''}${seat.hasLeft ? ' left' : ''}`}
-            key={`character-${seat.id}`}
-            role="listitem"
-          >
-            <div className="character-card-player">
-              <strong>{seat.name}</strong>
-              <span className="room-note character-card-seat">{getSeatLabel(seat.seatIndex)}</span>
-            </div>
-
-            {seat.characterSprite ? (
-              <button
-                aria-haspopup="dialog"
-                aria-label={`Open ${seat.name}'s ${seat.characterName ?? 'character'} card`}
-                className="character-card-trigger"
-                onClick={() => {
-                  onOpenCharacterCard(seat)
-                }}
-                type="button"
-              >
-                <img
-                  alt={`${seat.name}: ${seat.characterName ?? 'No character assigned'}`}
-                  className="character-card-image"
-                  src={seat.characterSprite}
-                />
-              </button>
-            ) : (
-              <div className="character-card-fallback">
-                {seat.characterName ?? 'No character assigned'}
-              </div>
-            )}
           </article>
         ))}
       </div>

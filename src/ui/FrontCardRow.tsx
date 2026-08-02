@@ -5,6 +5,9 @@ type FrontCardRowProps = {
   cards: FrontCard[]
   enteringCardIDSet: Set<string>
   onCatHideCard: (cardID: string) => void
+  onRevealCard: (cardID: string) => void
+  /** Names the card's owner, so the reveal prompt says whose hidden play is being opened. */
+  seatName: string
   /**
    * Registers each rendered card element with the board. These nodes are the destination of
    * the front-card entry animation and the source of every punishment, all-pass return, and
@@ -18,7 +21,9 @@ export function FrontCardRow({
   cards,
   enteringCardIDSet,
   onCatHideCard,
+  onRevealCard,
   registerFrontCard,
+  seatName,
 }: FrontCardRowProps) {
   // An empty row renders nothing. `.seat-front-cards` keeps its min-height, so blocks stay
   // the same size and the ring radii (which assume a fixed block height) do not shift.
@@ -30,29 +35,40 @@ export function FrontCardRow({
     <div className="front-card-row">
       {cards.map((card) => {
         const catHideLabel = `Use The Cat to flip ${getCardLabel(card.sprite)} face down`
+        const revealLabel = `Reveal ${seatName}'s hidden card`
+        // The two never overlap: The Cat only acts on face-up cards, the BS reveal only on face-down
+        // ones. Keeping them separate branches keeps each label honest about what the click does.
+        const actionLabel = card.isCatActionable ? catHideLabel : card.isRevealable ? revealLabel : undefined
+        const onAction = card.isCatActionable
+          ? () => {
+              onCatHideCard(card.cardID)
+            }
+          : card.isRevealable
+          ? () => {
+              onRevealCard(card.cardID)
+            }
+          : undefined
 
         return (
           <div
-            aria-label={card.isCatActionable ? catHideLabel : undefined}
-            className={`front-card ${card.faceDown ? 'face-down' : 'face-up'}${card.isDeparted ? ' departed-placeholder' : ''}${card.isFlipping ? ' flipping' : ''}${card.isTargeted ? ' target-card' : ''}${enteringCardIDSet.has(card.id) ? ' entering-placeholder' : ''}${card.isCatActionable ? ' cat-actionable' : ''}`}
+            aria-label={actionLabel}
+            className={`front-card ${card.faceDown ? 'face-down' : 'face-up'}${card.isDeparted ? ' departed-placeholder' : ''}${card.isFlipping ? ' flipping' : ''}${card.isTargeted ? ' target-card' : ''}${card.isTrumpHighlighted ? ' trump-card' : ''}${enteringCardIDSet.has(card.id) ? ' entering-placeholder' : ''}${card.isCatActionable ? ' cat-actionable' : ''}${card.isRevealable ? ' revealable' : ''}`}
             key={card.id}
-            onClick={card.isCatActionable ? () => {
-              onCatHideCard(card.cardID)
-            } : undefined}
-            onKeyDown={card.isCatActionable ? (event) => {
+            onClick={onAction}
+            onKeyDown={onAction ? (event) => {
               if (event.key !== 'Enter' && event.key !== ' ') {
                 return
               }
 
               event.preventDefault()
-              onCatHideCard(card.cardID)
+              onAction()
             } : undefined}
             ref={(element) => {
               registerFrontCard(card.id, element)
             }}
-            role={card.isCatActionable ? 'button' : undefined}
-            tabIndex={card.isCatActionable ? 0 : undefined}
-            title={card.isCatActionable ? catHideLabel : undefined}
+            role={onAction ? 'button' : undefined}
+            tabIndex={onAction ? 0 : undefined}
+            title={actionLabel}
           >
             <img
               alt={card.faceDown ? 'Face-down card' : getCardLabel(card.sprite)}

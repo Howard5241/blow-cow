@@ -307,6 +307,10 @@ function buildPlayerIndexEntries(
     cardsPlayed: player.matchStats.cardsPlayed,
     punishmentCount: player.matchStats.punishmentCount,
     bsWinCount: player.matchStats.bsWinCount,
+    // Additive within schemaVersion 1: the per-match snapshot already carries the whole matchStats
+    // object, so leaving these out would only make this compact line disagree with it.
+    accusationCount: player.matchStats.accusationCount,
+    accusationWinCount: player.matchStats.accusationWinCount,
   }))
 }
 

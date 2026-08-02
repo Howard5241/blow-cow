@@ -45,7 +45,8 @@ main.app-shell
 | Character Pool Panel | `div` | `manual-rank-panel` | Shows the active character-card pool when characters are enabled. | Conditional below Character Cards Group. |
 | Character Pool Count | `span` | `rank-selection-count` | Shows how many eligible characters are currently in the pool. | Right side of Character Pool Panel header. |
 | Character Chip Grid | `div` | `character-chip-grid` | Holds the character-pool buttons. | Main area inside Character Pool Panel. |
-| Character Chip | `button` | `character-chip` | Toggles one implemented character in or out of the pool. | Repeated inside Character Chip Grid. |
+| Character Chip | `button` | `character-chip` | Toggles one implemented character in or out of the pool and shows its ability tooltip on hover or focus. | Repeated inside Character Chip Grid. |
+| Character Chip Tooltip | `span` | `character-chip-tooltip` | Shows the selected character's ability, plus the J requirement when The Confused is unavailable. | Nested inside each Character Chip. |
 | Character Pool Hint | `p` | `character-pool-hint` | Explains why `The Confused` is unavailable without `J` in a manual deck. | Conditional below Character Chip Grid. |
 | Standard Ranks Group | `fieldset` | `deck-mode-group` | Switches between default and manual rank selection. | After Game Speed Selector. |
 | Rank Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Default` or `Manual` rank mode. | Repeated inside Standard Ranks Group. |

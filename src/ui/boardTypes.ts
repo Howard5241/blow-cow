@@ -15,6 +15,10 @@ export type FrontCard = {
   isFlipping: boolean
   isTargeted: boolean
   isCatActionable: boolean
+  /** The BS caller may click this card to flip it, because its owner's block is at the centre. */
+  isRevealable: boolean
+  /** Face up and of the trump rank proper, so it counts toward the Reverse Rule. */
+  isTrumpHighlighted: boolean
 }
 
 export type SeatRow = {
@@ -33,14 +37,6 @@ export type SeatRow = {
   name: string
   pointRanks: string[]
   points: number
-}
-
-export type MatchAnnouncementTone = 'warning' | 'info' | 'verdict'
-
-export type MatchAnnouncement = {
-  tone: MatchAnnouncementTone
-  title: string
-  detail: string
 }
 
 export type CharacterCardOverlay = {

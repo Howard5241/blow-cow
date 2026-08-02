@@ -380,6 +380,7 @@
 
 .rank-chip,
 .character-chip {
+  position: relative;
   min-height: 44px;
   padding: 10px 12px;
   border-radius: 14px;
@@ -401,6 +402,38 @@
   color: #162019;
   border-color: rgba(255, 206, 92, 0.34);
   background: linear-gradient(135deg, #ffdd86, #ffba4a);
+}
+
+.character-chip-tooltip {
+  position: absolute;
+  z-index: 2;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 221, 134, 0.36);
+  border-radius: 8px;
+  background: rgba(6, 19, 17, 0.97);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  color: var(--cream);
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translate(-50%, 4px);
+  visibility: hidden;
+  white-space: normal;
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.character-chip:hover .character-chip-tooltip,
+.character-chip:focus-visible .character-chip-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  visibility: visible;
 }
 
 .primary-button,
@@ -705,6 +738,14 @@
   background:
     radial-gradient(circle at 50% -10%, rgba(245, 239, 225, 0.055), transparent 46%),
     linear-gradient(180deg, rgba(13, 21, 19, 0.95), rgba(6, 12, 11, 0.97));
+  /*
+   * Lives on the board rather than on .player-ring because the hand stage sizes its empty middle
+   * from it too, and the two are siblings. It is a plain length, so unlike --seat-block-width it
+   * needs no container-query context.
+   */
+  --seat-block-height: 208px;
+  /* The clear column the hand stage leaves in its middle for that dropped block to land in. */
+  --viewing-seat-gap: 232px;
 }
 
 /*
@@ -736,6 +777,47 @@
 
   100% {
     opacity: 0;
+  }
+}
+
+/*
+ * The BS lead-in. Marks are placed in board coordinates measured once when the resolution arrives,
+ * so the layer just covers the board and does nothing but host them.
+ */
+.table-board > .bs-call-trail {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+/*
+ * The sprite draws its x across only the middle ~22% of a square canvas, so the element is far
+ * larger than the mark it shows. left/top are the midpoint, hence the centring translate, which
+ * every keyframe has to repeat.
+ */
+.bs-call-trail-mark {
+  position: absolute;
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 0 8px rgba(255, 104, 82, 0.7));
+  animation: bs-call-trail-mark-in 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes bs-call-trail-mark-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.3);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.15);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
@@ -1187,42 +1269,6 @@
   margin: 0;
 }
 
-.match-announcement {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px 18px;
-  border-radius: 20px;
-  border: 1px solid rgba(245, 239, 225, 0.12);
-  background: rgba(5, 16, 14, 0.52);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.match-announcement strong {
-  font-size: 1rem;
-  color: var(--cream);
-}
-
-.match-announcement span {
-  color: var(--soft-cream);
-  line-height: 1.45;
-}
-
-.match-announcement.warning {
-  border-color: rgba(255, 206, 92, 0.28);
-  background: linear-gradient(180deg, rgba(255, 206, 92, 0.12), rgba(5, 16, 14, 0.56));
-}
-
-.match-announcement.info {
-  border-color: rgba(118, 184, 255, 0.22);
-  background: linear-gradient(180deg, rgba(118, 184, 255, 0.12), rgba(5, 16, 14, 0.56));
-}
-
-.match-announcement.verdict {
-  border-color: rgba(255, 117, 98, 0.24);
-  background: linear-gradient(180deg, rgba(255, 117, 98, 0.14), rgba(5, 16, 14, 0.58));
-}
-
 .loading-card {
   border-radius: 22px;
 }
@@ -1390,6 +1436,14 @@
   initial-value: 90deg;
 }
 
+/*
+ * Above the hand stage, so the viewing player's block reads as sitting on the panel rather than
+ * behind it. The card-travel layers are all at z-index 10 and 11, so they still fly over the ring.
+ */
+.table-board > .player-ring {
+  z-index: 2;
+}
+
 .player-ring {
   position: relative;
   /* Definite size: the seat radii and card sizes below are expressed in cqw/cqh. */
@@ -1397,23 +1451,27 @@
   flex: 0 0 auto;
   width: 100%;
   /*
-   * The viewing player's seat is docked in the hand row, so the ring's bottom arc is empty and
-   * the container can be shorter without crowding the seats that remain.
+   * The viewing player's block drops out of the bottom arc into the hand stage, so the ring's
+   * bottom slot is free and the container can be shorter without crowding the seats that remain.
    */
   aspect-ratio: 16 / 9;
   max-height: 64vh;
   min-height: 450px;
   /*
    * Shared seat geometry. These live here rather than on .seat-block so the hub can shift by
-   * the same measure. Both offsets are fractions of a seat block's own height, so they scale
+   * the same measure. Every offset is a fraction of a seat block's own height, so they scale
    * with the blocks instead of being pinned to a pixel guess: the bottom slot is free, the
    * seats drift down into a little of it, and the hub, which has nothing below it any more,
    * takes most of it.
    */
   --seat-block-width: clamp(150px, 17cqw, 206px);
-  --seat-block-height: 208px;
   --seat-ring-shift-y: calc(var(--seat-block-height) * 0.16);
   --hub-ring-shift-y: calc(var(--seat-block-height) * 0.52);
+  /*
+   * How far the viewing player's block alone falls past the ring's bottom edge. Almost a whole
+   * block, so it clears the ring and lands inside the hand stage rather than straddling the two.
+   */
+  --viewing-seat-drop: calc(var(--seat-block-height) * 0.92);
 }
 
 .seat-block {
@@ -1434,21 +1492,77 @@
   /* cqw/cqh resolve against .player-ring, so these must stay on the child, not the container. */
   --seat-ring-rx: calc(50cqw - var(--seat-block-width) / 2 - 8px);
   --seat-ring-ry: calc(50cqh - var(--seat-block-height) / 2 - 8px);
-  transition: border-color 200ms ease, box-shadow 200ms ease, background-color 200ms ease;
+  --seat-focus-scale: 1;
+  --seat-focus-x: 0px;
+  --seat-focus-y: 0px;
+  transition:
+    border-color 200ms ease,
+    box-shadow 200ms ease,
+    background-color 200ms ease,
+    transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    translate 460ms cubic-bezier(0.22, 1, 0.36, 1);
   /*
-   * Translate only. getBoundingClientRect() reports the axis-aligned box of a transformed
-   * element, so adding rotate()/scale() here would inflate every measurement the card-travel
-   * animations depend on and land the flying cards off-centre.
+   * Translate only, with one deliberate exception: `.focused-seat` below. getBoundingClientRect()
+   * reports the axis-aligned box of a transformed element, so a scale() here inflates every
+   * measurement the card-travel animations depend on and lands the flying cards off-centre. The
+   * focus exception is safe only because no measurement can happen while a block is focused --
+   * see the note on that rule.
    */
   transform:
     translate(-50%, -50%)
     translate(
       calc(var(--seat-ring-rx) * cos(var(--seat-angle))),
       calc(var(--seat-ring-ry) * sin(var(--seat-angle)) + var(--seat-ring-shift-y))
-    );
+    )
+    translate(var(--seat-focus-x), var(--seat-focus-y))
+    scale(var(--seat-focus-scale));
 }
 
+/*
+ * The block whose cards the BS caller is currently flipping: scaled up and pulled onto the centre
+ * hub. The offsets are the algebraic inverse of the ring transform above plus the hub's own shift,
+ * so "centre" is by definition where .table-center-hub sits and nothing has to be measured.
+ *
+ * Safe despite the translate-only rule because the four measuring sequences cannot overlap it:
+ * the call trail runs during the lead-in, when focusedSeatID is forced null; the front-card
+ * entry animation needs a new card, which no blocked move can produce; the reset sequences need
+ * G.resetResolution, which is mutually exclusive with G.bsResolution; and the punishment travel is
+ * gated behind BS_PUNISH_PROMPT_DELAY_MS, which is derived from this transition's duration.
+ */
+.seat-block.focused-seat {
+  z-index: 8;
+  will-change: transform;
+  --seat-focus-scale: 1.5;
+  --seat-focus-x: calc(-1 * var(--seat-ring-rx) * cos(var(--seat-angle)));
+  --seat-focus-y: calc(
+    -1 * (var(--seat-ring-ry) * sin(var(--seat-angle)) + var(--seat-ring-shift-y))
+    + var(--hub-ring-shift-y)
+  );
+  border-color: rgba(255, 221, 134, 0.85);
+  background: rgba(14, 26, 22, 0.92);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 24px 52px rgba(0, 0, 0, 0.55);
+  /* The outgoing block shrinks home first; the incoming one waits that beat before growing. */
+  transition-delay: 0ms, 0ms, 0ms, 160ms, 160ms;
+}
+
+/* The viewing seat's hand-row dock rides on `translate`; cancel it so it centres like any other. */
+.seat-block.viewing-seat.focused-seat {
+  translate: none;
+}
+
+/*
+ * The viewing player is on the ring with everybody else, but their block alone is dropped out of
+ * the bottom arc and down into the hand stage's empty middle. Only this seat moves, so the seats
+ * either side of it keep their true ring positions and nothing else is covered.
+ *
+ * `translate` rather than `transform`: the ring position is already in `transform`, and the two
+ * compose. It stays a pure translation for the same reason the ring transform does, so
+ * getBoundingClientRect keeps reporting the real box for every card-travel animation.
+ */
 .seat-block.viewing-seat {
+  translate: 0 var(--viewing-seat-drop);
   border-color: rgba(126, 189, 255, 0.42);
   background: rgba(9, 27, 34, 0.72);
 }
@@ -1483,6 +1597,38 @@
   box-shadow: 0 0 0 1px rgba(255, 221, 134, 0.26), 0 18px 36px rgba(255, 186, 74, 0.18);
 }
 
+/*
+ * A Dreamer caught by an accusation. Placed after acting/target/selected so it wins on source order
+ * at equal specificity: while this is on, nothing else about the block matters. It holds from the
+ * moment the verdict lands until the accuser presses Punish, which is also what the pulse is for --
+ * it keeps saying "this is unfinished" while everyone waits on one player to press a button.
+ *
+ * Pure colour, no transform: this seat is about to be measured by the punishment travel.
+ */
+.seat-block.accused-cheat-seat {
+  z-index: 4;
+  border-color: rgba(255, 90, 74, 0.92);
+  background: rgba(58, 14, 12, 0.88);
+  animation: seat-accused-cheat-pulse 1400ms ease-in-out infinite;
+}
+
+@keyframes seat-accused-cheat-pulse {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 1px rgba(255, 90, 74, 0.35),
+      0 0 24px rgba(255, 74, 58, 0.28);
+  }
+
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 2px rgba(255, 120, 104, 0.6),
+      0 0 40px rgba(255, 74, 58, 0.5);
+  }
+}
+
 .seat-block.left-seat {
   opacity: 0.42;
   filter: grayscale(0.6);
@@ -1492,6 +1638,179 @@
   opacity: 0.74;
 }
 
+/*
+ * The two block frames use the same square outline sprite, which is drawn with transparent
+ * padding, so each is stretched past the block for the drawn outline to land on the block's own
+ * edge. Both are inert, so they can never break the hover they respond to.
+ */
+.seat-hover-frame,
+.seat-bs-call-frame {
+  position: absolute;
+  z-index: 1;
+  /* Roughly 8% padding per side in the sprite, hence the 122% box. */
+  left: -11%;
+  top: -11%;
+  width: 122%;
+  height: 122%;
+  pointer-events: none;
+  object-fit: fill;
+}
+
+.seat-hover-frame {
+  opacity: 0;
+  transform: scale(0.94);
+  filter: drop-shadow(0 0 6px rgba(255, 221, 134, 0.45));
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.seat-block:hover > .seat-hover-frame,
+.seat-block:focus-within > .seat-hover-frame,
+.seat-block.selected-seat > .seat-hover-frame {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/*
+ * The red frame on the accused. The sprite ships as a white glyph and CSS filters cannot recolour
+ * white cleanly, so it is used as a mask and a flat red is painted through its own alpha. The
+ * sprite url arrives as a custom property, since the file is resolved by the bundler, not by CSS.
+ */
+.seat-bs-call-frame {
+  background-color: rgb(255, 96, 78);
+  mask-image: var(--seat-frame-sprite);
+  mask-size: 100% 100%;
+  mask-repeat: no-repeat;
+  -webkit-mask-image: var(--seat-frame-sprite);
+  -webkit-mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  filter: drop-shadow(0 0 10px rgba(255, 104, 82, 0.55));
+  animation: seat-bs-call-frame-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes seat-bs-call-frame-in {
+  0% {
+    opacity: 0;
+    transform: scale(1.16);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(0.98);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/*
+ * Stamped on the accused's avatar rather than on their whole block, so the mark reads as pointing
+ * at the player. Centred on .seat-block-top, whose only in-flow child is the avatar.
+ */
+.seat-bs-target-mark {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: 50%;
+  width: calc(var(--seat-avatar-size) * 1.24);
+  height: calc(var(--seat-avatar-size) * 1.24);
+  pointer-events: none;
+  object-fit: contain;
+  filter: drop-shadow(0 0 8px rgba(255, 104, 82, 0.7));
+  animation: seat-bs-target-mark-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* left/top are the avatar's centre, so every keyframe has to repeat the centring translate. */
+@keyframes seat-bs-target-mark-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.85);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.94);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/*
+ * The BS outcome, sat on the accused's avatar so it scales with the block while it is centred and
+ * stays legible once it returns to the ring. Above the target mark, which it is meant to read on
+ * top of. It renders only when the server unmasks the verdict, so it cannot pre-empt the reveal.
+ */
+.seat-bs-verdict-label {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  top: 50%;
+  pointer-events: none;
+  font-size: 1.12rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  -webkit-text-stroke: 1px rgba(10, 18, 16, 0.9);
+  paint-order: stroke fill;
+  animation: seat-bs-verdict-label-in 420ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.seat-bs-verdict-label.honest {
+  color: #ffe14a;
+  text-shadow: 0 0 10px rgba(255, 225, 74, 0.75), 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+
+.seat-bs-verdict-label.lie {
+  color: #ff5a4a;
+  text-shadow: 0 0 10px rgba(255, 90, 74, 0.75), 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+
+/* Same centring caveat as the target mark: left/top are the avatar's centre. */
+@keyframes seat-bs-verdict-label-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.6);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.seat-block.punishment-impact {
+  animation: seat-punishment-impact 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes seat-punishment-impact {
+  0% {
+    scale: 1;
+    background-color: rgba(12, 28, 24, 0.82);
+  }
+
+  22% {
+    scale: 0.9;
+    background-color: rgba(112, 22, 18, 0.96);
+    box-shadow: 0 0 0 4px rgba(255, 92, 76, 0.48), 0 0 34px rgba(255, 76, 62, 0.58);
+  }
+
+  54% {
+    scale: 1.1;
+    background-color: rgba(150, 28, 22, 0.94);
+    box-shadow: 0 0 0 2px rgba(255, 122, 102, 0.6), 0 0 42px rgba(255, 76, 62, 0.48);
+  }
+
+  100% {
+    scale: 1;
+    background-color: rgba(12, 28, 24, 0.82);
+  }
+}
+
 .seat-block-top {
   position: relative;
   display: flex;
@@ -1499,10 +1818,15 @@
   justify-content: center;
 }
 
+/* Named so the BS target mark can size itself against the avatar it is stamped on. */
+.seat-block {
+  --seat-avatar-size: clamp(46px, 6cqw, 62px);
+}
+
 .seat-avatar-image,
 .seat-avatar-fallback {
-  width: clamp(46px, 6cqw, 62px);
-  height: clamp(46px, 6cqw, 62px);
+  width: var(--seat-avatar-size);
+  height: var(--seat-avatar-size);
   border-radius: 50%;
   border: 1px solid rgba(255, 206, 92, 0.24);
   object-fit: cover;
@@ -1548,8 +1872,6 @@
 }
 
 .seat-block-identity {
-  position: relative;
-  isolation: isolate;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1613,6 +1935,11 @@
   min-height: 46px;
 }
 
+/*
+ * Mounted on every selectable block and revealed by pointing at it, so challenging somebody costs
+ * a hover rather than a click. `visibility` rather than `display` keeps the bubble out of the tab
+ * order while it is hidden without it ever affecting layout.
+ */
 .seat-target-actions {
   position: absolute;
   z-index: 4;
@@ -1623,31 +1950,45 @@
   border-radius: 14px;
   background: rgba(6, 19, 17, 0.96);
   box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease, visibility 140ms;
 }
 
-/* The bubble always points at the hub so it cannot be clipped by the board's overflow. */
+/* Selection is the sticky fallback for touch, where there is no hover to reveal anything. */
+.seat-block:hover > .seat-target-actions,
+.seat-block:focus-within > .seat-target-actions,
+.seat-block.selected-seat > .seat-target-actions {
+  opacity: 1;
+  visibility: visible;
+}
+
+/*
+ * The bubble always points at the hub so it cannot be clipped by the board's overflow, and it
+ * overlaps the block by 2px so the pointer never crosses a dead gap on its way to the buttons.
+ */
 .seat-block[data-seat-half='bottom'] .seat-target-actions {
   bottom: 100%;
   left: 50%;
-  transform: translate(-50%, -8px);
+  transform: translate(-50%, 2px);
 }
 
 .seat-block[data-seat-half='top'] .seat-target-actions {
   top: 100%;
   left: 50%;
-  transform: translate(-50%, 8px);
+  transform: translate(-50%, -2px);
 }
 
 .seat-block[data-seat-half='left'] .seat-target-actions {
   left: 100%;
   top: 50%;
-  transform: translate(8px, -50%);
+  transform: translate(-2px, -50%);
 }
 
 .seat-block[data-seat-half='right'] .seat-target-actions {
   right: 100%;
   top: 50%;
-  transform: translate(-8px, -50%);
+  transform: translate(2px, -50%);
 }
 
 .seat-target-button {
@@ -1680,6 +2021,71 @@
 .seat-target-button.accuse:focus-visible {
   border-color: rgba(217, 184, 255, 0.8);
   background: linear-gradient(180deg, rgba(217, 184, 255, 0.26), rgba(24, 20, 38, 0.86));
+}
+
+/*
+ * Continue and Punish. Below the block so they never collide with the play callout, which hugs the
+ * hub-facing side. Unlike .seat-target-actions these are never hover-gated: they are the only way a
+ * BS resolution moves forward, so they must be visible the moment they become legal. They are only
+ * ever rendered on the caller's screen.
+ */
+.seat-reveal-actions {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  top: calc(100% + 10px);
+  translate: -50% 0;
+  display: flex;
+  gap: 6px;
+}
+
+.seat-reveal-action-button {
+  padding: 7px 18px;
+  border: 1px solid rgba(255, 221, 134, 0.55);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 221, 134, 0.28), rgba(12, 26, 23, 0.92));
+  color: #f6f1e4;
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  animation: seat-reveal-action-button-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.seat-reveal-action-button:hover,
+.seat-reveal-action-button:focus-visible {
+  border-color: rgba(255, 221, 134, 0.95);
+  background: linear-gradient(180deg, rgba(255, 221, 134, 0.42), rgba(22, 36, 33, 0.94));
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.seat-reveal-action-button.punish {
+  padding: 9px 24px;
+  font-size: 0.95rem;
+  border-color: rgba(255, 104, 82, 0.6);
+  background: linear-gradient(180deg, rgba(255, 104, 82, 0.32), rgba(28, 12, 12, 0.92));
+}
+
+.seat-reveal-action-button.punish:hover,
+.seat-reveal-action-button.punish:focus-visible {
+  border-color: rgba(255, 104, 82, 0.95);
+  background: linear-gradient(180deg, rgba(255, 104, 82, 0.46), rgba(38, 14, 14, 0.94));
+}
+
+@keyframes seat-reveal-action-button-in {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .table-center-hub {
@@ -1727,36 +2133,18 @@
 }
 
 /*
- * Floats over the middle of the felt rather than sitting inside the hub column, so it never
- * pushes the trump badge and direction control around when it appears and clears.
+ * Floats over the felt rather than sitting inside the hub column, so it never pushes the trump
+ * badge and direction control around when it appears and clears.
  */
-.table-board > .board-announcement {
+.table-board > .board-fail-message {
   position: absolute;
-  top: 42%;
+  top: 58%;
   left: 50%;
-  z-index: 7;
-  width: min(460px, calc(100% - 64px));
-  transform: translate(-50%, -50%);
+  z-index: 9;
+  width: max-content;
+  max-width: min(420px, calc(100% - 64px));
+  translate: -50% 0;
   pointer-events: none;
-  text-align: center;
-  align-items: center;
-  background: rgba(5, 16, 14, 0.9);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 24px 60px rgba(2, 8, 7, 0.58);
-  animation: board-announcement-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes board-announcement-in {
-  from {
-    opacity: 0;
-    transform: translate(-50%, calc(-50% + 10px));
-  }
-
-  to {
-    opacity: 1;
-    transform: translate(-50%, -50%);
-  }
 }
 
 .board-fail-message {
@@ -1835,16 +2223,36 @@
   object-fit: contain;
   pointer-events: none;
   transform-origin: center center;
-  transform: scale(1.35);
+  animation: turn-direction-clockwise 16s linear infinite;
   filter: drop-shadow(0 0 12px rgba(255, 186, 74, 0.28));
   transition:
     transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
     filter 180ms ease;
 }
 
-/* The sprite is drawn clockwise, so counterclockwise is the same art mirrored. */
+/* Mirroring reverses the perceived spin, so the counterclockwise glyph keeps a positive rotation. */
 .turn-direction-indicator.counterclockwise .turn-direction-arrow {
-  transform: scale(-1.35, 1.35);
+  animation-name: turn-direction-counterclockwise;
+}
+
+@keyframes turn-direction-clockwise {
+  from {
+    transform: scale(1.35) rotate(0turn);
+  }
+
+  to {
+    transform: scale(1.35) rotate(1turn);
+  }
+}
+
+@keyframes turn-direction-counterclockwise {
+  from {
+    transform: scale(-1.35, 1.35) rotate(0turn);
+  }
+
+  to {
+    transform: scale(-1.35, 1.35) rotate(1turn);
+  }
 }
 
 .turn-direction-indicator.contrarian-ready:hover .turn-direction-arrow,
@@ -2070,8 +2478,7 @@
   gap: 10px;
 }
 
-.history-toggle.active,
-.character-strip-toggle.active {
+.history-toggle.active {
   border-color: rgba(255, 206, 92, 0.24);
   background: rgba(255, 206, 92, 0.12);
 }
@@ -2087,96 +2494,6 @@
   background: rgba(255, 206, 92, 0.14);
   color: var(--gold-text);
   font-size: 0.78rem;
-}
-
-.character-strip-toggle {
-  white-space: nowrap;
-}
-
-.character-strip {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 14px;
-  overflow-y: auto;
-  max-height: min(58vh, 520px);
-  padding-bottom: 4px;
-}
-
-.character-card-item {
-  flex: 0 0 146px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 18px;
-  border: 1px solid rgba(245, 239, 225, 0.08);
-  background: rgba(245, 239, 225, 0.04);
-}
-
-.character-card-item.viewing-player {
-  border-color: rgba(255, 206, 92, 0.26);
-  box-shadow: inset 0 0 0 1px rgba(255, 206, 92, 0.12);
-}
-
-.character-card-item.left {
-  opacity: 0.72;
-}
-
-.character-card-player {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.character-card-seat {
-  font-size: 0.82rem;
-}
-
-.character-card-trigger {
-  display: block;
-  width: 112px;
-  align-self: center;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  border-radius: 12px;
-  cursor: pointer;
-}
-
-.character-card-trigger:focus-visible {
-  outline: 2px solid rgba(255, 206, 92, 0.82);
-  outline-offset: 3px;
-}
-
-.character-card-image {
-  display: block;
-  width: 100%;
-  aspect-ratio: 3 / 4.2;
-  object-fit: cover;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.96);
-  transition: transform 140ms ease, box-shadow 140ms ease;
-}
-
-.character-card-trigger:hover .character-card-image {
-  transform: translateY(-2px);
-  box-shadow: 0 18px 24px rgba(0, 0, 0, 0.24);
-}
-
-.character-card-fallback {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 112px;
-  min-height: 158px;
-  align-self: center;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px dashed rgba(245, 239, 225, 0.14);
-  color: var(--soft-cream);
-  text-align: center;
-  line-height: 1.35;
 }
 
 .character-card-overlay,
@@ -2332,13 +2649,20 @@
   background: rgba(255, 206, 92, 0.12);
 }
 
+/*
+ * A speech bubble beside the block rather than a panel over it, so the block's own contents stay
+ * readable while somebody is talking. It only pops in and then holds: callouts have no duration any
+ * more, and the board decides when each one goes away.
+ */
 .player-play-callout {
   position: absolute;
-  inset: 0;
-  z-index: 2;
+  /* Below .seat-target-actions, which shares the hub-facing side: buttons win a collision. */
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: center;
+  width: max-content;
+  max-width: 190px;
   padding: 10px 14px;
   border-radius: 16px;
   border: 1px solid rgba(118, 184, 255, 0.28);
@@ -2351,28 +2675,46 @@
   text-align: center;
   white-space: normal;
   pointer-events: none;
-  animation: player-play-callout 2400ms ease both;
+  animation: player-play-callout-in 320ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
-@keyframes player-play-callout {
+/*
+ * Always on the hub-facing side, which is what keeps a bubble on a far-right seat from running
+ * off the board and being cut by the board's overflow. Offsets only, never `transform`, because
+ * the keyframe below owns that; the top and bottom seats centre with `translate` instead.
+ */
+.seat-block[data-seat-half='left'] .player-play-callout {
+  left: calc(100% + 10px);
+  top: 8px;
+}
+
+.seat-block[data-seat-half='right'] .player-play-callout {
+  right: calc(100% + 10px);
+  top: 8px;
+}
+
+.seat-block[data-seat-half='top'] .player-play-callout {
+  top: calc(100% + 10px);
+  left: 50%;
+  translate: -50% 0;
+}
+
+.seat-block[data-seat-half='bottom'] .player-play-callout {
+  bottom: calc(100% + 10px);
+  left: 50%;
+  translate: -50% 0;
+}
+
+/* Pops in and holds at full opacity. Nothing here ever fades a callout back out. */
+@keyframes player-play-callout-in {
   0% {
     opacity: 0;
     transform: translate3d(0, 6px, 0) scale(0.97);
   }
 
-  14% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-
-  74% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-
   100% {
-    opacity: 0;
-    transform: translate3d(0, -6px, 0) scale(0.99);
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
   }
 }
 
@@ -2408,6 +2750,13 @@
   .player-play-callout,
   .board-fail-message,
   .board-bs-flash,
+  .bs-call-trail-mark,
+  .seat-bs-call-frame,
+  .seat-bs-target-mark,
+  .seat-bs-verdict-label,
+  .seat-reveal-action-button,
+  .seat-block.accused-cheat-seat,
+  .front-card.revealable,
   .punishment-move-card.active,
   .reset-gather-card.active,
   .reset-deal-card.active,
@@ -2415,10 +2764,44 @@
     animation: none;
   }
 
+  /*
+   * .seat-block is already here, which also kills the BS focus transform transition: the focused
+   * block snaps to the centre and back instead of travelling. That is the right reduced-motion
+   * behaviour and it removes the measurement window entirely.
+   */
   .reset-pile-card-inner,
   .seat-block,
-  .seat-target-button {
+  .seat-hover-frame,
+  .seat-target-actions,
+  .seat-target-button,
+  .seat-reveal-action-button {
     transition: none;
+  }
+
+  /* Without the pop-in keyframe these would sit at their pre-animation state and never appear. */
+  .bs-call-trail-mark,
+  .seat-bs-target-mark {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+
+  .seat-bs-verdict-label {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+
+  .player-play-callout,
+  .seat-reveal-action-button {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* Without the pulse the red state still has to read, so pin it to the bright half. */
+  .seat-block.accused-cheat-seat {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 0 0 2px rgba(255, 120, 104, 0.6),
+      0 0 40px rgba(255, 74, 58, 0.5);
   }
 }
 
@@ -2518,6 +2901,57 @@
     0 10px 22px rgba(255, 117, 98, 0.18);
 }
 
+/*
+ * A revealed card of the trump rank proper -- the set the Reverse Rule counts, so Jokers and the
+ * Confused's wild Jacks are excluded. After .target-card so it wins on the challenged play, with a
+ * combined rule below because the accused's cards genuinely carry both states.
+ */
+.front-card.trump-card {
+  box-shadow:
+    0 0 0 2px rgba(255, 225, 74, 0.9),
+    0 0 16px rgba(255, 225, 74, 0.45);
+}
+
+.front-card.target-card.trump-card {
+  box-shadow:
+    0 0 0 2px rgba(255, 225, 74, 0.9),
+    0 0 0 4px rgba(255, 126, 110, 0.7),
+    0 0 16px rgba(255, 225, 74, 0.45);
+}
+
+/*
+ * The caller's click target for a face-down card in the focused block. Deliberately shadow-only on
+ * hover, with no transform: this element is measured by the punishment travel, and a card sitting
+ * under the pointer must still report its true box.
+ */
+.front-card.revealable {
+  cursor: pointer;
+  box-shadow:
+    0 0 0 2px rgba(255, 225, 74, 0.55),
+    0 0 14px rgba(255, 225, 74, 0.28);
+  transition: box-shadow 140ms ease;
+  animation: front-card-revealable-pulse 1600ms ease-in-out infinite;
+}
+
+.front-card.revealable:hover,
+.front-card.revealable:focus-visible {
+  box-shadow:
+    0 0 0 2px rgba(255, 240, 170, 0.95),
+    0 0 20px rgba(255, 225, 74, 0.6);
+  outline: none;
+}
+
+@keyframes front-card-revealable-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.76;
+  }
+}
+
 .front-card.departed-placeholder {
   opacity: 0;
 }
@@ -2569,39 +3003,54 @@
   min-width: 0;
 }
 
+/*
+ * Tall enough to hold a seat block, and with its middle left clear, because the viewing player's
+ * block drops in from the ring above and lands in that gap. The block is not a child here, so the
+ * height has to be reserved rather than produced by the content.
+ */
 .hand-play-row {
   display: flex;
   align-items: stretch;
+  justify-content: space-between;
   gap: 14px;
   min-width: 0;
-}
-
-.hand-play-row > .hand-scroll-viewport {
-  flex: 1 1 auto;
-  min-width: 0;
+  min-height: var(--seat-block-height);
 }
 
 /*
- * The viewing player's own block, docked between their hand and the action buttons. It leaves
- * the ring's absolute positioning behind and sits in normal flow, but every ref inside it is
- * unchanged and all travel animations measure it with getBoundingClientRect.
+ * Both flanks are capped at the same width and pushed to opposite edges, so the leftover column
+ * between them is exactly --viewing-seat-gap wide and always centred on the board. That is where
+ * the viewing player's block lands, so neither the hand nor the buttons can ever sit under it.
  */
-.seat-block.docked-seat {
-  position: static;
-  transform: none;
-  align-self: center;
-  flex: 0 0 auto;
-  width: clamp(158px, 17vw, 206px);
+.hand-play-row > .hand-scroll-viewport,
+.hand-play-row > .hand-action-row {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: calc(50% - var(--viewing-seat-gap) / 2);
 }
 
 .hand-action-row {
-  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  align-content: flex-end;
+  align-content: space-between;
+  justify-content: flex-end;
   gap: 10px;
-  max-width: min(40%, 420px);
+}
+
+/*
+ * Full-width first item in the action row rather than a header of its own, so it fills the space
+ * the bottom-aligned buttons leave above them without adding another box to the panel.
+ */
+.hand-action-heading {
+  flex: 0 0 100%;
+  margin: 0;
+  color: var(--gold-text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-align: right;
+  text-transform: uppercase;
 }
 
 /*
@@ -2901,24 +3350,42 @@
     grid-template-columns: 1fr;
   }
 
-  /* Kept on .player-ring so the seat and hub shifts stay derived from the same block height. */
+  .table-board {
+    --seat-block-height: 190px;
+  }
+
   .player-ring {
     aspect-ratio: 4 / 3;
     max-height: none;
     min-height: 480px;
     --seat-block-width: clamp(132px, 24cqw, 172px);
-    --seat-block-height: 190px;
   }
 
   .table-center-hub {
     width: min(46cqw, 340px);
   }
 
-  .hand-play-row {
-    flex-direction: column;
+  /*
+   * The hand stage stacks here, so there is no middle column to drop into. The viewing player's
+   * block stays on the ring with everybody else and the flanks give up their symmetry caps.
+   */
+  .seat-block.viewing-seat {
+    translate: none;
   }
 
-  .hand-action-row {
+  /* The blocks are relatively larger against a shorter ring, so the focused one grows less. */
+  .seat-block.focused-seat {
+    --seat-focus-scale: 1.3;
+  }
+
+  .hand-play-row {
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .hand-play-row > .hand-scroll-viewport,
+  .hand-play-row > .hand-action-row {
+    flex: 0 0 auto;
     max-width: none;
   }
 }
@@ -2961,7 +3428,7 @@
   }
 
   .seat-block {
-    position: static;
+    position: relative;
     width: auto;
     transform: none;
   }
@@ -2970,14 +3437,52 @@
     order: 1;
   }
 
+  /*
+   * The ring is a plain grid here and the rule above already zeroes `transform`, so there is no
+   * centre to travel to. The focused block instead jumps to the top of the grid and spans the full
+   * width -- same "this player is the subject" reading, no transform, and bigger tap targets for
+   * the flips. `order` beats .viewing-seat's on specificity.
+   */
+  .player-ring .seat-block.focused-seat {
+    order: -1;
+    grid-column: 1 / -1;
+    border-color: rgba(255, 221, 134, 0.9);
+    box-shadow:
+      0 0 0 2px rgba(255, 221, 134, 0.32),
+      0 18px 36px rgba(255, 186, 74, 0.2);
+  }
+
   .seat-block .front-card {
     height: 44px;
   }
 
+  .player-ring .seat-block.focused-seat .front-card {
+    height: 64px;
+  }
+
+  /* Below the block would push it off-grid; inside keeps it reachable on a phone. */
+  .seat-reveal-actions {
+    position: static;
+    translate: none;
+    justify-content: center;
+    margin-top: 8px;
+  }
+
+  /*
+   * No hover on a touch screen, so the bubble is dropped from the flow entirely and only the
+   * sticky selection brings it back. `visibility` alone would leave a permanent gap in the block.
+   */
   .seat-target-actions {
     position: static;
+    display: none;
     justify-content: center;
+    opacity: 1;
+    visibility: visible;
     transform: none;
+  }
+
+  .seat-block.selected-seat > .seat-target-actions {
+    display: flex;
   }
 
   .table-center-hub {

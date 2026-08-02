@@ -2,18 +2,29 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import type { BoardProps } from 'boardgame.io/react'
 import {
   BLOW_COW_RANKS,
+  countsTowardReverseRule,
   getActivePlayerIDs,
   getTableCardCount,
   sortCards,
+  type BlowCowAccusation,
+  type BlowCowAccuseDreamerArgs,
+  type BlowCowAdvanceBSRevealArgs,
   type BlowCowBSResolution,
+  type BlowCowBeginAccusationPunishmentArgs,
+  type BlowCowBeginBSPunishmentArgs,
   type BlowCowCallBSArgs,
+  type BlowCowFinalizeAccusationArgs,
   type BlowCowCatHideCardArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowAdvanceResetRevealArgs,
+  type BlowCowRevealBSCardArgs,
+  type BlowCowRevealResetCardArgs,
   type BlowCowFinalizeResetResolutionArgs,
   type BlowCowPassArgs,
   type BlowCowPlayArgs,
   type BlowCowPlayRandomArgs,
+  type BlowCowSneakPlayArgs,
   type BlowCowRank,
   type BlowCowResetResolution,
   type BlowCowSelectTrumpAndPlayArgs,
@@ -24,32 +35,35 @@ import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } f
 import { getAvatarSprite } from './avatarSprites.ts'
 import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
 import { PlayerRing } from './PlayerRing.tsx'
-import { SeatBlock } from './SeatBlock.tsx'
-import { PASS_ICON_SPRITE, PLAY_ICON_SPRITE, RESET_ICON_SPRITE } from './iconSprites.ts'
+import {
+  PASS_ICON_SPRITE,
+  PLAY_ICON_SPRITE,
+  PLAY_RANDOM_ICON_SPRITE,
+  RESET_ICON_SPRITE,
+  SNEAK_PLAY_ICON_SPRITE,
+  X_ICON_SPRITE,
+} from './iconSprites.ts'
 import { TableCenterHub } from './TableCenterHub.tsx'
-import { CharacterStripOverlay, HistoryOverlay } from './BoardOverlays.tsx'
+import { HistoryOverlay } from './BoardOverlays.tsx'
 import { useTransientMessage } from './useTransientMessage.ts'
 import {
   getCatHiddenCardIDSet,
   getCatHiddenOverlayCardIDs,
   getDisplayedPlayCardCount,
   getExplicitlyRevealedCardIDSet,
-  getHiddenOverlayCardIDs,
+  getFaceDownOverlayCardIDs,
+  getFaceUpOverlayCardIDs,
   getLatestHiddenPlay,
-  getRevealedOverlayCardIDs,
 } from './tablePlays.ts'
 import {
   canUseClientGrandmasterBSOverride,
   getClientDefaultBSTargetSeatID,
   getClientPendingPlay,
-  getDreamerCheatForPlay,
-  getDreamerCheatLabel,
   resolveClientBSTargetSelection,
 } from './bsTargeting.ts'
 import type {
   CharacterCardOverlay,
   HistoryEvent,
-  MatchAnnouncement,
   MatchPlayer,
   SeatRow,
 } from './boardTypes.ts'
@@ -122,22 +136,39 @@ type EndGameChartPoint = {
   handCountsByPlayer: Record<string, number>
 }
 
-type BSSequenceStage = 'called' | 'targetReveal' | 'tableReveal' | 'verdict'
-
-type BSSequenceProgress = {
-  resolutionID: string
-  stage: BSSequenceStage
-  revealedAdditionalPlayCount: number
-  animatedPlayID: string | null
+/** One x sprite on the line drawn from the caller's block to the accused's block. */
+type BSCallTrailMark = {
+  id: string
+  left: number
+  top: number
+  delayMs: number
 }
 
-type ResetSequenceStage = 'called' | 'tableReveal' | 'gathering' | 'shuffling' | 'dealing' | 'returning'
+/**
+ * The pause before a reveal procedure starts, for whichever resolution is live. Everything after it
+ * is driven by the resolution in `G`, which the caller advances by hand, so this state covers the
+ * lead-in alone. BS spends the pause drawing its call trail; Reset simply waits.
+ */
+type RevealLeadInProgress = {
+  resolutionID: string
+  isActive: boolean
+  /**
+   * Measured once when the resolution arrives and carried on this state rather than in its own
+   * `useState`, so the lead-in animation adds no second set-state-in-effect call site. Always empty
+   * for a Reset, which draws no trail.
+   */
+  callTrail: BSCallTrailMark[]
+}
+
+/**
+ * Only the phases that follow the reveal. The reveal itself is caller-driven and derived from
+ * `G.resetResolution`, so it has no stage here.
+ */
+type ResetSequenceStage = 'gathering' | 'shuffling' | 'dealing' | 'returning'
 
 type ResetSequenceProgress = {
   resolutionID: string
   stage: ResetSequenceStage
-  revealedHiddenCardCount: number
-  animatedCardID: string | null
   dealtCardCount: number
 }
 
@@ -185,17 +216,43 @@ type FrontCardEntrySequence = {
 
 type BoardServerState = 'checking' | 'online' | 'offline'
 
-const BS_TARGET_REVEAL_AT_MS = 2000
-const BS_TABLE_REVEAL_START_AT_MS = 5000
-const BS_ADDITIONAL_REVEAL_INTERVAL_MS = 600
-const BS_VERDICT_BASE_AT_MS = 8000
+/*
+ * The lead-in that plays before the reveal procedure starts: x marks travel from the caller's
+ * block to the accused's block while the accused block is stamped with the BS target frame.
+ * Every later BS stage is pushed back by BS_CALL_TRAIL_LEAD_IN_MS so the procedure itself is
+ * unchanged, only delayed.
+ */
+const BS_CALL_TRAIL_MARK_COUNT = 8
+const BS_CALL_TRAIL_MARK_INTERVAL_MS = 185
+/** Must match the `bs-call-trail-mark-in` duration in App.css. */
+const BS_CALL_TRAIL_MARK_DURATION_MS = 340
+/** When the last mark has finished landing on the accused, and the target mark may stamp. */
+const BS_CALL_TRAIL_ARRIVAL_AT_MS
+  = (BS_CALL_TRAIL_MARK_COUNT - 1) * BS_CALL_TRAIL_MARK_INTERVAL_MS + BS_CALL_TRAIL_MARK_DURATION_MS
+/*
+ * How long the bullseye sits on the accused's avatar before their block is pulled to the centre.
+ * This is the beat the table spends realising who has been challenged, so it is worth more than the
+ * animation strictly needs.
+ */
+const BS_TARGET_MARK_HOLD_MS = 1500
+/*
+ * Derived from the trail rather than fixed, so changing the mark count or stagger cannot let the
+ * reveal procedure start on top of a lead-in that is still playing. The tail is the beat the
+ * target mark lands in, plus the hold above.
+ */
+const BS_CALL_TRAIL_LEAD_IN_MS = BS_CALL_TRAIL_ARRIVAL_AT_MS + BS_TARGET_MARK_HOLD_MS
+/** Must match the `.seat-block` transform/translate transition duration in App.css. */
+const SEAT_FOCUS_TRANSITION_MS = 460
 const BS_PUNISHMENT_MOVE_DURATION_MS = 420
 const BS_PUNISHMENT_MOVE_STAGGER_MS = 110
-const RESET_REVEAL_START_AT_MS = 2000
-const RESET_REVEAL_INTERVAL_MS = 600
-const RESET_RETURN_BASE_AT_MS = 3000
+const BS_PUNISHMENT_IMPACT_DURATION_MS = 720
+/*
+ * The beat between a Reset or all-pass return being called and the first block being pulled to the
+ * centre, so the call registers before the procedure starts. The BS equivalent is spent drawing the
+ * call trail; Reset has nothing to draw, so it is simply a pause.
+ */
+const RESET_REVEAL_LEAD_IN_MS = 1200
 const RESET_MOVE_DURATION_MS = 2000
-const RESET_PILE_REVEAL_INTERVAL_MS = 280
 const RESET_POST_REVEAL_PAUSE_MS = 2000
 const RESET_GATHER_DURATION_MS = 900
 const RESET_POST_GATHER_PAUSE_MS = 1000
@@ -209,8 +266,23 @@ const HAND_CARD_ANIMATION_STAGGER_MS = 90
 const FRONT_CARD_ENTRY_DURATION_MS = 520
 const FRONT_CARD_ENTRY_STAGGER_MS = 120
 const FRONT_CARD_FLIP_DURATION_MS = 380
+/*
+ * How long the table sits still between the last card being revealed and the Punish button
+ * appearing. Derived from the focus transition rather than fixed: pressing Punish arms
+ * startPunishmentMoveSequence, which measures front-card rects, so the gate has to outlast both the
+ * focused block travelling back to its ring seat and the last card finishing its flip. Retuning the
+ * focus animation must not be able to let a measurement land on something still moving.
+ */
+const BS_PUNISH_PROMPT_DELAY_MS = SEAT_FOCUS_TRANSITION_MS + FRONT_CARD_FLIP_DURATION_MS + 400
+/*
+ * An accusation freezes the table for a beat before it says anything, so the shout registers on its
+ * own before the answer lands. A hit then holds until the accuser presses Punish; a miss spends the
+ * beat below on the denial and hands the turn straight back.
+ */
+const ACCUSATION_VERDICT_DELAY_MS = 1100
+/** How long the accused's "Nope" holds before a missed accusation releases the table. */
+const ACCUSATION_DENIAL_DURATION_MS = 1600
 const PLAYER_POINTS_FLASH_DURATION_MS = 1600
-const PLAYER_PLAY_CALLOUT_DURATION_MS = 2400
 // Deliberately not scaled by G.speedMultiplier: this reports a UI mistake, not a game sequence.
 const BOARD_FAIL_MESSAGE_DURATION_MS = 2400
 const DEFAULT_HAND_CARD_WIDTH = 88
@@ -225,6 +297,14 @@ const ENDGAME_CHART_PADDING = {
 const ENDGAME_CHART_COLORS = ['#ffcf67', '#4fd2a3', '#7ebdff', '#ff8d7b', '#d9b8ff', '#7fe4ff', '#ffb36b', '#c7eb6c'] as const
 const BS_PLAYER_CALLOUT_OPTIONS = ['BS!', "That's a lie!", "That's BS!", 'I call BS!', "You're lying!", 'BS!!!!!'] as const
 const PASS_PLAYER_CALLOUT_OPTIONS = ['Pass', 'Skip', 'I pass', "I'll pass"] as const
+/** `{name}` is filled with the accused seat's display name. */
+const ACCUSE_PLAYER_CALLOUT_OPTIONS = [
+  '{name} is cheating!',
+  'Are you sure about that, {name}?',
+  'Nice try, {name}',
+  'I saw that, {name}!',
+] as const
+const ACCUSATION_DENIAL_CALLOUT = 'Nope'
 const FOREIGNER_SUIT_ORDER = ['spades', 'hearts', 'diamonds', 'clubs'] as const
 
 function getForeignerRankLabel(rank: BlowCowRank) {
@@ -275,14 +355,23 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
   serverState: BoardServerState
   serverStatusLabel: string
   moves: {
+    accuseDreamer: (args: BlowCowAccuseDreamerArgs) => void
+    advanceBSReveal: (args: BlowCowAdvanceBSRevealArgs) => void
+    beginAccusationPunishment: (args: BlowCowBeginAccusationPunishmentArgs) => void
+    beginBSPunishment: (args: BlowCowBeginBSPunishmentArgs) => void
     catHideCard: (args: BlowCowCatHideCardArgs) => void
     callBS: (args?: BlowCowCallBSArgs) => void
     callReset: () => void
+    finalizeAccusation: (args: BlowCowFinalizeAccusationArgs) => void
+    revealBSCard: (args: BlowCowRevealBSCardArgs) => void
+    revealResetCard: (args: BlowCowRevealResetCardArgs) => void
+    advanceResetReveal: (args: BlowCowAdvanceResetRevealArgs) => void
     finalizeBSResolution: (args: BlowCowFinalizeBSResolutionArgs) => void
     finalizeResetResolution: (args: BlowCowFinalizeResetResolutionArgs) => void
     pass: (args?: BlowCowPassArgs) => void
     play: (args: BlowCowPlayArgs) => void
     playRandom: (args: BlowCowPlayRandomArgs) => void
+    sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
     toggleDirection: () => void
@@ -400,10 +489,6 @@ function toHandCard(card: BlowCowCard): HandCard {
   }
 }
 
-function formatCardList(cards: BlowCowCard[]) {
-  return cards.map((card) => getCardLabel(card.sprite)).join(', ')
-}
-
 function getPlayCalloutRankLabel(rank: BlowCowRank, cardCount: number) {
   if (rank === 'A') {
     return cardCount === 1 ? 'Ace' : 'Aces'
@@ -429,175 +514,71 @@ function buildPlayCalloutText(claimedRank: BlowCowRank, cardCount: number) {
   return `${countLabel} ${getPlayCalloutRankLabel(claimedRank, cardCount)}`
 }
 
-function pickRandomCalloutText(options: readonly string[]) {
-  return options[Math.floor(Math.random() * options.length)] ?? ''
-}
+/**
+ * Picks a callout line from an id instead of `Math.random`, so every client shows the same one.
+ * Callouts hold until the player who made them acts again rather than expiring after a few seconds,
+ * and clients disagreeing about what somebody shouted is very visible over that long.
+ */
+function pickCalloutTextForID(options: readonly string[], id: string) {
+  let hash = 0
 
-function getBSSequenceRevealedPlayIDs(
-  bsResolution: BlowCowBSResolution | null,
-  bsSequenceProgress: BSSequenceProgress | null,
-) {
-  if (!bsResolution) {
-    return new Set<string>()
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash + id.charCodeAt(index)) % options.length
   }
 
-  const revealedPlayIDs = new Set<string>()
-  const stage = bsSequenceProgress?.resolutionID === bsResolution.id ? bsSequenceProgress.stage : 'called'
-  const revealedAdditionalPlayCount = bsSequenceProgress?.resolutionID === bsResolution.id
-    ? bsSequenceProgress.revealedAdditionalPlayCount
-    : 0
-
-  if (stage !== 'called') {
-    revealedPlayIDs.add(bsResolution.targetPlayID)
-  }
-
-  for (const revealPlay of bsResolution.additionalRevealPlays.slice(0, revealedAdditionalPlayCount)) {
-    revealedPlayIDs.add(revealPlay.playID)
-  }
-
-  return revealedPlayIDs
-}
-
-function buildBSAnnouncement(
-  bsResolution: BlowCowBSResolution,
-  bsSequenceProgress: BSSequenceProgress | null,
-  currentSeatID: string | null,
-  currentPlayerName: string,
-  roomPlayers: MatchPlayer[],
-) {
-  const callerLabel = getSeatDisplayName(bsResolution.callerPlayerID, currentSeatID, currentPlayerName, roomPlayers)
-  const targetLabel = getSeatDisplayName(bsResolution.targetPlayerID, currentSeatID, currentPlayerName, roomPlayers)
-  const punishedLabel = getSeatDisplayName(bsResolution.punishedPlayerID, currentSeatID, currentPlayerName, roomPlayers)
-  const stage = bsSequenceProgress?.resolutionID === bsResolution.id ? bsSequenceProgress.stage : 'called'
-
-  if (stage === 'called') {
-    return {
-      tone: 'warning',
-      title: `${callerLabel} called BS`,
-      detail: `Checking ${targetLabel}'s last play of ${bsResolution.targetPlayCards.length} card(s).`,
-    } satisfies MatchAnnouncement
-  }
-
-  if (stage === 'targetReveal') {
-    return {
-      tone: 'info',
-      title: `Revealing ${targetLabel}'s last play`,
-      detail: formatCardList(bsResolution.targetPlayCards),
-    } satisfies MatchAnnouncement
-  }
-
-  if (stage === 'tableReveal') {
-    return {
-      tone: 'info',
-      title: 'Revealing the rest of the table',
-      detail: bsResolution.additionalRevealPlays.length > 0
-        ? 'Flipping each remaining hidden play face up in order.'
-        : 'No other hidden plays remain on the table.',
-    } satisfies MatchAnnouncement
-  }
-
-  return {
-    tone: 'verdict',
-    title: `${targetLabel} was ${bsResolution.targetWasHonest ? 'honest' : 'dishonest'}`,
-    detail: `${targetLabel} revealed ${formatCardList(bsResolution.targetPlayCards)}. ${bsResolution.reverseRuleTriggered
-      ? `Four or more ${bsResolution.trumpRank}s are on the table, so ${punishedLabel} gets punished.`
-      : `${punishedLabel} gets punished.`}`,
-  } satisfies MatchAnnouncement
-}
-
-function buildResetAnnouncement(
-  resetResolution: BlowCowResetResolution,
-  resetSequenceProgress: ResetSequenceProgress | null,
-  currentSeatID: string | null,
-  currentPlayerName: string,
-  roomPlayers: MatchPlayer[],
-  tableCardCount: number,
-) {
-  const callerLabel = getSeatDisplayName(resetResolution.callerPlayerID, currentSeatID, currentPlayerName, roomPlayers)
-  const stage = resetSequenceProgress?.resolutionID === resetResolution.id ? resetSequenceProgress.stage : 'called'
-  const isRoundReturn = resetResolution.kind === 'roundReturn'
-
-  if (stage === 'called') {
-    return {
-      tone: 'warning',
-      title: isRoundReturn ? 'Everyone passed' : `${callerLabel} called Reset`,
-      detail: isRoundReturn
-        ? `${callerLabel} passed last. Preparing to reveal and return ${tableCardCount} card(s) before the next round begins.`
-        : `The table is full. Preparing to reveal ${tableCardCount} card(s), gather them into a pile, shuffle them, and deal them back out.`,
-    } satisfies MatchAnnouncement
-  }
-
-  if (stage === 'tableReveal') {
-    return {
-      tone: 'info',
-      title: 'Revealing the table',
-      detail: isRoundReturn
-        ? 'Flipping the hidden table cards face up one by one before each card returns to the player who put it down.'
-        : 'Flipping the hidden table cards face up one by one before the cards return to their owners.',
-    } satisfies MatchAnnouncement
-  }
-
-  if (isRoundReturn) {
-    return {
-      tone: 'info',
-      title: 'Returning table cards',
-      detail: 'Each table card is moving back to the player who played it before the next round begins.',
-    } satisfies MatchAnnouncement
-  }
-
-  if (stage === 'gathering') {
-    return {
-      tone: 'info',
-      title: 'Gathering the table into one pile',
-      detail: 'Every revealed table card is sliding into the middle before Reset shuffles the pile.',
-    } satisfies MatchAnnouncement
-  }
-
-  if (stage === 'shuffling') {
-    return {
-      tone: 'info',
-      title: 'Shuffling the pile',
-      detail: 'The gathered pile flips face down and shuffles itself before the redeal.',
-    } satisfies MatchAnnouncement
-  }
-
-  return {
-    tone: 'info',
-    title: 'Dealing the shuffled pile',
-    detail: 'The face-down pile is dealing back out across the active seats before the next round begins.',
-  } satisfies MatchAnnouncement
-}
-
-function getResetSequenceRevealedCardIDs(
-  tablePlays: BlowCowState['table']['plays'],
-  resetResolution: BlowCowResetResolution | null,
-  resetSequenceProgress: ResetSequenceProgress | null,
-) {
-  if (!resetResolution) {
-    return new Set<string>()
-  }
-
-  const hiddenOverlayCardIDs = tablePlays.flatMap((play) => getHiddenOverlayCardIDs(play))
-  const revealedCardIDs = new Set<string>()
-  const stage = resetSequenceProgress?.resolutionID === resetResolution.id ? resetSequenceProgress.stage : 'called'
-  const revealedHiddenCardCount = resetSequenceProgress?.resolutionID === resetResolution.id
-    ? resetSequenceProgress.revealedHiddenCardCount
-    : 0
-  const revealCount = stage === 'called'
-    ? 0
-    : stage === 'tableReveal'
-    ? revealedHiddenCardCount
-    : hiddenOverlayCardIDs.length
-
-  for (const overlayCardID of hiddenOverlayCardIDs.slice(0, revealCount)) {
-    revealedCardIDs.add(overlayCardID)
-  }
-
-  return revealedCardIDs
+  return options[hash] ?? ''
 }
 
 function scaleSequenceDelay(delayMs: number, speedMultiplier: number) {
   return Math.max(0, Math.round(delayMs / speedMultiplier))
+}
+
+/** The seat's avatar, falling back to the whole block if it has not rendered one. */
+function getSeatAvatarElement(boardElement: HTMLElement, seatID: string) {
+  const blockElement = boardElement.querySelector<HTMLElement>(`[data-seat-id="${seatID}"]`)
+
+  return blockElement?.querySelector<HTMLElement>('.seat-avatar-image, .seat-avatar-fallback')
+    ?? blockElement
+    ?? null
+}
+
+/**
+ * Positions the x marks evenly along the segment between the two players' avatars, in board
+ * coordinates. Both endpoints are left clear, so the marks read as a line pointing from one face
+ * to the other rather than covering either. Returns an empty list when either seat is missing,
+ * which is the case for a seat that has not mounted yet.
+ */
+function buildBSCallTrailMarks(
+  boardElement: HTMLElement | null,
+  callerSeatID: string,
+  targetSeatID: string,
+  markIntervalMs: number,
+): BSCallTrailMark[] {
+  const callerElement = boardElement ? getSeatAvatarElement(boardElement, callerSeatID) : null
+  const targetElement = boardElement ? getSeatAvatarElement(boardElement, targetSeatID) : null
+
+  if (!boardElement || !callerElement || !targetElement) {
+    return []
+  }
+
+  const boardRect = boardElement.getBoundingClientRect()
+  const callerRect = callerElement.getBoundingClientRect()
+  const targetRect = targetElement.getBoundingClientRect()
+  const startX = callerRect.left + callerRect.width / 2 - boardRect.left
+  const startY = callerRect.top + callerRect.height / 2 - boardRect.top
+  const endX = targetRect.left + targetRect.width / 2 - boardRect.left
+  const endY = targetRect.top + targetRect.height / 2 - boardRect.top
+
+  return Array.from({ length: BS_CALL_TRAIL_MARK_COUNT }, (_, markIndex) => {
+    const progress = (markIndex + 1) / (BS_CALL_TRAIL_MARK_COUNT + 1)
+
+    return {
+      id: `bs-call-trail-${markIndex}`,
+      left: startX + (endX - startX) * progress,
+      top: startY + (endY - startY) * progress,
+      delayMs: markIndex * markIntervalMs,
+    } satisfies BSCallTrailMark
+  })
 }
 
 function getPunishmentMoveTargetPosition(
@@ -743,7 +724,6 @@ export function BlowCowBoard({
   const lastSeenResetResolutionIDRef = useRef<string | null>(null)
   const hasMountedPassCalloutWatcherRef = useRef(false)
   const lastSeenPassEventIDRef = useRef<string | null>(null)
-  const playCalloutTimeoutIDRef = useRef<number | null>(null)
   const playersFromRoom = roomPlayers.length > 0
     ? roomPlayers
     : ((matchData as MatchPlayer[] | undefined) ?? [])
@@ -754,20 +734,42 @@ export function BlowCowBoard({
   const [frontCardEntrySequence, setFrontCardEntrySequence] = useState<FrontCardEntrySequence | null>(null)
   const [revealFlippingCardIDs, setRevealFlippingCardIDs] = useState<string[]>([])
   const [flashingPointSeatIDs, setFlashingPointSeatIDs] = useState<string[]>([])
-  const [activePlayerCallout, setActivePlayerCallout] = useState<{
-    seatID: string
-    calloutID: string
-    text: string
-  } | null>(null)
+  /**
+   * One callout per seat rather than one for the whole table, because they no longer expire. A
+   * player's line stays over their block until they start a turn, say something else, or the round
+   * ends — so two players can be mid-sentence at once, which a single slot could not express.
+   */
+  const [playerCallouts, setPlayerCallouts] = useState<Record<string, { calloutID: string; text: string }>>({})
+  /**
+   * Every callout watcher writes through here: a seat's line replaces whatever that seat was saying
+   * and leaves every other seat alone. There is no timer to cancel, because nothing expires.
+   */
+  const showPlayerCallout = (seatID: string, calloutID: string, text: string) => {
+    setPlayerCallouts((previousCallouts) => ({
+      ...previousCallouts,
+      [seatID]: { calloutID, text },
+    }))
+  }
   const [selectedTrumpRank, setSelectedTrumpRank] = useState<BlowCowRank>('Q')
   const [selectedDrunkardRandomPlayCardCount, setSelectedDrunkardRandomPlayCardCount] = useState(1)
   const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
-  const [bsSequenceProgress, setBSSequenceProgress] = useState<BSSequenceProgress | null>(null)
+  const [leadInProgress, setLeadInProgress] = useState<RevealLeadInProgress | null>(null)
+  const [isBSPunishPromptReady, setIsBSPunishPromptReady] = useState(false)
+  /**
+   * Paces an accusation's answer. The server decided the outcome the moment the move landed; this is
+   * only about letting the shout land before the reply does, and on a miss letting the denial land
+   * before the accuser is asked to punish themselves.
+   */
+  const [accusationVerdictStage, setAccusationVerdictStage] = useState<{
+    accusationID: string
+    stage: 'pending' | 'denied' | 'punishable'
+  } | null>(null)
   const [resetSequenceProgress, setResetSequenceProgress] = useState<ResetSequenceProgress | null>(null)
   const [isPunishmentFlashActive, setIsPunishmentFlashActive] = useState(false)
   const [punishmentMoveSequence, setPunishmentMoveSequence] = useState<PunishmentMoveSequence | null>(null)
+  const [punishmentImpactSeatID, setPunishmentImpactSeatID] = useState<string | null>(null)
   const [departedPunishmentCardIDs, setDepartedPunishmentCardIDs] = useState<string[]>([])
   const [resetMoveSequence, setResetMoveSequence] = useState<PunishmentMoveSequence | null>(null)
   const [resetGatherSequence, setResetGatherSequence] = useState<PunishmentMoveSequence | null>(null)
@@ -775,7 +777,6 @@ export function BlowCowBoard({
   const [resetDealSequence, setResetDealSequence] = useState<PunishmentMoveSequence | null>(null)
   const [departedResetCardIDs, setDepartedResetCardIDs] = useState<string[]>([])
   const [selectedCharacterCard, setSelectedCharacterCard] = useState<CharacterCardOverlay | null>(null)
-  const [isCharacterStripOpen, setIsCharacterStripOpen] = useState(false)
   const [copyRoomCodeStatus, setCopyRoomCodeStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const {
     message: failMessage,
@@ -786,12 +787,85 @@ export function BlowCowBoard({
   const lastSeenPunishmentEventIDRef = useRef<string | null>(null)
   const finalizeBSResolutionRef = useRef(moves.finalizeBSResolution)
   const finalizeResetResolutionRef = useRef(moves.finalizeResetResolution)
+  const finalizeAccusationRef = useRef(moves.finalizeAccusation)
   const latestBSResolutionRef = useRef<BlowCowBSResolution | null>(G.bsResolution)
+  const latestAccusationRef = useRef<BlowCowAccusation | null>(G.accusation)
   const latestTablePlaysRef = useRef(G.table.plays)
+
+  /*
+   * Both procedures past their lead-in are derived from G, not from a local clock: every flip and
+   * every step is a move, so each client renders the same moment without needing to agree on
+   * timings. Declared up here because the effects below depend on them.
+   *
+   * BS and Reset are mutually exclusive — each blocks the other's move — so a single set of focus
+   * and Continue selectors covers whichever one is live.
+   */
+  const isBSLeadInActive = Boolean(G.bsResolution
+    && leadInProgress?.resolutionID === G.bsResolution.id
+    && leadInProgress.isActive)
+  const isResetLeadInActive = Boolean(G.resetResolution
+    && leadInProgress?.resolutionID === G.resetResolution.id
+    && leadInProgress.isActive)
+  const isBSCaller = Boolean(G.bsResolution && currentSeatID === G.bsResolution.callerPlayerID)
+  const isBSRevealComplete = Boolean(G.bsResolution
+    && G.bsResolution.revealStepIndex >= G.bsResolution.revealOrder.length)
+  const isResetRevealComplete = Boolean(G.resetResolution
+    && G.resetResolution.revealStepIndex >= G.resetResolution.revealOrder.length)
+  const isRevealCaller = isBSCaller
+    || Boolean(G.resetResolution && currentSeatID === G.resetResolution.callerPlayerID)
+  /*
+   * The seat pulled to the centre of the table. Suppressed during either lead-in so the BS call
+   * trail still measures blocks at their ring positions, and during the BS punishment travel for
+   * the same reason. The Reset gather/deal sequences measure too, but they only start once the
+   * reveal is complete, which is exactly when this goes null.
+   */
+  const focusedSeatID = G.bsResolution && !isBSLeadInActive && !G.bsResolution.isPunishing
+    ? G.bsResolution.revealOrder[G.bsResolution.revealStepIndex] ?? null
+    : G.resetResolution && !isResetLeadInActive
+    ? G.resetResolution.revealOrder[G.resetResolution.revealStepIndex] ?? null
+    : null
+  // Continue unlocks only once the focused player has nothing left face down. The server enforces
+  // the same rule; this just decides whether to render the button.
+  const canAdvanceReveal = isRevealCaller && focusedSeatID !== null && G.table.plays
+    .filter((play) => play.playerID === focusedSeatID)
+    .every((play) => getFaceDownOverlayCardIDs(play).length === 0)
+  /*
+   * The table cards flying to whoever is taking them. A BS resolution and a caught accusation both
+   * end this way, and the travel is identical, so one descriptor drives one animation. `driverSeatID`
+   * is the client that also schedules the finalize once the cards have landed.
+   *
+   * The accusation branch moves cards that were never revealed, so they travel face down. That is
+   * correct: an accusation asks nothing about what the cards were.
+   */
+  const activePunishment = G.bsResolution?.isPunishing && G.bsResolution.punishment
+    ? {
+        id: G.bsResolution.id,
+        kind: 'bs' as const,
+        punishedSeatID: G.bsResolution.punishment.punishedPlayerID,
+        cardCount: G.bsResolution.punishmentCardCount,
+        driverSeatID: G.bsResolution.callerPlayerID,
+      }
+    : G.accusation?.isPunishing
+    ? {
+        id: G.accusation.id,
+        kind: 'accusation' as const,
+        punishedSeatID: G.accusation.punishedPlayerID,
+        cardCount: G.accusation.punishmentCardCount,
+        driverSeatID: G.accusation.accuserPlayerID,
+      }
+    : null
 
   useEffect(() => {
     finalizeBSResolutionRef.current = moves.finalizeBSResolution
   }, [moves.finalizeBSResolution])
+
+  useEffect(() => {
+    finalizeAccusationRef.current = moves.finalizeAccusation
+  }, [moves.finalizeAccusation])
+
+  useEffect(() => {
+    latestAccusationRef.current = G.accusation
+  }, [G.accusation])
 
   useEffect(() => {
     finalizeResetResolutionRef.current = moves.finalizeResetResolution
@@ -826,11 +900,6 @@ export function BlowCowBoard({
         window.clearTimeout(timeoutID)
       })
       pointFlashTimeoutIDsRef.current.clear()
-
-      if (playCalloutTimeoutIDRef.current !== null) {
-        window.clearTimeout(playCalloutTimeoutIDRef.current)
-        playCalloutTimeoutIDRef.current = null
-      }
     }
   }, [])
 
@@ -849,7 +918,7 @@ export function BlowCowBoard({
   }, [copyRoomCodeStatus])
 
   const hasEscapableLayer = Boolean(
-    selectedCharacterCard || isHistoryOpen || isCharacterStripOpen || selectedTargetSeatID,
+    selectedCharacterCard || isHistoryOpen || selectedTargetSeatID,
   )
 
   // Escape closes one layer at a time, innermost first.
@@ -868,11 +937,6 @@ export function BlowCowBoard({
         return
       }
 
-      if (isCharacterStripOpen) {
-        setIsCharacterStripOpen(false)
-        return
-      }
-
       if (isHistoryOpen) {
         setIsHistoryOpen(false)
         return
@@ -887,17 +951,11 @@ export function BlowCowBoard({
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [hasEscapableLayer, selectedCharacterCard, isCharacterStripOpen, isHistoryOpen, clearFailMessage])
+  }, [hasEscapableLayer, selectedCharacterCard, isHistoryOpen, clearFailMessage])
 
   useEffect(() => {
     if (G.gameStatus === 'staging' || !G.useCharacters || G.gameStatus === 'finished') {
       setSelectedCharacterCard(null)
-    }
-  }, [G.gameStatus, G.useCharacters])
-
-  useEffect(() => {
-    if (G.gameStatus !== 'active' || !G.useCharacters) {
-      setIsCharacterStripOpen(false)
     }
   }, [G.gameStatus, G.useCharacters])
 
@@ -923,45 +981,104 @@ export function BlowCowBoard({
   }, [G.players, currentSeatID])
 
   useEffect(() => {
-    if (G.bsResolution || G.resetResolution) {
+    if (G.bsResolution || G.resetResolution || G.accusation) {
       setSelectedCardIDs([])
     }
-  }, [G.bsResolution?.id, G.resetResolution?.id])
+  }, [G.bsResolution?.id, G.resetResolution?.id, G.accusation?.id])
 
+  /*
+   * The lead-in is the only timed part of either reveal procedure. Everything after it waits on the
+   * caller, who flips each card and confirms each step by hand, so the rest is derived from the
+   * live resolution rather than run off a clock. BS spends the pause drawing its call trail from
+   * the caller's block to the accused's; Reset has nothing to draw and simply waits.
+   */
   useEffect(() => {
-    if (!G.bsResolution) {
-      setBSSequenceProgress(null)
+    const resolution = G.bsResolution ?? G.resetResolution
+
+    if (!resolution) {
+      setLeadInProgress(null)
+      return
+    }
+
+    const { id } = resolution
+
+    setLeadInProgress({
+      resolutionID: id,
+      isActive: true,
+      callTrail: G.bsResolution
+        ? buildBSCallTrailMarks(
+            tableBoardRef.current,
+            G.bsResolution.callerPlayerID,
+            G.bsResolution.targetPlayerID,
+            scaleSequenceDelay(BS_CALL_TRAIL_MARK_INTERVAL_MS, G.speedMultiplier),
+          )
+        : [],
+    })
+
+    const timeoutID = window.setTimeout(() => {
+      setLeadInProgress((previousProgress) => previousProgress?.resolutionID === id
+        ? { ...previousProgress, isActive: false }
+        : previousProgress)
+    }, scaleSequenceDelay(G.bsResolution ? BS_CALL_TRAIL_LEAD_IN_MS : RESET_REVEAL_LEAD_IN_MS, G.speedMultiplier))
+
+    return () => {
+      window.clearTimeout(timeoutID)
+    }
+  }, [G.bsResolution?.id, G.resetResolution?.id, G.speedMultiplier])
+
+  // Holds the table still for a beat after the last card is revealed, so the Punish prompt reads as
+  // a separate moment rather than arriving on top of the final flip.
+  useEffect(() => {
+    if (!G.bsResolution || !isBSRevealComplete || G.bsResolution.isPunishing) {
+      setIsBSPunishPromptReady(false)
+      return
+    }
+
+    const timeoutID = window.setTimeout(() => {
+      setIsBSPunishPromptReady(true)
+    }, scaleSequenceDelay(BS_PUNISH_PROMPT_DELAY_MS, G.speedMultiplier))
+
+    return () => {
+      window.clearTimeout(timeoutID)
+    }
+  }, [G.bsResolution?.id, isBSRevealComplete, G.bsResolution?.isPunishing, G.speedMultiplier])
+
+  /*
+   * Runs on every client off the synced isPunishing flag rather than a local timer, so the travel
+   * stays in step and replays intact for anyone who reconnects mid-animation. Only the caller arms
+   * the finalize that follows it.
+   */
+  useEffect(() => {
+    if (!activePunishment) {
       setPunishmentMoveSequence(null)
       setDepartedPunishmentCardIDs([])
       return
     }
 
-    const { id, punishmentCardCount, targetPlayID, additionalRevealPlays } = G.bsResolution
+    const { id, kind, cardCount: punishmentCardCount, driverSeatID } = activePunishment
     const timeoutIDs: number[] = []
-    const animationFrameIDs: number[] = []
-    const shouldAutoFinalize = Boolean(currentSeatID && ctx.currentPlayer === currentSeatID && isActive)
-    const targetRevealAt = scaleSequenceDelay(BS_TARGET_REVEAL_AT_MS, G.speedMultiplier)
-    const tableRevealStartAt = scaleSequenceDelay(BS_TABLE_REVEAL_START_AT_MS, G.speedMultiplier)
-    const additionalRevealInterval = scaleSequenceDelay(BS_ADDITIONAL_REVEAL_INTERVAL_MS, G.speedMultiplier)
-    const verdictAt = scaleSequenceDelay(
-      BS_VERDICT_BASE_AT_MS + additionalRevealPlays.length * BS_ADDITIONAL_REVEAL_INTERVAL_MS,
-      G.speedMultiplier,
-    )
     const punishmentMoveDuration = scaleSequenceDelay(BS_PUNISHMENT_MOVE_DURATION_MS, G.speedMultiplier)
     const punishmentMoveStagger = scaleSequenceDelay(BS_PUNISHMENT_MOVE_STAGGER_MS, G.speedMultiplier)
+    const punishmentImpactDuration = scaleSequenceDelay(BS_PUNISHMENT_IMPACT_DURATION_MS, G.speedMultiplier)
     const punishmentMoveTotalDuration = punishmentCardCount > 0
       ? punishmentMoveDuration + Math.max(0, punishmentCardCount - 1) * punishmentMoveStagger
       : 0
 
     const startPunishmentMoveSequence = () => {
       const boardElement = tableBoardRef.current
-      const currentBSResolution = latestBSResolutionRef.current
-      const punishedPlayerID = currentBSResolution?.punishedPlayerID ?? null
+      // Re-read at animation-frame time rather than trusting the render that armed this, so the
+      // measurement cannot run against a resolution that has already been finalized.
+      const liveProcedure = kind === 'bs' ? latestBSResolutionRef.current : latestAccusationRef.current
+      const punishedPlayerID = liveProcedure?.id !== id
+        ? null
+        : kind === 'bs'
+        ? latestBSResolutionRef.current?.punishment?.punishedPlayerID ?? null
+        : latestAccusationRef.current?.punishedPlayerID ?? null
       const destinationElement = punishedPlayerID
         ? boardElement?.querySelector<HTMLElement>(`[data-punishment-target-name="${punishedPlayerID}"]`) ?? null
         : null
 
-      if (!boardElement || !destinationElement || !currentBSResolution || currentBSResolution.id !== id) {
+      if (!boardElement || !destinationElement) {
         setPunishmentMoveSequence(null)
         setDepartedPunishmentCardIDs([])
         return
@@ -969,12 +1086,11 @@ export function BlowCowBoard({
 
       const boardRect = boardElement.getBoundingClientRect()
       const destinationRect = destinationElement.getBoundingClientRect()
+      // A BS resolution has already turned every card face up for every viewer, so `play.cards`
+      // carries real sprites. An accusation reveals nothing, so the same read yields card backs and
+      // the cards travel face down, which is what actually happened at the table.
       const cards = latestTablePlaysRef.current.flatMap((play) => {
-        const displayCards = currentBSResolution.additionalRevealPlays.find((revealPlay) => revealPlay.playID === play.id)?.cards
-          ?? (play.id === currentBSResolution.targetPlayID ? currentBSResolution.targetPlayCards : undefined)
-          ?? play.cards
-
-        return displayCards.flatMap((card) => {
+        return play.cards.flatMap((card) => {
           const overlayCardID = `${play.id}-${card.id}`
           const sourceElement = frontCardRefs.current.get(overlayCardID)
           if (!sourceElement) {
@@ -1011,6 +1127,20 @@ export function BlowCowBoard({
         : null)
       setDepartedPunishmentCardIDs([])
 
+      const impactDelayMs = cards.length > 0
+        ? punishmentMoveDuration + cards[cards.length - 1].delayMs
+        : 0
+
+      if (cards.length > 0) {
+        timeoutIDs.push(window.setTimeout(() => {
+          setPunishmentImpactSeatID(punishedPlayerID)
+        }, impactDelayMs))
+
+        timeoutIDs.push(window.setTimeout(() => {
+          setPunishmentImpactSeatID((previousSeatID) => previousSeatID === punishedPlayerID ? null : previousSeatID)
+        }, impactDelayMs + punishmentImpactDuration))
+      }
+
       cards.forEach((card) => {
         timeoutIDs.push(window.setTimeout(() => {
           setDepartedPunishmentCardIDs((previousIDs) => previousIDs.includes(card.id)
@@ -1020,82 +1150,36 @@ export function BlowCowBoard({
       })
     }
 
-    setBSSequenceProgress({
-      resolutionID: id,
-      stage: 'called',
-      revealedAdditionalPlayCount: 0,
-      animatedPlayID: null,
-    })
-    setPunishmentMoveSequence(null)
-    setDepartedPunishmentCardIDs([])
-
-    timeoutIDs.push(window.setTimeout(() => {
-      setBSSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-        ? {
-            ...previousProgress,
-            stage: 'targetReveal',
-            animatedPlayID: targetPlayID,
-          }
-        : previousProgress)
-    }, targetRevealAt))
-
-    if (additionalRevealPlays.length === 0) {
-      timeoutIDs.push(window.setTimeout(() => {
-        setBSSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-          ? {
-              ...previousProgress,
-              stage: 'tableReveal',
-              animatedPlayID: null,
-            }
-          : previousProgress)
-      }, tableRevealStartAt))
-    }
-
-    additionalRevealPlays.forEach((revealPlay, revealIndex) => {
-      timeoutIDs.push(window.setTimeout(() => {
-        setBSSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-          ? {
-              ...previousProgress,
-              stage: 'tableReveal',
-              revealedAdditionalPlayCount: revealIndex + 1,
-              animatedPlayID: revealPlay.playID,
-            }
-          : previousProgress)
-      }, tableRevealStartAt + revealIndex * additionalRevealInterval))
+    const animationFrameID = window.requestAnimationFrame(() => {
+      startPunishmentMoveSequence()
     })
 
-    timeoutIDs.push(window.setTimeout(() => {
-      setBSSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-        ? {
-            ...previousProgress,
-            stage: 'verdict',
-            animatedPlayID: null,
-          }
-        : previousProgress)
-
-      animationFrameIDs.push(window.requestAnimationFrame(() => {
-        startPunishmentMoveSequence()
-      }))
-    }, verdictAt))
-
-    if (shouldAutoFinalize) {
+    if (currentSeatID && currentSeatID === driverSeatID && isActive) {
       timeoutIDs.push(window.setTimeout(() => {
-        finalizeBSResolutionRef.current({ resolutionID: id })
-      }, verdictAt + punishmentMoveTotalDuration))
+        if (kind === 'bs') {
+          finalizeBSResolutionRef.current({ resolutionID: id })
+          return
+        }
+
+        finalizeAccusationRef.current({ accusationID: id })
+      }, punishmentMoveTotalDuration + punishmentImpactDuration))
     }
 
     return () => {
-      animationFrameIDs.forEach((animationFrameID) => {
-        window.cancelAnimationFrame(animationFrameID)
-      })
+      window.cancelAnimationFrame(animationFrameID)
       timeoutIDs.forEach((timeoutID) => {
         window.clearTimeout(timeoutID)
       })
     }
-  }, [G.bsResolution?.id, G.speedMultiplier, ctx.currentPlayer, isActive])
+  }, [activePunishment?.id, activePunishment?.kind, G.speedMultiplier, currentSeatID, isActive])
 
+  /*
+   * The animation chain that follows a Reset or all-pass reveal. It waits for the caller to finish
+   * revealing the table by hand, so it starts from `isResetRevealComplete` rather than from the
+   * resolution arriving. Everything before that point is derived from `G.resetResolution`.
+   */
   useEffect(() => {
-    if (!G.resetResolution) {
+    if (!G.resetResolution || !isResetRevealComplete) {
       setResetSequenceProgress(null)
       setResetMoveSequence(null)
       setResetGatherSequence(null)
@@ -1108,20 +1192,12 @@ export function BlowCowBoard({
     const { id, kind } = G.resetResolution
     const timeoutIDs: number[] = []
     const animationFrameIDs: number[] = []
-    const shouldAutoFinalize = Boolean(currentSeatID && ctx.currentPlayer === currentSeatID && isActive)
-    const hiddenOverlayCardIDs = G.table.plays.flatMap((play) => getHiddenOverlayCardIDs(play))
+    const shouldAutoFinalize = Boolean(currentSeatID && currentSeatID === G.resetResolution.callerPlayerID && isActive)
     if (kind === 'roundReturn') {
-      const revealStartAt = scaleSequenceDelay(RESET_REVEAL_START_AT_MS, G.speedMultiplier)
-      const revealInterval = scaleSequenceDelay(RESET_REVEAL_INTERVAL_MS, G.speedMultiplier)
-      const returnStartAt = scaleSequenceDelay(
-        RESET_RETURN_BASE_AT_MS + RESET_REVEAL_INTERVAL_MS * hiddenOverlayCardIDs.length,
-        G.speedMultiplier,
-      )
+      // A beat to let the last flip land, then the cards go straight home.
+      const returnStartAt = scaleSequenceDelay(RESET_POST_REVEAL_PAUSE_MS, G.speedMultiplier)
       const returnMoveDuration = scaleSequenceDelay(RESET_MOVE_DURATION_MS, G.speedMultiplier)
-      const resolveAt = scaleSequenceDelay(
-        RESET_RETURN_BASE_AT_MS + RESET_REVEAL_INTERVAL_MS * hiddenOverlayCardIDs.length + RESET_MOVE_DURATION_MS,
-        G.speedMultiplier,
-      )
+      const resolveAt = returnStartAt + returnMoveDuration
 
       const startResetMoveSequence = () => {
         const boardElement = tableBoardRef.current
@@ -1191,9 +1267,7 @@ export function BlowCowBoard({
 
       setResetSequenceProgress({
         resolutionID: id,
-        stage: 'called',
-        revealedHiddenCardCount: 0,
-        animatedCardID: null,
+        stage: 'returning',
         dealtCardCount: 0,
       })
       setResetMoveSequence(null)
@@ -1202,29 +1276,7 @@ export function BlowCowBoard({
       setResetDealSequence(null)
       setDepartedResetCardIDs([])
 
-      hiddenOverlayCardIDs.forEach((overlayCardID, revealIndex) => {
-        timeoutIDs.push(window.setTimeout(() => {
-          setResetSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-            ? {
-                ...previousProgress,
-                stage: 'tableReveal',
-                revealedHiddenCardCount: revealIndex + 1,
-                animatedCardID: overlayCardID,
-              }
-            : previousProgress)
-        }, revealStartAt + revealIndex * revealInterval))
-      })
-
       timeoutIDs.push(window.setTimeout(() => {
-        setResetSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-          ? {
-              ...previousProgress,
-              stage: 'returning',
-              revealedHiddenCardCount: hiddenOverlayCardIDs.length,
-              animatedCardID: null,
-            }
-          : previousProgress)
-
         animationFrameIDs.push(window.requestAnimationFrame(() => {
           startResetMoveSequence()
         }))
@@ -1246,19 +1298,14 @@ export function BlowCowBoard({
       }
     }
 
-    const revealStartAt = scaleSequenceDelay(RESET_REVEAL_START_AT_MS, G.speedMultiplier)
-    const revealInterval = scaleSequenceDelay(RESET_PILE_REVEAL_INTERVAL_MS, G.speedMultiplier)
-    const revealPhaseDuration = hiddenOverlayCardIDs.length > 0
-      ? (hiddenOverlayCardIDs.length - 1) * revealInterval
-      : 0
-    const postRevealPause = scaleSequenceDelay(RESET_POST_REVEAL_PAUSE_MS, G.speedMultiplier)
     const gatherDuration = scaleSequenceDelay(RESET_GATHER_DURATION_MS, G.speedMultiplier)
     const postGatherPause = scaleSequenceDelay(RESET_POST_GATHER_PAUSE_MS, G.speedMultiplier)
     const shuffleDuration = scaleSequenceDelay(RESET_PILE_SHUFFLE_DURATION_MS, G.speedMultiplier)
     const dealInterval = scaleSequenceDelay(RESET_DEAL_INTERVAL_MS, G.speedMultiplier)
     const dealDuration = scaleSequenceDelay(RESET_DEAL_DURATION_MS, G.speedMultiplier)
     const postDealPause = scaleSequenceDelay(RESET_POST_DEAL_PAUSE_MS, G.speedMultiplier)
-    const gatherStartAt = revealStartAt + revealPhaseDuration + postRevealPause
+    // A beat to let the last flip land before the table is swept up.
+    const gatherStartAt = scaleSequenceDelay(RESET_POST_REVEAL_PAUSE_MS, G.speedMultiplier)
     const gatherEndAt = gatherStartAt + gatherDuration
     const shuffleStartAt = gatherEndAt + postGatherPause
     const dealStartAt = shuffleStartAt + shuffleDuration
@@ -1410,9 +1457,7 @@ export function BlowCowBoard({
 
     setResetSequenceProgress({
       resolutionID: id,
-      stage: 'called',
-      revealedHiddenCardCount: 0,
-      animatedCardID: null,
+      stage: 'gathering',
       dealtCardCount: 0,
     })
     setResetMoveSequence(null)
@@ -1421,29 +1466,7 @@ export function BlowCowBoard({
     setResetDealSequence(null)
     setDepartedResetCardIDs([])
 
-    hiddenOverlayCardIDs.forEach((overlayCardID, revealIndex) => {
-      timeoutIDs.push(window.setTimeout(() => {
-        setResetSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-          ? {
-              ...previousProgress,
-              stage: 'tableReveal',
-              revealedHiddenCardCount: revealIndex + 1,
-              animatedCardID: overlayCardID,
-            }
-          : previousProgress)
-      }, revealStartAt + revealIndex * revealInterval))
-    })
-
     timeoutIDs.push(window.setTimeout(() => {
-      setResetSequenceProgress((previousProgress) => previousProgress?.resolutionID === id
-        ? {
-            ...previousProgress,
-            stage: 'gathering',
-            revealedHiddenCardCount: hiddenOverlayCardIDs.length,
-            animatedCardID: null,
-          }
-        : previousProgress)
-
       animationFrameIDs.push(window.requestAnimationFrame(() => {
         startResetGatherSequence()
       }))
@@ -1466,8 +1489,6 @@ export function BlowCowBoard({
         ? {
             ...previousProgress,
             stage: 'shuffling',
-            revealedHiddenCardCount: hiddenOverlayCardIDs.length,
-            animatedCardID: null,
           }
         : previousProgress)
 
@@ -1487,8 +1508,6 @@ export function BlowCowBoard({
         ? {
             ...previousProgress,
             stage: 'dealing',
-            revealedHiddenCardCount: hiddenOverlayCardIDs.length,
-            animatedCardID: null,
             dealtCardCount: 0,
           }
         : previousProgress)
@@ -1540,9 +1559,12 @@ export function BlowCowBoard({
   const currentTrump = G.round.trumpRank
   const bsResolution = G.bsResolution
   const resetResolution = G.resetResolution
+  const accusation = G.accusation
   const isBSSequenceActive = bsResolution !== null
   const isResetSequenceActive = resetResolution !== null
-  const isResolutionSequenceActive = isBSSequenceActive || isResetSequenceActive
+  const isAccusationActive = accusation !== null
+  const isResolutionSequenceActive = isBSSequenceActive || isResetSequenceActive || isAccusationActive
+  const resolutionSequenceLabel = isBSSequenceActive ? 'BS' : isAccusationActive ? 'accusation' : 'Reset'
   const actingPlayerID = ctx.currentPlayer
   const currentPlayerState = currentSeatID ? (G.players[currentSeatID] ?? null) : null
   const handCards = currentPlayerState ? sortCards(currentPlayerState.hand).map(toHandCard) : []
@@ -1565,12 +1587,15 @@ export function BlowCowBoard({
   // The Pawn's en-passant target needs no separate control: it is one of the seats
   // `resolveClientBSTargetSelection` accepts, so clicking that block and pressing Call BS
   // exercises the power.
-  // Any other seat can be clicked. Whether the challenge is legal is decided on the attempt,
-  // so a wrong pick explains itself instead of leaving a dead button.
-  // Any live opponent can be clicked at any time, on or off your turn. The Call BS and Accuse
-  // buttons explain why an attempt is illegal rather than the block refusing to be selected.
+  // Any live opponent can be pointed at, on or off your turn: hovering a block reveals its Call BS
+  // and Accuse buttons, and those explain why an attempt is illegal rather than the block refusing
+  // to respond. Suspended while a resolution plays, so the sequence is not competing with hover
+  // frames and action bubbles, and withheld from spectators, who have nothing to challenge with.
+  const canTargetSeats = !isSpectator && G.gameStatus === 'active' && !isResolutionSequenceActive
   const selectableTargetSeatIDSet = new Set(
-    G.seatOrder.filter((seatID) => seatID !== currentSeatID && !G.players[seatID].hasLeft),
+    canTargetSeats
+      ? G.seatOrder.filter((seatID) => seatID !== currentSeatID && !G.players[seatID].hasLeft)
+      : [],
   )
   const resolvedTargetSeatID = selectedTargetSeatID && selectableTargetSeatIDSet.has(selectedTargetSeatID)
     ? selectedTargetSeatID
@@ -1624,8 +1649,34 @@ export function BlowCowBoard({
     && !isFinalTwoResolutionTurn
     && maxRandomPlayCardCount > 0
     && (currentTrump !== null || !isRepeatingPreviousTrump)
-  const canToggleDirection = isInteractiveTurn && (isContrarian || isDreamer)
+  // The Contrarian is bound to their own turn. The Dreamer is not: reaching into someone else's turn
+  // is the whole cheat, and the only thing that can undo it is an accusation before that turn ends.
+  const canToggleDirection = G.gameStatus === 'active'
+    && isActive
+    && !isResolutionSequenceActive
+    && !currentPlayerState?.hasLeft
+    && (isDreamer || (isContrarian && isCurrentPlayersTurn))
+  // Mirrors the server's one-per-turn guard. Any play of yours stamped with the live turn number
+  // while somebody else is on the clock can only be one you sneaked, so this needs no extra state.
+  const hasSneakedThisTurn = Boolean(currentSeatID) && G.table.plays.some(
+    (play) => play.playerID === currentSeatID && play.playedAtTurn === ctx.turn,
+  )
+  const isSneakWindowOpen = G.gameStatus === 'active'
+    && isActive
+    && isDreamer
+    && !isCurrentPlayersTurn
+    && !isResolutionSequenceActive
+    && !currentPlayerState?.hasLeft
+    && currentTrump !== null
+    && !hasSneakedThisTurn
+  const canSneakPlay = isSneakWindowOpen && selectedCards.length === 1
   const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn
+  const selectedPlayCallout = currentTrump && selectedCards.length > 0
+    ? buildPlayCalloutText(currentTrump, selectedCards.length)
+    : null
+  const selectedTrumpPlayCallout = selectedCards.length > 0
+    ? buildPlayCalloutText(selectedTrumpRank, selectedCards.length)
+    : null
   const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable
   const canUseCat = isInteractiveTurn && currentPlayerState?.character === 'The Cat' && !isResolutionSequenceActive
   const selectedForeignerCardLabel = FOREIGNER_CARD_OPTIONS.find((option) => option.value === selectedForeignerCardCode)?.label ?? 'the selected card'
@@ -1698,34 +1749,53 @@ export function BlowCowBoard({
   const directionIndicatorLabel = canToggleDirection
     ? isContrarian
       ? `Turn direction is ${directionArrowOrientation}. Click to use The Contrarian and flip the direction.`
-      : `Turn direction is ${directionArrowOrientation}. Click to use The Dreamer and change the direction. BS can catch it if the direction stays changed by the end of your turn.`
+      : `Turn direction is ${directionArrowOrientation}. Click to use The Dreamer and change the direction, on anyone's turn. Accuse can catch it until that turn ends.`
     : `Turn direction is ${directionArrowOrientation}.`
   const latestTablePlay = G.table.plays[G.table.plays.length - 1] ?? null
   const tableRevealKey = G.table.plays.map((play) => `${play.id}:${play.revealedAtTurn ?? 'hidden'}:${(play.revealedCardIDs ?? []).join(',')}`).join('|')
   const catHiddenKey = G.table.plays.map((play) => `${play.id}:${(play.rehiddenCardIDs ?? []).join(',')}`).join('|')
-  const bsSequenceRevealedPlayIDs = getBSSequenceRevealedPlayIDs(bsResolution, bsSequenceProgress)
-  const bsSequenceAnimatedPlayID = bsSequenceProgress?.resolutionID === bsResolution?.id
-    ? (bsSequenceProgress?.animatedPlayID ?? null)
+  // The x marks belong to the lead-in only; they unmount as soon as the reveal procedure starts.
+  const bsCallTrailMarks = bsResolution && leadInProgress?.resolutionID === bsResolution.id
+    && leadInProgress.isActive
+    ? leadInProgress.callTrail
+    : []
+  // The target frame stays stamped on the accused for the whole resolution, not just the lead-in.
+  const bsTargetMarkSeatID = bsResolution?.targetPlayerID ?? null
+  // The bullseye holds off until the last x mark has landed, so it reads as the trail arriving
+  // rather than as a second thing happening at the same time. Its keyframe starts at opacity 0
+  // and fills backwards, so the delay alone hides it; no timer and no extra state. When the trail
+  // could not be measured there is nothing to wait for and it stamps immediately.
+  const bsTargetMarkDelayMs = leadInProgress?.resolutionID === bsResolution?.id
+    && (leadInProgress?.callTrail.length ?? 0) > 0
+    ? scaleSequenceDelay(BS_CALL_TRAIL_ARRIVAL_AT_MS, G.speedMultiplier)
+    : 0
+  // Unmasked only once the caller has confirmed the accused's step, so the label cannot be read
+  // ahead of the reveal.
+  const bsVerdictSeatID = bsResolution?.targetVerdict ? bsResolution.targetPlayerID : null
+  const bsVerdictIsHonest = bsResolution?.targetVerdict?.targetWasHonest ?? null
+  const bsPunishSeatID = isBSCaller && isBSRevealComplete && isBSPunishPromptReady && !bsResolution?.isPunishing
+    ? bsResolution?.punishment?.punishedPlayerID ?? null
     : null
-  const resetSequenceRevealedCardIDs = getResetSequenceRevealedCardIDs(G.table.plays, resetResolution, resetSequenceProgress)
-  const resetSequenceAnimatedCardID = resetSequenceProgress?.resolutionID === resetResolution?.id
-    ? (resetSequenceProgress?.animatedCardID ?? null)
+  // Everything an accusation shows waits on the freeze beat, so the shout is not immediately talked
+  // over by its own answer.
+  const isAccusationPunishable = Boolean(accusation
+    && accusationVerdictStage?.accusationID === accusation.id
+    && accusationVerdictStage.stage === 'punishable')
+  // Whoever is about to take the table goes red and stays red for the rest of the accusation,
+  // travel included. That is the accused on a hit and the accuser on a miss.
+  const accusedCheatSeatID = accusation && isAccusationPunishable
+    ? accusation.punishedPlayerID
     : null
+  const accusationPunishSeatID = accusedCheatSeatID
+    && accusation
+    && currentSeatID === accusation.accuserPlayerID
+    && !accusation.isPunishing
+    ? accusedCheatSeatID
+    : null
+  const calloutTextBySeatID = Object.fromEntries(
+    Object.entries(playerCallouts).map(([seatID, callout]) => [seatID, callout.text]),
+  )
   const revealFlippingCardIDSet = new Set(revealFlippingCardIDs)
-  const bsResolutionPlayCardsByID = new Map<string, BlowCowCard[]>()
-
-  if (bsResolution) {
-    bsResolutionPlayCardsByID.set(bsResolution.targetPlayID, bsResolution.targetPlayCards)
-    for (const revealPlay of bsResolution.additionalRevealPlays) {
-      bsResolutionPlayCardsByID.set(revealPlay.playID, revealPlay.cards)
-    }
-  }
-
-  const activeAnnouncement = bsResolution
-    ? buildBSAnnouncement(bsResolution, bsSequenceProgress, currentSeatID, playerName, playersFromRoom)
-    : resetResolution
-    ? buildResetAnnouncement(resetResolution, resetSequenceProgress, currentSeatID, playerName, playersFromRoom, totalCardsOnTable)
-    : null
   const activeMoveSequence = punishmentMoveSequence ?? resetMoveSequence
   const resetPileShuffleDurationMs = scaleSequenceDelay(RESET_PILE_SHUFFLE_DURATION_MS, G.speedMultiplier)
   const enteringHandCardIndexByID = new Map(enteringHandCardIDs.map((cardID, index) => [cardID, index]))
@@ -1735,7 +1805,7 @@ export function BlowCowBoard({
 
   useEffect(() => {
     const nextRevealedOverlayCardIDSet = new Set(
-      G.table.plays.flatMap((play) => getRevealedOverlayCardIDs(play)),
+      G.table.plays.flatMap((play) => getFaceUpOverlayCardIDs(play)),
     )
 
     if (!hasMountedRevealWatcherRef.current) {
@@ -1763,7 +1833,9 @@ export function BlowCowBoard({
     }, FRONT_CARD_FLIP_DURATION_MS)
 
     revealFlipTimeoutIDsRef.current.push(timeoutID)
-  }, [G.table.plays, tableRevealKey])
+    // catHiddenKey matters here too: a Cat-rehidden card comes face up by leaving that set, not by
+    // entering revealedCardIDs.
+  }, [G.table.plays, tableRevealKey, catHiddenKey])
 
   useEffect(() => {
     const nextCatHiddenOverlayCardIDSet = new Set(
@@ -1847,20 +1919,21 @@ export function BlowCowBoard({
 
     lastSeenPlayIDRef.current = latestPlayID
 
-    if (playCalloutTimeoutIDRef.current !== null) {
-      window.clearTimeout(playCalloutTimeoutIDRef.current)
+    /*
+     * A play only speaks for itself when the player who made it was the one on the clock. A normal
+     * play ends its own turn, so by the time this runs the turn number has already moved past it;
+     * a play still stamped with the live turn while somebody else is acting is The Dreamer's, and
+     * lands without a word. Whatever they were already saying stays up, uncancelled.
+     */
+    if (latestTablePlay.playedAtTurn === ctx.turn && latestTablePlay.playerID !== ctx.currentPlayer) {
+      return
     }
 
-    setActivePlayerCallout({
-      seatID: latestTablePlay.playerID,
-      calloutID: latestPlayID,
-      text: buildPlayCalloutText(latestTablePlay.claimedRank, getDisplayedPlayCardCount(latestTablePlay)),
-    })
-
-    playCalloutTimeoutIDRef.current = window.setTimeout(() => {
-      setActivePlayerCallout((previousCallout) => previousCallout?.calloutID === latestPlayID ? null : previousCallout)
-      playCalloutTimeoutIDRef.current = null
-    }, PLAYER_PLAY_CALLOUT_DURATION_MS)
+    showPlayerCallout(
+      latestTablePlay.playerID,
+      latestPlayID,
+      buildPlayCalloutText(latestTablePlay.claimedRank, getDisplayedPlayCardCount(latestTablePlay)),
+    )
   }, [latestTablePlay?.id])
 
   useEffect(() => {
@@ -1878,21 +1951,72 @@ export function BlowCowBoard({
 
     lastSeenBSResolutionIDRef.current = latestBSResolutionID
 
-    if (playCalloutTimeoutIDRef.current !== null) {
-      window.clearTimeout(playCalloutTimeoutIDRef.current)
+    showPlayerCallout(
+      bsResolution.callerPlayerID,
+      latestBSResolutionID,
+      pickCalloutTextForID(BS_PLAYER_CALLOUT_OPTIONS, latestBSResolutionID),
+    )
+  }, [bsResolution?.id])
+
+  /*
+   * The whole client-side life of an accusation, in one effect because it is one sequence: the
+   * accuser shouts, the table holds still, and then either the accused goes red straight away or
+   * they deny it first and the accuser goes red instead. Nothing here decides the outcome — the
+   * server settled that when the move landed, and every client is replaying the same
+   * `punishedPlayerID` off the same clock.
+   *
+   * `wasSuccessful` is in the deps, not just the id, so a corrected value re-runs the sequence
+   * rather than leaving a stale verdict on screen. `accuseDreamer` is declared `client: false` so
+   * that should never happen, but the outcome is exactly the thing this effect captures into state,
+   * and a wrong capture here is invisible until someone is punished for it.
+   */
+  useEffect(() => {
+    if (!accusation) {
+      setAccusationVerdictStage(null)
+      return
     }
 
-    setActivePlayerCallout({
-      seatID: bsResolution.callerPlayerID,
-      calloutID: latestBSResolutionID,
-      text: pickRandomCalloutText(BS_PLAYER_CALLOUT_OPTIONS),
-    })
+    const { id, accuserPlayerID, targetPlayerID, wasSuccessful } = accusation
 
-    playCalloutTimeoutIDRef.current = window.setTimeout(() => {
-      setActivePlayerCallout((previousCallout) => previousCallout?.calloutID === latestBSResolutionID ? null : previousCallout)
-      playCalloutTimeoutIDRef.current = null
-    }, PLAYER_PLAY_CALLOUT_DURATION_MS)
-  }, [bsResolution?.id])
+    setAccusationVerdictStage({ accusationID: id, stage: 'pending' })
+    showPlayerCallout(
+      accuserPlayerID,
+      id,
+      pickCalloutTextForID(ACCUSE_PLAYER_CALLOUT_OPTIONS, id).replace(
+        '{name}',
+        getSeatDisplayName(targetPlayerID, currentSeatID, playerName, playersFromRoom),
+      ),
+    )
+
+    const timeoutIDs: number[] = []
+    const verdictDelayMs = scaleSequenceDelay(ACCUSATION_VERDICT_DELAY_MS, G.speedMultiplier)
+
+    timeoutIDs.push(window.setTimeout(() => {
+      if (wasSuccessful) {
+        setAccusationVerdictStage({ accusationID: id, stage: 'punishable' })
+        return
+      }
+
+      // Only a wrong accusation is denied. Callouts are per seat now, so this sits alongside the
+      // accuser's shout rather than replacing it, and the exchange reads as an exchange.
+      setAccusationVerdictStage({ accusationID: id, stage: 'denied' })
+      showPlayerCallout(targetPlayerID, `${id}-denial`, ACCUSATION_DENIAL_CALLOUT)
+    }, verdictDelayMs))
+
+    if (!wasSuccessful) {
+      // Only a miss gets this second beat: the denial has to land before the accuser is asked to
+      // punish themselves, or the two would arrive together and read as one event.
+      timeoutIDs.push(window.setTimeout(() => {
+        setAccusationVerdictStage({ accusationID: id, stage: 'punishable' })
+      }, verdictDelayMs + scaleSequenceDelay(ACCUSATION_DENIAL_DURATION_MS, G.speedMultiplier)))
+    }
+
+    return () => {
+      timeoutIDs.forEach((timeoutID) => {
+        window.clearTimeout(timeoutID)
+      })
+    }
+  }, [accusation?.id, accusation?.wasSuccessful, G.speedMultiplier])
 
   useEffect(() => {
     const latestResetResolutionID = resetResolution?.id ?? null
@@ -1909,20 +2033,11 @@ export function BlowCowBoard({
 
     lastSeenResetResolutionIDRef.current = latestResetResolutionID
 
-    if (playCalloutTimeoutIDRef.current !== null) {
-      window.clearTimeout(playCalloutTimeoutIDRef.current)
-    }
-
-    setActivePlayerCallout({
-      seatID: resetResolution.callerPlayerID,
-      calloutID: latestResetResolutionID,
-      text: resetResolution.kind === 'roundReturn' ? 'All passed' : 'Reset!',
-    })
-
-    playCalloutTimeoutIDRef.current = window.setTimeout(() => {
-      setActivePlayerCallout((previousCallout) => previousCallout?.calloutID === latestResetResolutionID ? null : previousCallout)
-      playCalloutTimeoutIDRef.current = null
-    }, PLAYER_PLAY_CALLOUT_DURATION_MS)
+    showPlayerCallout(
+      resetResolution.callerPlayerID,
+      latestResetResolutionID,
+      resetResolution.kind === 'roundReturn' ? 'All passed' : 'Reset!',
+    )
   }, [resetResolution?.id])
 
   useEffect(() => {
@@ -1945,21 +2060,36 @@ export function BlowCowBoard({
 
     lastSeenPassEventIDRef.current = latestPassEventID
 
-    if (playCalloutTimeoutIDRef.current !== null) {
-      window.clearTimeout(playCalloutTimeoutIDRef.current)
-    }
-
-    setActivePlayerCallout({
-      seatID: latestPassEvent.playerID,
-      calloutID: latestPassEventID,
-      text: pickRandomCalloutText(PASS_PLAYER_CALLOUT_OPTIONS),
-    })
-
-    playCalloutTimeoutIDRef.current = window.setTimeout(() => {
-      setActivePlayerCallout((previousCallout) => previousCallout?.calloutID === latestPassEventID ? null : previousCallout)
-      playCalloutTimeoutIDRef.current = null
-    }, PLAYER_PLAY_CALLOUT_DURATION_MS)
+    // Seeded from the event id rather than picked at random: a pass line now stays up until that
+    // player acts again, and every client disagreeing about the wording would be obvious over that.
+    showPlayerCallout(
+      latestPassEvent.playerID,
+      latestPassEventID,
+      pickCalloutTextForID(PASS_PLAYER_CALLOUT_OPTIONS, latestPassEventID),
+    )
   }, [latestPassEvent?.id])
+
+  /*
+   * The two ways a callout ends, now that none of them expire on their own. A player starting a
+   * turn drops only their own line, so everyone else's stays up; a new round wipes the table clean.
+   * Saying something new simply overwrites, which `showPlayerCallout` handles by itself.
+   */
+  useEffect(() => {
+    setPlayerCallouts((previousCallouts) => {
+      if (!(ctx.currentPlayer in previousCallouts)) {
+        return previousCallouts
+      }
+
+      const { [ctx.currentPlayer]: clearedCallout, ...remainingCallouts } = previousCallouts
+      void clearedCallout
+
+      return remainingCallouts
+    })
+  }, [ctx.currentPlayer, ctx.turn])
+
+  useEffect(() => {
+    setPlayerCallouts((previousCallouts) => Object.keys(previousCallouts).length === 0 ? previousCallouts : {})
+  }, [G.round.roundNumber])
 
   useLayoutEffect(() => {
     const handScrollRowElement = handScrollRowRef.current
@@ -2072,23 +2202,13 @@ export function BlowCowBoard({
     const frontCards = G.table.plays
       .filter((play) => play.playerID === seatID)
       .flatMap((play) => {
-        const revealedBySequence = bsSequenceRevealedPlayIDs.has(play.id)
-        const displayCards = revealedBySequence
-          ? (bsResolutionPlayCardsByID.get(play.id) ?? play.cards)
-          : play.cards
         const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
         const catHiddenCardIDSet = getCatHiddenCardIDSet(play)
 
-        return displayCards.map((card) => {
+        return play.cards.map((card) => {
           const overlayCardID = `${play.id}-${card.id}`
-          const faceDown = !revealedBySequence && (
-            (!isResetSequenceActive && catHiddenCardIDSet.has(card.id))
-            || (
-              play.revealedAtTurn === null
-              && !resetSequenceRevealedCardIDs.has(overlayCardID)
-              && !revealedCardIDSet.has(card.id)
-            )
-          )
+          const faceDown = catHiddenCardIDSet.has(card.id)
+            || (play.revealedAtTurn === null && !revealedCardIDSet.has(card.id))
 
           return {
             id: overlayCardID,
@@ -2096,11 +2216,15 @@ export function BlowCowBoard({
             sprite: card.sprite,
             faceDown,
             isDeparted: departedPunishmentCardIDSet.has(overlayCardID) || departedResetCardIDSet.has(overlayCardID),
-            isFlipping: revealFlippingCardIDSet.has(overlayCardID)
-              || bsSequenceAnimatedPlayID === play.id
-              || resetSequenceAnimatedCardID === overlayCardID,
+            isFlipping: revealFlippingCardIDSet.has(overlayCardID),
             isTargeted: !isResetSequenceActive && play.id === targetPlayID,
             isCatActionable: canUseCat && !faceDown,
+            // Only the caller can flip, and only in the block currently pulled to the centre.
+            isRevealable: isRevealCaller && seatID === focusedSeatID && faceDown,
+            // A masked card is rewritten to rank Joker before it reaches the client, so an
+            // unflipped card can never light up here.
+            isTrumpHighlighted: Boolean(bsResolution) && !faceDown && G.round.trumpRank !== null
+              && countsTowardReverseRule(card, G.round.trumpRank, player.character),
           }
         })
       })
@@ -2123,10 +2247,6 @@ export function BlowCowBoard({
       points: player.points,
     }
   })
-
-  // The viewing player's block sits in the hand row rather than on the ring, which frees the
-  // ring's bottom arc and keeps the whole board shorter. Spectators have no block to dock.
-  const dockedSeatRow = seatRows.find((seat) => seat.id === currentSeatID) ?? null
 
   const frontCardIDsKey = seatRows.map((seat) => `${seat.id}:${seat.frontCards.map((card) => card.id).join(',')}`).join('|')
   const enteringFrontCardIDSet = new Set(enteringFrontCardIDs)
@@ -2329,7 +2449,9 @@ export function BlowCowBoard({
   }, [latestPersonalPunishmentEvent?.id])
 
   const toggleCardSelection = (cardID: string) => {
-    if (!isInteractiveTurn) {
+    // Not turn-bound any more: The Dreamer has to be able to pick the cards they mean to sneak
+    // while somebody else is on the clock.
+    if (!isInteractiveTurn && !isSneakWindowOpen) {
       return
     }
 
@@ -2352,6 +2474,17 @@ export function BlowCowBoard({
     } else {
       moves.play({ cardIDs })
     }
+    setSelectedCardIDs([])
+  }
+
+  // Deliberately silent on the way out: no target to pick, no callout, no announcement. The cards
+  // simply appear in front of the Dreamer and it is on everyone else to notice.
+  const handleSneakPlay = () => {
+    if (!canSneakPlay) {
+      return
+    }
+
+    moves.sneakPlay({ cardIDs: selectedCards.map((card) => card.id) })
     setSelectedCardIDs([])
   }
 
@@ -2430,20 +2563,51 @@ export function BlowCowBoard({
       : 'Only the latest non-passing player can be challenged right now.'
   }
 
-  /** Accuse is the same move, so it inherits every Call BS precondition plus a real cheat. */
+  /**
+   * Accuse shares nothing with Call BS any more. It is legal off your turn, against The Dreamer,
+   * and it never checks whether the cheat is really there — the board cannot know, because
+   * `G.directionTamper` never leaves the server. Everything below is a precondition, not a hint.
+   *
+   * Including the character check: characters are public, so refusing to name anyone else gives
+   * away nothing that the target's own character badge is not already showing.
+   */
   const getAccuseFailure = (seatID: string) => {
-    const callBSFailure = getCallBSFailure(seatID)
-    if (callBSFailure) {
-      return callBSFailure
-    }
-
-    const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seatID)
-    if (getDreamerCheatForPlay(G, targetSelection?.targetPlay ?? null)) {
-      return null
-    }
-
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
-    return `Nothing to accuse. ${seatName} did not break a Dreamer rule on that play.`
+
+    if (G.gameStatus !== 'active') {
+      return 'The match is not running.'
+    }
+
+    if (isResolutionSequenceActive) {
+      return 'Wait for the current resolution to finish.'
+    }
+
+    if (!currentSeatID || !currentPlayerState) {
+      return 'Spectators cannot accuse.'
+    }
+
+    if (currentPlayerState.hasLeft) {
+      return 'You have already left the game.'
+    }
+
+    if (seatID === currentSeatID) {
+      return 'You cannot accuse yourself.'
+    }
+
+    if (G.players[seatID]?.hasLeft) {
+      return `${seatName} has already left the game.`
+    }
+
+    // The one thing about an accusation the board *can* check, because characters are public.
+    if (G.players[seatID]?.character !== 'The Dreamer') {
+      return 'Only Dreamer can be accused'
+    }
+
+    if (currentPlayerState.hasUsedAccusationThisRound) {
+      return 'You already used your accusation this round. You get another one next round.'
+    }
+
+    return null
   }
 
   const handleSeatCallBS = (seatID: string) => {
@@ -2465,9 +2629,8 @@ export function BlowCowBoard({
       return
     }
 
-    moves.callBS({ targetPlayerID: seatID })
+    moves.accuseDreamer({ targetPlayerID: seatID })
     setSelectedTargetSeatID(null)
-    setSelectedCardIDs([])
   }
 
   const handleToggleDirection = () => {
@@ -2493,6 +2656,58 @@ export function BlowCowBoard({
     }
 
     moves.catHideCard({ cardID })
+  }
+
+  // Both procedures share the click target and the Continue button, so these route to whichever
+  // resolution is live. The two can never overlap: each one blocks the other's move.
+  const handleRevealCard = (cardID: string) => {
+    if (!isRevealCaller || !focusedSeatID) {
+      return
+    }
+
+    if (bsResolution) {
+      moves.revealBSCard({ resolutionID: bsResolution.id, cardID })
+      return
+    }
+
+    if (resetResolution) {
+      moves.revealResetCard({ resolutionID: resetResolution.id, cardID })
+    }
+  }
+
+  const handleAdvanceReveal = () => {
+    if (!canAdvanceReveal) {
+      return
+    }
+
+    if (bsResolution) {
+      moves.advanceBSReveal({ resolutionID: bsResolution.id })
+      return
+    }
+
+    if (resetResolution) {
+      moves.advanceResetReveal({ resolutionID: resetResolution.id })
+    }
+  }
+
+  // Only arms the punishment travel. The finalize that empties the table is scheduled by the
+  // effect that watches the synced isPunishing flag, so every client sees the cards fly first.
+  const handleBeginBSPunishment = () => {
+    if (!bsResolution || !bsPunishSeatID) {
+      return
+    }
+
+    moves.beginBSPunishment({ resolutionID: bsResolution.id })
+  }
+
+  // Same split as the BS Punish: this only arms the travel, and the effect watching the synced
+  // isPunishing flag schedules the finalize that empties the table.
+  const handleBeginAccusationPunishment = () => {
+    if (!accusation || !accusationPunishSeatID) {
+      return
+    }
+
+    moves.beginAccusationPunishment({ accusationID: accusation.id })
   }
 
   // These two nodes are measured by the card-travel animations, so every seat must keep a
@@ -2530,8 +2745,8 @@ export function BlowCowBoard({
 
   const renderSeatTargetActions = (seat: SeatRow) => {
     const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seat.id)
-    const dreamerCheat = getDreamerCheatForPlay(G, targetSelection?.targetPlay ?? null)
     const callBSFailure = getCallBSFailure(seat.id)
+    const accuseFailure = getAccuseFailure(seat.id)
 
     return (
       <div className="seat-target-actions">
@@ -2558,15 +2773,74 @@ export function BlowCowBoard({
             event.stopPropagation()
             handleSeatAccuse(seat.id)
           }}
-          title={dreamerCheat
-            ? `Accuse ${seat.name}: as The Dreamer they ${getDreamerCheatLabel(dreamerCheat)}.`
-            : `Accuse ${seat.name} of cheating as The Dreamer.`}
+          title={accuseFailure
+            ?? `Accuse ${seat.name} of cheating as The Dreamer. Costs your one accusation for this round whether or not it lands.`}
           type="button"
         >
           Accuse
         </button>
       </div>
     )
+  }
+
+  /*
+   * The controls that drive a resolution forward: Continue and Punish for a BS reveal, Punish for a
+   * caught accusation. All return null for every seat not currently offering them, and all are gated
+   * on the viewer being the player who raised the procedure, so on any other client these buttons
+   * never enter the DOM at all.
+   */
+  const renderSeatRevealActions = (seat: SeatRow) => {
+    if (seat.id === accusationPunishSeatID) {
+      return (
+        <button
+          className="seat-reveal-action-button punish"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleBeginAccusationPunishment()
+          }}
+          title={accusation?.wasSuccessful
+            ? `${seat.name} was caught cheating and takes every card on the table.`
+            : `The accusation was wrong, so you take every card on the table.`}
+          type="button"
+        >
+          Punish
+        </button>
+      )
+    }
+
+    if (canAdvanceReveal && seat.id === focusedSeatID) {
+      return (
+        <button
+          className="seat-reveal-action-button"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleAdvanceReveal()
+          }}
+          title={`Finish looking at ${seat.name}'s cards and move on.`}
+          type="button"
+        >
+          Continue
+        </button>
+      )
+    }
+
+    if (seat.id === bsPunishSeatID) {
+      return (
+        <button
+          className="seat-reveal-action-button punish"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleBeginBSPunishment()
+          }}
+          title={`${seat.name} takes every card on the table.`}
+          type="button"
+        >
+          Punish
+        </button>
+      )
+    }
+
+    return null
   }
 
   const handleCopyRoomCode = () => {
@@ -2628,20 +2902,22 @@ export function BlowCowBoard({
 
   const selectTrumpAction = {
     description: isResolutionSequenceActive
-      ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
       : currentTrump === null
       ? isRepeatingPreviousTrump && isDreamer
-        ? `Use The Dreamer to pick ${selectedTrumpRank} again. The Dreamer may also send more than 2 cards or overfill the table, and BS can catch any of those cheats before the opening play is revealed.`
+        ? `Use The Dreamer to pick ${selectedTrumpRank} again. The Dreamer may also send more than 2 cards or overfill the table. Accuse catches any of those, but only during the next player's turn.`
         : isRepeatingPreviousTrump
         ? `${selectedTrumpRank} was the previous round trump and cannot be selected again.`
         : isDreamer
-        ? `Choose ${selectedTrumpRank} as trump. The Dreamer may also send more than 2 selected cards and can even overfill the table, but BS can catch the illegal count.`
+        ? `Choose ${selectedTrumpRank} as trump. The Dreamer may also send more than 2 selected cards and can even overfill the table, but Accuse catches an illegal count during the next player's turn.`
         : `Choose ${selectedTrumpRank} as trump and play up to 2 selected cards.`
       : `Trump is already ${currentTrump}. Use Play to make the claim.`,
     disabled: !canSelectTrumpAndPlay,
     icon: PLAY_ICON_SPRITE,
     key: 'select-trump',
-    label: 'Select Trump + Play',
+    label: selectedTrumpPlayCallout
+      ? `Select Trump + Play "${selectedTrumpPlayCallout}"`
+      : 'Select Trump + Play',
     onClick: () => {
       sendSelectionToTable(selectedTrumpRank)
     },
@@ -2649,16 +2925,16 @@ export function BlowCowBoard({
 
   const playAction = {
     description: isResolutionSequenceActive
-      ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
       : currentTrump
       ? isDreamer
-        ? `Play the selected cards and claim they are ${currentTrump}. The Dreamer may send more than 2 cards or overfill the table, but BS can catch the illegal count.`
+        ? `Play the selected cards and claim they are ${currentTrump}. The Dreamer may send more than 2 cards or overfill the table, but Accuse catches an illegal count during the next player's turn.`
         : `Play the selected cards and claim they are ${currentTrump}.`
       : 'Pick a trump rank first.',
     disabled: !canPlayCards,
     icon: PLAY_ICON_SPRITE,
     key: 'play',
-    label: 'Play',
+    label: selectedPlayCallout ? `Play \"${selectedPlayCallout}\"` : 'Play',
     onClick: () => {
       sendSelectionToTable(null)
     },
@@ -2666,7 +2942,7 @@ export function BlowCowBoard({
 
   const playRandomAction = {
     description: isResolutionSequenceActive
-      ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
       : currentTrump === null
       ? isRepeatingPreviousTrump
         ? `${selectedTrumpRank} was the previous round trump and cannot be selected again. Play Random still has to choose a new trump first.`
@@ -2675,20 +2951,52 @@ export function BlowCowBoard({
       ? 'Need cards in hand and room on the table to use Play Random.'
       : `Use The Drunkard to randomly select ${selectedDrunkardRandomPlayCardCount} card(s) from your hand and claim they are ${currentTrump}. If you only ever use Play Random before leaving, you lose 3 points.`,
     disabled: !canPlayRandomCards,
-    icon: PLAY_ICON_SPRITE,
+    icon: PLAY_RANDOM_ICON_SPRITE,
     key: 'play-random',
     label: 'Play Random',
     onClick: handlePlayRandom,
   }
 
+  /*
+   * The only action in this row that belongs to a player who is not on the clock, so it is the only
+   * one shown while the row is headed with somebody else's name. It appears for The Dreamer alone,
+   * which is safe because nobody else's client can know who The Dreamer is — `character` is only
+   * ever populated on the seat you are sitting in.
+   */
+  const sneakPlayAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : currentTrump === null
+      ? 'Nothing to claim until the round has a trump rank.'
+      : hasSneakedThisTurn
+      ? 'You already slipped cards onto the table this turn. Wait for the next one.'
+      : selectedCards.length === 0
+      ? `Select the one card to slip onto the table while ${actingSeatLabel} is acting.`
+      : selectedCards.length > 1
+      ? 'Only one card can be slipped onto the table at a time. Deselect the rest.'
+      : `Use The Dreamer to place 1 card face down in front of you, claiming ${currentTrump}, without saying a word. Accuse catches this until ${actingSeatLabel}'s turn ends.`,
+    disabled: !canSneakPlay,
+    icon: SNEAK_PLAY_ICON_SPRITE,
+    key: 'sneak-play',
+    label: 'Sneak Play',
+    onClick: handleSneakPlay,
+  }
+
   // Call BS and Accuse are not here: they live on the player blocks, because both need a
   // clicked target. See `renderSeatTargetActions`.
+  // Labels the action row for whoever is on the clock. Spectators and waiting players see the
+  // acting player's name, so the row never claims a turn that is not the viewer's.
+  const handActionHeading = isCurrentPlayersTurn
+    ? 'Your Turn'
+    : `${getSeatDisplayName(actingPlayerID, currentSeatID, playerName, playersFromRoom)}'s Turn`
+
   const actionButtons = [
     currentTrump === null ? selectTrumpAction : playAction,
+    ...(isDreamer && !isCurrentPlayersTurn && !isSpectator ? [sneakPlayAction] : []),
     ...(isDrunkard ? [playRandomAction] : []),
     {
       description: isResolutionSequenceActive
-        ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
+        ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
         : isFinalTwoResolutionTurn
         ? 'With two players left, you cannot pass after the other player emptied their hand with a hidden play.'
         : isForeigner && selectedForeignerCardCode !== 'none'
@@ -2704,7 +3012,7 @@ export function BlowCowBoard({
     },
     {
       description: isResolutionSequenceActive
-        ? `Wait for the ${isBSSequenceActive ? 'BS' : 'Reset'} resolution sequence to finish.`
+        ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
         : isFinalTwoResolutionTurn && totalCardsOnTable >= maxCardsOnTable
         ? 'With two players left and the table full, Reset is allowed instead of forcing BS.'
         : totalCardsOnTable >= maxCardsOnTable
@@ -2952,17 +3260,6 @@ export function BlowCowBoard({
         />
       ) : null}
 
-      {!isStaging && isCharacterStripOpen && G.useCharacters ? (
-        <CharacterStripOverlay
-          getSeatLabel={getSeatLabel}
-          onClose={() => {
-            setIsCharacterStripOpen(false)
-          }}
-          onOpenCharacterCard={handleOpenCharacterCard}
-          seats={seatRows}
-        />
-      ) : null}
-
       {/*
         * Washes the mono felt red while a BS call is being resolved. Keyed on the resolution id
         * so a fresh call restarts the animation, which means no state and no timeout to manage.
@@ -2972,17 +3269,34 @@ export function BlowCowBoard({
       ) : null}
 
       {/*
-        * Board level rather than inside the hub, so appearing and clearing never reflows the
-        * trump badge or the direction control underneath it.
+        * The lead-in: x marks pop in one by one along the line from the caller's block to the
+        * accused's, in board coordinates measured when the resolution arrived.
         */}
-      {activeAnnouncement ? (
-        <div
-          aria-live="polite"
-          className={`match-announcement board-announcement ${activeAnnouncement.tone}`}
-          role="status"
-        >
-          <strong>{activeAnnouncement.title}</strong>
-          <span>{activeAnnouncement.detail}</span>
+      {bsCallTrailMarks.length > 0 ? (
+        <div aria-hidden="true" className="bs-call-trail">
+          {bsCallTrailMarks.map((mark) => (
+            <img
+              alt=""
+              className="bs-call-trail-mark"
+              key={mark.id}
+              src={X_ICON_SPRITE}
+              style={{
+                left: `${mark.left}px`,
+                top: `${mark.top}px`,
+                animationDelay: `${mark.delayMs}ms`,
+              }}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {/*
+        * Board level rather than in the hub, so it floats over the felt instead of pushing the
+        * trump badge and direction control around.
+        */}
+      {failMessage ? (
+        <div className="board-fail-message" key={failMessage.id} role="alert">
+          {failMessage.text}
         </div>
       ) : null}
 
@@ -3084,19 +3398,6 @@ export function BlowCowBoard({
                 <span className="history-count-pill">{historyEvents.length}</span>
               </button>
 
-              {G.useCharacters ? (
-                <button
-                  aria-expanded={isCharacterStripOpen}
-                  aria-haspopup="dialog"
-                  className={`subtle-button character-strip-toggle ${isCharacterStripOpen ? 'active' : ''}`}
-                  onClick={() => {
-                    setIsCharacterStripOpen((previousValue) => !previousValue)
-                  }}
-                  type="button"
-                >
-                  Characters
-                </button>
-              ) : null}
             </>
           ) : null}
 
@@ -3207,17 +3508,24 @@ export function BlowCowBoard({
       <>
       <PlayerRing
         anchorSeatID={currentSeatID}
-        calloutSeatID={activePlayerCallout?.seatID ?? null}
-        calloutText={activePlayerCallout?.text ?? ''}
-        dockedSeatID={dockedSeatRow?.id ?? null}
+        accusedCheatSeatID={accusedCheatSeatID}
+        focusedSeatID={focusedSeatID}
+        bsTargetMarkDelayMs={bsTargetMarkDelayMs}
+        bsTargetSeatID={bsTargetMarkSeatID}
+        bsVerdictIsHonest={bsVerdictIsHonest}
+        bsVerdictSeatID={bsVerdictSeatID}
+        calloutTextBySeatID={calloutTextBySeatID}
         enteringCardIDSet={enteringFrontCardIDSet}
         flashingPointSeatIDSet={flashingPointSeatIDSet}
         getSeatLabel={getSeatLabel}
         onCatHideCard={handleCatHideCard}
         onOpenCharacterCard={handleOpenCharacterCard}
+        onRevealCard={handleRevealCard}
         onSelectSeat={handleSeatSelect}
+        punishmentImpactSeatID={punishmentImpactSeatID}
         registerFrontCard={registerFrontCard}
         registerHandCountPill={registerHandCountPill}
+        renderRevealActions={renderSeatRevealActions}
         renderTargetActions={renderSeatTargetActions}
         seats={seatRows}
         selectableSeatIDSet={selectableTargetSeatIDSet}
@@ -3230,9 +3538,8 @@ export function BlowCowBoard({
           directionToggleTitle={canToggleDirection
             ? isContrarian
               ? 'Use The Contrarian to flip the turn direction.'
-              : 'Use The Dreamer to change the direction. BS can catch this if the direction stays changed.'
+              : "Use The Dreamer to change the direction, on anyone's turn. Accuse can catch it until that turn ends."
             : undefined}
-          failMessage={failMessage}
           frontCardsTooltip={frontCardsColumnTooltip}
           maxCardsOnTable={maxCardsOnTable}
           onToggleDirection={handleToggleDirection}
@@ -3273,7 +3580,7 @@ export function BlowCowBoard({
                   <button
                     aria-pressed={isSelected}
                     className={`hand-card-button ${isSelected ? 'selected' : ''}${enteringIndex === undefined ? '' : ' entering'}`}
-                    disabled={!isInteractiveTurn}
+                    disabled={!isInteractiveTurn && !isSneakWindowOpen}
                     key={card.id}
                     onClick={() => {
                       toggleCardSelection(card.id)
@@ -3296,25 +3603,13 @@ export function BlowCowBoard({
             </div>
           </div>
 
-          {dockedSeatRow ? (
-            <SeatBlock
-              calloutText={activePlayerCallout?.seatID === dockedSeatRow.id ? activePlayerCallout.text : null}
-              enteringCardIDSet={enteringFrontCardIDSet}
-              isDocked
-              isPointsFlashing={flashingPointSeatIDSet.has(dockedSeatRow.id)}
-              isSelectable={false}
-              isSelected={false}
-              onCatHideCard={handleCatHideCard}
-              onOpenCharacterCard={handleOpenCharacterCard}
-              onSelect={handleSeatSelect}
-              registerFrontCard={registerFrontCard}
-              registerHandCountPill={registerHandCountPill}
-              seat={dockedSeatRow}
-              seatLabel={getSeatLabel(dockedSeatRow.seatIndex)}
-            />
-          ) : null}
-
           <div className="hand-action-row">
+            {/*
+              * Sits in the action row itself rather than in a header of its own, filling the space
+              * the bottom-aligned buttons leave above them.
+              */}
+            <p className="hand-action-heading">{handActionHeading}</p>
+
             {actionButtons.map((action) => (
               <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
                 {action.key === 'select-trump' ? (

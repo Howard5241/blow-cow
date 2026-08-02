@@ -1,19 +1,29 @@
 import assert from 'node:assert/strict'
 import { BLOW_COW_IMPLEMENTED_CHARACTER_NAMES, type BlowCowCharacterName } from '../src/game/blowCowCharacters.ts'
 import {
+  type BlowCowAccuseDreamerArgs,
+  type BlowCowAdvanceBSRevealArgs,
+  type BlowCowAdvanceResetRevealArgs,
+  type BlowCowBeginAccusationPunishmentArgs,
+  type BlowCowBeginBSPunishmentArgs,
   BlowCowGame,
   type BlowCowCallBSArgs,
+  type BlowCowFinalizeAccusationArgs,
   type BlowCowCatHideCardArgs,
   createDeck,
   createInitialBlowCowState,
   DEFAULT_BLOW_COW_SPEED_MULTIPLIER,
   type BlowCowFinalizeResetResolutionArgs,
   getDefaultStandardRankCount,
+  isCardFaceUpOnTable,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowRevealBSCardArgs,
+  type BlowCowRevealResetCardArgs,
   type BlowCowGameOver,
   type BlowCowPassArgs,
   type BlowCowPlayRandomArgs,
+  type BlowCowSneakPlayArgs,
   type BlowCowRank,
   scoreHand,
   type BlowCowSetupData,
@@ -39,7 +49,7 @@ type TestContext = {
 const deckBySprite = new Map(createDeck().map((card) => [card.sprite, card]))
 
 const passMove = BlowCowGame.moves.pass as (context: TestContext, args?: BlowCowPassArgs) => unknown
-const callBSMove = BlowCowGame.moves.callBS as (context: TestContext, args?: BlowCowCallBSArgs) => unknown
+const callBSMove = BlowCowGame.moves.callBS.move as (context: TestContext, args?: BlowCowCallBSArgs) => unknown
 const selectTrumpAndPlayMove = BlowCowGame.moves.selectTrumpAndPlay.move as (
   context: TestContext,
   args: { trumpRank: BlowCowRank; cardIDs: string[] },
@@ -53,6 +63,10 @@ const playRandomMove = BlowCowGame.moves.playRandom.move as (
   context: TestContext,
   args: BlowCowPlayRandomArgs,
 ) => unknown
+const sneakPlayMove = BlowCowGame.moves.sneakPlay.move as (
+  context: TestContext,
+  args: BlowCowSneakPlayArgs,
+) => unknown
 const toggleDirectionMove = BlowCowGame.moves.toggleDirection as (context: TestContext) => unknown
 const catHideCardMove = BlowCowGame.moves.catHideCard as (
   context: TestContext,
@@ -62,7 +76,39 @@ const finalizeBSResolutionMove = BlowCowGame.moves.finalizeBSResolution as (
   context: TestContext,
   args: BlowCowFinalizeBSResolutionArgs,
 ) => unknown
+const revealBSCardMove = BlowCowGame.moves.revealBSCard as (
+  context: TestContext,
+  args: BlowCowRevealBSCardArgs,
+) => unknown
+const advanceBSRevealMove = BlowCowGame.moves.advanceBSReveal as (
+  context: TestContext,
+  args: BlowCowAdvanceBSRevealArgs,
+) => unknown
+const beginBSPunishmentMove = BlowCowGame.moves.beginBSPunishment as (
+  context: TestContext,
+  args: BlowCowBeginBSPunishmentArgs,
+) => unknown
+const accuseDreamerMove = BlowCowGame.moves.accuseDreamer.move as (
+  context: TestContext,
+  args: BlowCowAccuseDreamerArgs,
+) => unknown
+const beginAccusationPunishmentMove = BlowCowGame.moves.beginAccusationPunishment as (
+  context: TestContext,
+  args: BlowCowBeginAccusationPunishmentArgs,
+) => unknown
+const finalizeAccusationMove = BlowCowGame.moves.finalizeAccusation as (
+  context: TestContext,
+  args: BlowCowFinalizeAccusationArgs,
+) => unknown
 const callResetMove = BlowCowGame.moves.callReset as (context: TestContext) => unknown
+const revealResetCardMove = BlowCowGame.moves.revealResetCard as (
+  context: TestContext,
+  args: BlowCowRevealResetCardArgs,
+) => unknown
+const advanceResetRevealMove = BlowCowGame.moves.advanceResetReveal as (
+  context: TestContext,
+  args: BlowCowAdvanceResetRevealArgs,
+) => unknown
 const finalizeResetResolutionMove = BlowCowGame.moves.finalizeResetResolution as (
   context: TestContext,
   args: BlowCowFinalizeResetResolutionArgs,
@@ -121,10 +167,13 @@ function createScenarioState(numPlayers = 2): BlowCowState {
       cardsPlayed: 0,
       punishmentCount: 0,
       bsWinCount: 0,
+      accusationCount: 0,
+      accusationWinCount: 0,
     }
     state.players[playerID].pendingRevealPlayID = null
     state.players[playerID].hasUsedManualPlay = false
     state.players[playerID].hasUsedGrandmasterBSOverride = false
+    state.players[playerID].hasUsedAccusationThisRound = false
     state.players[playerID].hasLeft = false
     state.players[playerID].leaveOrder = null
   }
@@ -149,6 +198,101 @@ function createEventRecorder() {
     },
     record,
   }
+}
+
+/**
+ * Drives the interactive part of a BS resolution the way the caller's UI does: flip every face-down
+ * card of the focused player, confirm the step, repeat, then arm the punishment. Scenarios that only
+ * care about the outcome call this immediately before `finalizeBSResolutionMove`.
+ */
+function completeBSReveal(state: BlowCowState, events: TestContext['events'], turn: number) {
+  const resolution = state.bsResolution
+  assert.ok(resolution, 'expected a live BS resolution to drive')
+
+  const context: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: resolution.callerPlayerID,
+      turn,
+    },
+    events,
+    playerID: resolution.callerPlayerID,
+  }
+
+  while (state.bsResolution && state.bsResolution.revealStepIndex < state.bsResolution.revealOrder.length) {
+    const resolutionID = state.bsResolution.id
+    const focusedPlayerID = state.bsResolution.revealOrder[state.bsResolution.revealStepIndex]
+
+    for (const play of state.table.plays.filter((entry) => entry.playerID === focusedPlayerID)) {
+      for (const tableCard of play.cards) {
+        if (!isCardFaceUpOnTable(play, tableCard.id)) {
+          assert.equal(revealBSCardMove(context, { resolutionID, cardID: tableCard.id }), undefined)
+        }
+      }
+    }
+
+    assert.equal(advanceBSRevealMove(context, { resolutionID }), undefined)
+  }
+
+  assert.ok(state.bsResolution)
+  assert.equal(beginBSPunishmentMove(context, { resolutionID: state.bsResolution.id }), undefined)
+}
+
+/**
+ * The Reset counterpart of `completeBSReveal`: the caller flips every face-down card of each
+ * focused player and confirms each step, which is what unlocks `finalizeResetResolution`.
+ */
+function completeResetReveal(state: BlowCowState, events: TestContext['events'], turn: number) {
+  const resolution = state.resetResolution
+  assert.ok(resolution, 'expected a live reset resolution to drive')
+
+  const context: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: resolution.callerPlayerID,
+      turn,
+    },
+    events,
+    playerID: resolution.callerPlayerID,
+  }
+
+  while (state.resetResolution && state.resetResolution.revealStepIndex < state.resetResolution.revealOrder.length) {
+    const resolutionID = state.resetResolution.id
+    const focusedPlayerID = state.resetResolution.revealOrder[state.resetResolution.revealStepIndex]
+
+    for (const play of state.table.plays.filter((entry) => entry.playerID === focusedPlayerID)) {
+      for (const tableCard of play.cards) {
+        if (!isCardFaceUpOnTable(play, tableCard.id)) {
+          assert.equal(revealResetCardMove(context, { resolutionID, cardID: tableCard.id }), undefined)
+        }
+      }
+    }
+
+    assert.equal(advanceResetRevealMove(context, { resolutionID }), undefined)
+  }
+}
+
+/**
+ * Drives a landed accusation to its end: the accuser arms the travel, then finalizes it. A missed
+ * accusation skips the arming step, so this asserts it landed first.
+ */
+function completeAccusationPunishment(state: BlowCowState, events: TestContext['events'], turn: number) {
+  const accusation = state.accusation
+  assert.ok(accusation, 'expected a live accusation to drive')
+  assert.equal(accusation.wasSuccessful, true, 'expected the accusation to have landed')
+
+  const context: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: state.seatOrder[0],
+      turn,
+    },
+    events,
+    playerID: accusation.accuserPlayerID,
+  }
+
+  assert.equal(beginAccusationPunishmentMove(context, { accusationID: accusation.id }), undefined)
+  assert.equal(finalizeAccusationMove(context, { accusationID: accusation.id }), undefined)
 }
 
 function assertCardSet(actualCards: BlowCowCard[], expectedSprites: string[]) {
@@ -209,9 +353,12 @@ function runBSResolutionCheck() {
   assert.equal(state.bsResolution?.callerPlayerID, '0')
   assert.equal(state.bsResolution?.targetPlayerID, '1')
   assert.equal(state.bsResolution?.targetPlayID, 'play-1')
-  assert.equal(state.bsResolution?.targetPlayCards.length, 1)
-  assert.equal(state.bsResolution?.additionalRevealPlays.length, 0)
+  // The resolution carries no card faces; the accused's play stays on the table until finalize.
+  assert.equal(state.table.plays.find((play) => play.id === 'play-1')?.cards.length, 1)
+  assert.deepEqual(state.bsResolution?.revealOrder, ['1'])
   assert.equal(state.table.plays.length, 2)
+
+  completeBSReveal(state, events, 5)
 
   const finalizeResult = finalizeBSResolutionMove({
     G: state,
@@ -310,6 +457,8 @@ function runPunishmentScoredOutImmediateLeaveCheck() {
 
   assert.equal(callResult, undefined)
   assert.ok(state.bsResolution)
+
+  completeBSReveal(state, events, 5)
 
   const finalizeResult = finalizeBSResolutionMove({
     G: state,
@@ -467,6 +616,8 @@ function runAllPassResetCheck() {
   assert.equal(state.history.length, 0)
   assert.match(state.tableStatus, /table cards are returning/i)
 
+  completeResetReveal(state, events, 4)
+
   const finalizeResult = finalizeResetResolutionMove({
     G: state,
     ctx: {
@@ -553,6 +704,8 @@ function runResetRedistributionCheck() {
   assert.equal(state.table.plays.length, 2)
   assert.equal(state.history.length, 0)
   assert.match(state.tableStatus, /called Reset/i)
+
+  completeResetReveal(state, events, 4)
 
   const finalizeResult = finalizeResetResolutionMove({
     G: state,
@@ -863,6 +1016,8 @@ function runForeignerRulesCheck() {
     assert.equal(record.nextPlayerID, null)
     assert.equal(state.resetResolution?.kind, 'roundReturn')
     assert.equal(state.round.roundNumber, 1)
+
+    completeResetReveal(state, events, 4)
 
     const finalizeResult = finalizeResetResolutionMove({
       G: state,
@@ -1248,10 +1403,12 @@ function runContrarianRulesCheck() {
 
     assert.equal(toggleResult, undefined)
     assert.equal(state.round.direction, 'counterclockwise')
-    assert.match(
-      state.history.find((entry) => entry.title.includes('used The Contrarian'))?.detail ?? '',
-      /counterclockwise/i,
-    )
+    // The log entry names nobody, so a Contrarian flip is indistinguishable from a Dreamer one.
+    const toggleEvent = state.history.find((entry) => entry.title === 'The turn direction changed')
+    assert.ok(toggleEvent)
+    assert.equal(toggleEvent.playerID, null)
+    assert.match(toggleEvent.detail, /counterclockwise/i)
+    assert.doesNotMatch(toggleEvent.detail, /contrarian/i)
 
     const passResult = passMove({
       G: state,
@@ -1534,7 +1691,32 @@ function runCatRulesCheck() {
 
     assert.equal(callResult, undefined)
     assert.equal(state.bsResolution?.targetPlayID, 'play-hidden')
-    assert.equal(state.bsResolution?.additionalRevealPlays.length, 0)
+    /*
+     * One step per player, so player 1 is listed once even though the Cat-rehidden card sits in a
+     * different play from the challenged one. Both must be flipped before Continue unlocks: the
+     * reveal walks what the table is showing face down, not what counts as an unresolved play.
+     */
+    assert.deepEqual(state.bsResolution?.revealOrder, ['1'])
+
+    const resolutionID = state.bsResolution.id
+    const revealContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 5,
+      },
+      events,
+      playerID: '0',
+    }
+
+    assert.notEqual(advanceBSRevealMove(revealContext, { resolutionID }), undefined)
+    assert.equal(revealBSCardMove(revealContext, { resolutionID, cardID: hiddenCard.id }), undefined)
+    // Still blocked: the Cat-rehidden card in play-revealed is face down too.
+    assert.notEqual(advanceBSRevealMove(revealContext, { resolutionID }), undefined)
+    assert.equal(revealBSCardMove(revealContext, { resolutionID, cardID: revealedCard.id }), undefined)
+    assert.equal(state.table.plays[0]?.rehiddenCardIDs?.length ?? 0, 0)
+    assert.equal(advanceBSRevealMove(revealContext, { resolutionID }), undefined)
+    assert.equal(state.bsResolution?.revealStepIndex, 1)
   }
 
   {
@@ -1591,18 +1773,27 @@ function runCatRulesCheck() {
         wasTrumpSelection: false,
       },
     ]
+    const { events } = createEventRecorder()
     state.resetResolution = {
       id: 'reset-cat-visibility',
       callerPlayerID: '0',
       kind: 'reset',
+      revealOrder: ['1'],
+      revealStepIndex: 0,
     }
 
-    const playerView = BlowCowGame.playerView({
-      G: state,
-      playerID: '0',
-    }) as BlowCowState
+    const viewAsCaller = () => BlowCowGame.playerView({ G: state, playerID: '0' }) as BlowCowState
 
-    assert.equal(playerView.table.plays[0]?.cards[0]?.sprite, revealedCard.sprite)
+    /*
+     * A live reset no longer flips the table face up on its own, so a Cat-rehidden card stays
+     * masked for everyone but its owner until the caller actually turns it over.
+     */
+    assert.equal(viewAsCaller().table.plays[0]?.cards[0]?.rank, 'Joker')
+
+    completeResetReveal(state, events, 2)
+
+    assert.deepEqual(state.table.plays[0]?.rehiddenCardIDs, [])
+    assert.equal(viewAsCaller().table.plays[0]?.cards[0]?.sprite, revealedCard.sprite)
   }
 }
 
@@ -1642,6 +1833,8 @@ function runPrivilegedRulesCheck() {
     assert.equal(passResult, undefined)
     assert.equal(record.nextPlayerID, null)
     assert.equal(state.resetResolution?.kind, 'roundReturn')
+
+    completeResetReveal(state, events, 2)
 
     const finalizeResult = finalizeResetResolutionMove({
       G: state,
@@ -1750,7 +1943,9 @@ function runConfusedRulesCheck() {
     })
 
     assert.equal(callResult, undefined)
-    assert.equal(state.bsResolution?.targetWasHonest, true)
+    assert.equal(state.bsResolution?.targetVerdict?.targetWasHonest, true)
+
+    completeBSReveal(state, events, 2)
 
     const finalizeResult = finalizeBSResolutionMove({
       G: state,
@@ -1823,35 +2018,23 @@ function runConfusedRulesCheck() {
       callerPlayerID: '1',
       targetPlayerID: '0',
       targetPlayID: 'play-2',
-      targetPlayCards: [card('hearts_jack.png')],
       targetDeclaredCardCount: 1,
-      additionalRevealPlays: [
-        {
-          playID: 'play-0',
-          playerID: '0',
-          cards: [card('clubs_jack.png')],
-        },
-        {
-          playID: 'play-1',
-          playerID: '0',
-          cards: [card('diamonds_jack.png')],
-        },
-        {
-          playID: 'play-3',
-          playerID: '1',
-          cards: [card('spades_jack.png')],
-        },
-      ],
       trumpRank: 'Q',
-      targetWasHonest: false,
-      caughtDreamerRepeatTrump: false,
-      caughtDreamerExtraCardCount: false,
-      caughtDreamerExceededTableLimit: false,
-      reverseRuleTriggered: false,
-      punishedPlayerID: '0',
-      unpunishedPlayerID: '1',
       punishmentCardCount: 4,
+      revealOrder: ['0', '1'],
+      revealStepIndex: 0,
+      isPunishing: false,
+      targetVerdict: {
+        targetWasHonest: false,
+      },
+      punishment: {
+        reverseRuleTriggered: false,
+        punishedPlayerID: '0',
+        unpunishedPlayerID: '1',
+      },
     }
+
+    completeBSReveal(state, events, 5)
 
     const finalizeResult = finalizeBSResolutionMove({
       G: state,
@@ -1941,6 +2124,8 @@ function runDreamerRepeatTrumpCheck() {
     assert.equal(state.round.lastNonPassingPlayerID, '1')
     assert.equal(state.table.plays[0]?.wasTrumpSelection, true)
 
+    // Call BS no longer looks at Dreamer rules at all, so challenging a genuine Q here finds an
+    // honest play and punishes the caller. Only Accuse can reach the repeated trump.
     const callResult = callBSMove({
       G: state,
       ctx: {
@@ -1953,10 +2138,45 @@ function runDreamerRepeatTrumpCheck() {
 
     assert.equal(callResult, undefined)
     assert.equal(state.players['0'].matchStats.callBSCount, 1)
-    assert.equal(state.bsResolution?.targetWasHonest, false)
-    assert.equal(state.bsResolution?.caughtDreamerRepeatTrump, true)
+    assert.equal(state.bsResolution?.targetVerdict?.targetWasHonest, true)
+    assert.equal(state.bsResolution?.punishment?.punishedPlayerID, '0')
+  }
 
-    const finalizeResult = finalizeBSResolutionMove({
+  {
+    const state = createScenarioState()
+    const repeatedTrumpCard = card('hearts_queen.png')
+    const { events, record } = createEventRecorder()
+
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].character = 'The Dreamer'
+    state.players['1'].hand = [repeatedTrumpCard]
+    state.round.status = 'awaitingTrumpSelection'
+    state.round.startingPlayerID = '1'
+    state.round.previousTrumpRank = 'Q'
+
+    beginTurn({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 1,
+      },
+      events,
+    })
+
+    assert.equal(selectTrumpAndPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 1,
+      },
+      events,
+      playerID: '1',
+    }, {
+      trumpRank: 'Q',
+      cardIDs: [repeatedTrumpCard.id],
+    }), undefined)
+
+    const accuseResult = accuseDreamerMove({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -1965,86 +2185,128 @@ function runDreamerRepeatTrumpCheck() {
       events,
       playerID: '0',
     }, {
-      resolutionID: state.bsResolution.id,
+      targetPlayerID: '1',
     })
 
-    assert.equal(finalizeResult, undefined)
+    assert.equal(accuseResult, undefined)
+    assert.equal(state.accusation?.wasSuccessful, true)
+    assert.equal(state.accusation?.caughtCheat, 'repeatTrump')
+    assert.equal(state.players['0'].matchStats.accusationWinCount, 1)
+
+    completeAccusationPunishment(state, events, 2)
+
+    assert.equal(state.accusation, null)
     assert.equal(record.endedGame, null)
     assert.equal(record.nextPlayerID, '0')
     assert.equal(state.round.roundNumber, 2)
     assert.equal(state.round.previousTrumpRank, 'Q')
-    assert.equal(state.players['0'].matchStats.bsWinCount, 1)
     assert.equal(state.players['1'].matchStats.punishmentCount, 1)
     assertCardSet(state.players['1'].hand, ['hearts_queen.png'])
     assert.match(
       state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
-      /repeated Q as the previous round trump on the opening play/i,
+      /reused the previous round trump on the opening play/i,
     )
   }
+
+  {
+    // The window is the turn straight after the play, and only that turn.
+    const state = createScenarioState()
+    const repeatedTrumpCard = card('hearts_queen.png')
+    const { events } = createEventRecorder()
+
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].character = 'The Dreamer'
+    state.players['1'].hand = [repeatedTrumpCard]
+    state.round.status = 'awaitingTrumpSelection'
+    state.round.startingPlayerID = '1'
+    state.round.previousTrumpRank = 'Q'
+
+    assert.equal(selectTrumpAndPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 1,
+      },
+      events,
+      playerID: '1',
+    }, {
+      trumpRank: 'Q',
+      cardIDs: [repeatedTrumpCard.id],
+    }), undefined)
+
+    assert.equal(accuseDreamerMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 3,
+      },
+      events,
+      playerID: '0',
+    }, {
+      targetPlayerID: '1',
+    }), undefined)
+
+    assert.equal(state.accusation?.wasSuccessful, false)
+    assert.equal(state.accusation?.caughtCheat, null)
+  }
+}
+
+function createDreamerDirectionScenario() {
+  const state = createScenarioState(3)
+  const { events, record } = createEventRecorder()
+
+  state.players['0'].hand = [card('clubs_ace.png')]
+  state.players['1'].character = 'The Dreamer'
+  state.players['1'].hand = [card('clubs_queen.png')]
+  state.players['2'].hand = [card('spades_king.png')]
+  state.round.trumpRank = 'Q'
+  state.round.direction = 'clockwise'
+  state.round.lastNonPassingPlayerID = '2'
+  state.table.plays = [
+    {
+      id: 'play-support-a',
+      playerID: '2',
+      cards: [card('hearts_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: 1,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-support-b',
+      playerID: '0',
+      cards: [card('spades_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: 2,
+      wasTrumpSelection: false,
+    },
+  ]
+
+  // Seat 0 is on turn, so the direction the tamper is measured against is theirs.
+  beginTurn({
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 3,
+    },
+    events,
+  })
+
+  return { state, events, record }
 }
 
 function runDreamerDirectionCheatCheck() {
   {
-    const state = createScenarioState(3)
-    const { events, record } = createEventRecorder()
-
-    state.players['0'].hand = [card('clubs_ace.png')]
-    state.players['1'].character = 'The Dreamer'
-    state.players['1'].hand = [card('clubs_queen.png')]
-    state.players['2'].hand = [card('spades_king.png')]
-    state.round.trumpRank = 'Q'
-    state.round.direction = 'clockwise'
-    state.round.lastNonPassingPlayerID = '1'
-    state.players['1'].turnStartingDirection = 'clockwise'
-    state.table.plays = [
-      {
-        id: 'play-support-a',
-        playerID: '2',
-        cards: [card('hearts_queen.png')],
-        claimedRank: 'Q',
-        playedAtRound: 1,
-        playedAtTurn: 1,
-        revealedAtTurn: 1,
-        wasTrumpSelection: false,
-      },
-      {
-        id: 'play-support-b',
-        playerID: '0',
-        cards: [card('spades_queen.png')],
-        claimedRank: 'Q',
-        playedAtRound: 1,
-        playedAtTurn: 2,
-        revealedAtTurn: 2,
-        wasTrumpSelection: false,
-      },
-      {
-        id: 'play-support-c',
-        playerID: '2',
-        cards: [card('diamonds_queen.png')],
-        claimedRank: 'Q',
-        playedAtRound: 1,
-        playedAtTurn: 2,
-        revealedAtTurn: 2,
-        wasTrumpSelection: false,
-      },
-      {
-        id: 'play-dreamer-hidden',
-        playerID: '1',
-        cards: [card('clubs_queen.png')],
-        usedDreamerDirectionChange: false,
-        claimedRank: 'Q',
-        playedAtRound: 1,
-        playedAtTurn: 3,
-        revealedAtTurn: null,
-        wasTrumpSelection: false,
-      },
-    ]
-    state.players['1'].pendingRevealPlayID = 'play-dreamer-hidden'
+    // The power itself: The Dreamer flips the direction on somebody else's turn.
+    const { state, events, record } = createDreamerDirectionScenario()
 
     const toggleResult = toggleDirectionMove({
       G: state,
       ctx: {
-        currentPlayer: '1',
+        currentPlayer: '0',
         turn: 3,
       },
       events,
@@ -2053,108 +2315,310 @@ function runDreamerDirectionCheatCheck() {
 
     assert.equal(toggleResult, undefined)
     assert.equal(state.round.direction, 'counterclockwise')
-    assert.equal(state.table.plays[3]?.usedDreamerDirectionChange, true)
+    assert.deepEqual(state.directionTamper, { playerID: '1', turnNumber: 3 })
 
-    const callResult = callBSMove({
+    // The announcement must not name anyone, or the accusation would be a formality.
+    const toggleEvent = state.history.find((entry) => entry.title === 'The turn direction changed')
+    assert.ok(toggleEvent)
+    assert.equal(toggleEvent.playerID, null)
+    assert.doesNotMatch(toggleEvent.detail, /dreamer|seat/i)
+
+    // ...and it must not survive playerView either.
+    const spectatorView = BlowCowGame.playerView({ G: state, playerID: '2' })
+    assert.equal(spectatorView.directionTamper, null)
+
+    // Any player may raise it, including one who is not on turn.
+    const accuseResult = accuseDreamerMove({
       G: state,
       ctx: {
         currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }, {
+      targetPlayerID: '1',
+    })
+
+    assert.equal(accuseResult, undefined)
+    assert.equal(state.accusation?.wasSuccessful, true)
+    assert.equal(state.accusation?.caughtCheat, 'directionChange')
+    assert.equal(state.accusation?.punishmentCardCount, 2)
+
+    completeAccusationPunishment(state, events, 3)
+
+    assert.equal(record.nextPlayerID, '2')
+    assert.equal(state.round.roundNumber, 2)
+    // The new round hands every player their accusation back.
+    assert.equal(state.players['2'].hasUsedAccusationThisRound, false)
+    assert.equal(state.players['1'].matchStats.punishmentCount, 1)
+    assertCardSet(state.players['1'].hand, ['clubs_queen.png', 'hearts_queen.png', 'spades_queen.png'])
+    assert.match(
+      state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
+      /changed the turn direction/i,
+    )
+  }
+
+  {
+    // Flipping back inside the same turn erases the tamper along with the advantage.
+    const { state, events } = createDreamerDirectionScenario()
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }
+
+    assert.equal(toggleDirectionMove(context), undefined)
+    assert.equal(toggleDirectionMove(context), undefined)
+    assert.equal(state.round.direction, 'clockwise')
+    assert.equal(state.directionTamper, null)
+
+    assert.equal(accuseDreamerMove({ ...context, playerID: '2' }, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation?.wasSuccessful, false)
+  }
+
+  {
+    // The window closes with the turn it happened in.
+    const { state, events } = createDreamerDirectionScenario()
+
+    assert.equal(toggleDirectionMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }), undefined)
+    assert.ok(state.directionTamper)
+
+    beginTurn({
+      G: state,
+      ctx: {
+        currentPlayer: '2',
         turn: 4,
       },
       events,
-      playerID: '0',
     })
 
-    assert.equal(callResult, undefined)
-    assert.equal(state.bsResolution?.caughtDreamerDirectionChange, true)
-    assert.equal(state.bsResolution?.reverseRuleTriggered, true)
-    assert.equal(state.bsResolution?.reverseRuleIgnoredForDreamerCheat, true)
-    assert.equal(state.bsResolution?.punishedPlayerID, '1')
-
-    const finalizeResult = finalizeBSResolutionMove({
+    assert.equal(state.directionTamper, null)
+    assert.equal(accuseDreamerMove({
       G: state,
       ctx: {
-        currentPlayer: '0',
+        currentPlayer: '2',
         turn: 4,
       },
       events,
       playerID: '0',
     }, {
-      resolutionID: state.bsResolution!.id,
-    })
+      targetPlayerID: '1',
+    }), undefined)
+    assert.equal(state.accusation?.wasSuccessful, false)
+  }
 
-    assert.equal(finalizeResult, undefined)
-    assert.equal(record.nextPlayerID, '0')
+  {
+    // The Contrarian's flip is still bound to their own turn, unlike The Dreamer's.
+    const { state, events } = createDreamerDirectionScenario()
+    state.players['1'].character = 'The Contrarian'
+
+    assert.notEqual(toggleDirectionMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }), undefined)
+    assert.equal(state.round.direction, 'clockwise')
+    assert.equal(state.directionTamper, null)
+  }
+}
+
+function runDreamerSneakPlayCheck() {
+  {
+    // The power itself: cards go onto the table during somebody else's turn, in silence.
+    const { state, events, record } = createDreamerDirectionScenario()
+    const sneakedCardID = state.players['1'].hand[0].id
+    const tableStatusBefore = state.tableStatus
+
+    assert.equal(sneakPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }, {
+      cardIDs: [sneakedCardID],
+    }), undefined)
+
+    const sneakedPlay = state.table.plays[state.table.plays.length - 1]
+    assert.equal(state.table.plays.length, 3)
+    assert.equal(sneakedPlay.playerID, '1')
+    assert.equal(sneakedPlay.playedAtTurn, 3)
+    assert.equal(sneakedPlay.claimedRank, 'Q')
+    assert.equal(sneakedPlay.declaredCardCount, 1)
+    assert.equal(sneakedPlay.wasTrumpSelection, false)
+    assert.equal(sneakedPlay.revealedAtTurn, null)
+    assert.equal(state.players['1'].hand.length, 0)
+
+    // Nothing about the turn moves, and nothing announces it: no history entry, no telemetry, no
+    // table status rewrite, and the turn stays with seat 0.
+    assert.equal(state.players['1'].pendingRevealPlayID, null)
+    assert.equal(state.round.lastNonPassingPlayerID, '2')
+    assert.equal(state.round.passStreak, 0)
+    assert.equal(state.tableStatus, tableStatusBefore)
+    assert.equal(state.history.length, 0)
+    assert.equal(state.telemetry.events.some((entry) => entry.playerID === '1'), false)
+    assert.equal(record.nextPlayerID, null)
+
+    // The archive is stripped by `hideSecretState`, so it is the one place that may name them.
+    const archivedTurn = state.archive.turns.find((entry) => entry.turnNumber === 3 && entry.playerID === '1')
+    assert.ok(archivedTurn)
+    assert.equal(archivedTurn.actions[0].kind, 'play')
+    assert.equal(archivedTurn.actions[0].characterUsed, 'The Dreamer')
+
+    // Caught inside the turn it happened in.
+    assert.equal(accuseDreamerMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }, {
+      targetPlayerID: '1',
+    }), undefined)
+
+    assert.equal(state.accusation?.wasSuccessful, true)
+    assert.equal(state.accusation?.caughtCheat, 'sneakPlay')
+    assert.equal(state.accusation?.punishmentCardCount, 3)
+
+    completeAccusationPunishment(state, events, 3)
+
     assert.equal(state.players['1'].matchStats.punishmentCount, 1)
+    assertCardSet(state.players['1'].hand, ['clubs_queen.png', 'hearts_queen.png', 'spades_queen.png'])
     assert.match(
       state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
-      /catching The Dreamer cheating still punished The Dreamer/i,
+      /slipped cards onto the table out of turn/i,
     )
   }
 
   {
-    const state = createScenarioState(3)
-    const { events } = createEventRecorder()
+    // The window closes with the turn, exactly like a direction tamper.
+    const { state, events } = createDreamerDirectionScenario()
 
-    state.players['0'].hand = [card('clubs_ace.png')]
-    state.players['1'].character = 'The Dreamer'
-    state.players['1'].hand = [card('clubs_queen.png')]
-    state.players['2'].hand = [card('diamonds_queen.png')]
-    state.round.trumpRank = 'Q'
-    state.round.direction = 'clockwise'
-    state.round.lastNonPassingPlayerID = '1'
-    state.players['1'].turnStartingDirection = 'clockwise'
-    state.table.plays = [
-      {
-        id: 'play-dreamer-hidden',
-        playerID: '1',
-        cards: [card('clubs_queen.png')],
-        usedDreamerDirectionChange: false,
-        claimedRank: 'Q',
-        playedAtRound: 1,
-        playedAtTurn: 3,
-        revealedAtTurn: null,
-        wasTrumpSelection: false,
-      },
-    ]
-    state.players['1'].pendingRevealPlayID = 'play-dreamer-hidden'
-
-    const firstToggleResult = toggleDirectionMove({
-      G: state,
-      ctx: {
-        currentPlayer: '1',
-        turn: 3,
-      },
-      events,
-      playerID: '1',
-    })
-    const secondToggleResult = toggleDirectionMove({
-      G: state,
-      ctx: {
-        currentPlayer: '1',
-        turn: 3,
-      },
-      events,
-      playerID: '1',
-    })
-
-    assert.equal(firstToggleResult, undefined)
-    assert.equal(secondToggleResult, undefined)
-    assert.equal(state.round.direction, 'clockwise')
-    assert.equal(state.table.plays[0]?.usedDreamerDirectionChange, false)
-
-    const callResult = callBSMove({
+    assert.equal(sneakPlayMove({
       G: state,
       ctx: {
         currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }, {
+      cardIDs: [state.players['1'].hand[0].id],
+    }), undefined)
+
+    beginTurn({
+      G: state,
+      ctx: {
+        currentPlayer: '2',
+        turn: 4,
+      },
+      events,
+    })
+
+    assert.equal(accuseDreamerMove({
+      G: state,
+      ctx: {
+        currentPlayer: '2',
         turn: 4,
       },
       events,
       playerID: '0',
-    })
+    }, {
+      targetPlayerID: '1',
+    }), undefined)
+    assert.equal(state.accusation?.wasSuccessful, false)
+  }
 
-    assert.equal(callResult, undefined)
-    assert.equal(state.bsResolution?.caughtDreamerDirectionChange, false)
+  {
+    // Exactly one card, and one per turn so the generated play id cannot collide with itself.
+    const { state, events } = createDreamerDirectionScenario()
+    state.players['1'].hand = [card('clubs_queen.png'), card('diamonds_queen.png')]
+
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }
+
+    assert.notEqual(sneakPlayMove(context, {
+      cardIDs: state.players['1'].hand.map((handCard) => handCard.id),
+    }), undefined)
+    assert.equal(state.table.plays.length, 2)
+    assert.equal(state.players['1'].hand.length, 2)
+
+    assert.equal(sneakPlayMove(context, { cardIDs: [state.players['1'].hand[0].id] }), undefined)
+    assert.notEqual(sneakPlayMove(context, { cardIDs: [state.players['1'].hand[0].id] }), undefined)
+    assert.equal(state.table.plays.length, 3)
+  }
+
+  {
+    // Refused on the mover's own turn, refused for anyone who is not The Dreamer, and refused
+    // before the round has a rank to claim.
+    const { state, events } = createDreamerDirectionScenario()
+
+    assert.notEqual(sneakPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }, {
+      cardIDs: [state.players['1'].hand[0].id],
+    }), undefined)
+
+    assert.notEqual(sneakPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }, {
+      cardIDs: [state.players['2'].hand[0].id],
+    }), undefined)
+
+    state.round.trumpRank = null
+    assert.notEqual(sneakPlayMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '1',
+    }, {
+      cardIDs: [state.players['1'].hand[0].id],
+    }), undefined)
+
+    assert.equal(state.table.plays.length, 2)
   }
 }
 
@@ -2211,6 +2675,8 @@ function runDreamerIllegalCountCheck() {
     assert.equal(state.table.plays[0]?.declaredCardCount, 2)
     assert.equal(state.history[0]?.title, 'Seat 2 played 2 card(s)')
 
+    // Three genuine Queens against a Q trump: the cards themselves are honest, so BS finds nothing
+    // and the count is only reachable through Accuse.
     const callResult = callBSMove({
       G: state,
       ctx: {
@@ -2222,11 +2688,33 @@ function runDreamerIllegalCountCheck() {
     })
 
     assert.equal(callResult, undefined)
-    assert.equal(state.bsResolution?.caughtDreamerExtraCardCount, true)
-    assert.equal(state.bsResolution?.caughtDreamerExceededTableLimit, false)
-    assert.equal(state.bsResolution?.targetWasHonest, false)
+    assert.equal(state.bsResolution?.targetVerdict?.targetWasHonest, true)
+    assert.equal(state.bsResolution?.punishment?.punishedPlayerID, '0')
+  }
 
-    const finalizeResult = finalizeBSResolutionMove({
+  {
+    const state = createScenarioState()
+    const dreamerCards = [card('clubs_queen.png'), card('diamonds_queen.png'), card('hearts_queen.png')]
+    const { events, record } = createEventRecorder()
+
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].character = 'The Dreamer'
+    state.players['1'].hand = [...dreamerCards]
+    state.round.trumpRank = 'Q'
+
+    assert.equal(playMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 1,
+      },
+      events,
+      playerID: '1',
+    }, {
+      cardIDs: dreamerCards.map((entry) => entry.id),
+    }), undefined)
+
+    const accuseResult = accuseDreamerMove({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -2235,15 +2723,20 @@ function runDreamerIllegalCountCheck() {
       events,
       playerID: '0',
     }, {
-      resolutionID: state.bsResolution.id,
+      targetPlayerID: '1',
     })
 
-    assert.equal(finalizeResult, undefined)
+    assert.equal(accuseResult, undefined)
+    assert.equal(state.accusation?.caughtCheat, 'extraCardCount')
+
+    completeAccusationPunishment(state, events, 2)
+
+    assert.equal(record.nextPlayerID, '0')
     assert.equal(state.players['1'].matchStats.punishmentCount, 1)
-    assert.equal(state.players['0'].matchStats.bsWinCount, 1)
+    assert.equal(state.players['0'].matchStats.accusationWinCount, 1)
     assert.match(
       state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
-      /declared 2 card\(s\) but actually played 3/i,
+      /played more cards than they declared/i,
     )
   }
 
@@ -2295,22 +2788,7 @@ function runDreamerIllegalCountCheck() {
     assert.equal(state.table.plays.flatMap((play) => play.cards).length, 11)
     assert.equal(state.table.plays.at(-1)?.declaredCardCount, 2)
 
-    const callResult = callBSMove({
-      G: state,
-      ctx: {
-        currentPlayer: '0',
-        turn: 11,
-      },
-      events,
-      playerID: '0',
-    })
-
-    assert.equal(callResult, undefined)
-    assert.equal(state.bsResolution?.caughtDreamerExtraCardCount, false)
-    assert.equal(state.bsResolution?.caughtDreamerExceededTableLimit, true)
-    assert.equal(state.bsResolution?.targetWasHonest, false)
-
-    const finalizeResult = finalizeBSResolutionMove({
+    const accuseResult = accuseDreamerMove({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -2319,15 +2797,318 @@ function runDreamerIllegalCountCheck() {
       events,
       playerID: '0',
     }, {
-      resolutionID: state.bsResolution.id,
+      targetPlayerID: '1',
     })
 
-    assert.equal(finalizeResult, undefined)
+    assert.equal(accuseResult, undefined)
+    assert.equal(state.accusation?.caughtCheat, 'exceededTableLimit')
+    assert.equal(state.accusation?.punishmentCardCount, 11)
+
+    completeAccusationPunishment(state, events, 11)
+
+    // All eleven table cards land in the Dreamer's hand; the 3s and 4s immediately score out as
+    // four-of-a-kind sets, leaving the rest.
+    assert.equal(state.players['1'].points, 2)
+    assertCardSet(state.players['1'].hand, ['clubs_05.png', 'clubs_queen.png', 'diamonds_queen.png'])
     assert.match(
       state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
-      /above the 10-card limit/i,
+      /pushed the table past its card limit/i,
     )
   }
+}
+
+/**
+ * The rules around raising an accusation, as opposed to what any one cheat does: who may raise one,
+ * how often, when it is refused outright, and what a miss costs.
+ */
+function runAccusationRulesCheck() {
+  {
+    // A wrong accusation turns the punishment around onto the accuser.
+    const { state, events, record } = createDreamerDirectionScenario()
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }
+
+    assert.equal(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation?.wasSuccessful, false)
+    assert.equal(state.accusation?.punishedPlayerID, '2')
+    assert.equal(state.accusation?.unpunishedPlayerID, '1')
+    assert.equal(state.players['2'].hasUsedAccusationThisRound, true)
+    assert.equal(state.players['2'].matchStats.accusationCount, 1)
+    assert.equal(state.players['2'].matchStats.accusationWinCount, 0)
+
+    // A miss still has to be armed and pressed, exactly like a hit.
+    const accusationID = state.accusation!.id
+    assert.notEqual(finalizeAccusationMove(context, { accusationID }), undefined)
+    assert.equal(beginAccusationPunishmentMove(context, { accusationID }), undefined)
+    assert.equal(finalizeAccusationMove(context, { accusationID }), undefined)
+
+    assert.equal(state.accusation === null, true)
+    assert.equal(state.round.roundNumber, 2)
+    // The accuser took the table; the Dreamer they named walks away and opens the next round.
+    assert.equal(state.players['2'].matchStats.punishmentCount, 1)
+    assert.equal(state.players['1'].matchStats.punishmentCount, 0)
+    assert.equal(record.nextPlayerID, '1')
+    assertCardSet(state.players['2'].hand, ['spades_king.png', 'hearts_queen.png', 'spades_queen.png'])
+    assert.match(
+      state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
+      /broke no Dreamer rule/i,
+    )
+    // The new round hands every player their accusation back.
+    assert.equal(state.players['2'].hasUsedAccusationThisRound, false)
+  }
+
+  {
+    // One accusation per player per round, spent on a miss as surely as on a hit.
+    const { state, events } = createDreamerDirectionScenario()
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }
+
+    assert.equal(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    const accusationID = state.accusation!.id
+    assert.equal(beginAccusationPunishmentMove(context, { accusationID }), undefined)
+    assert.equal(finalizeAccusationMove(context, { accusationID }), undefined)
+
+    // Seat 2 spent theirs before the round rolled over, so only the fresh budget is in play now.
+    state.players['2'].hasUsedAccusationThisRound = true
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation === null, true)
+    assert.equal(accuseDreamerMove({ ...context, playerID: '0' }, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation?.accuserPlayerID, '0')
+  }
+
+  {
+    // Refused outright: on yourself, on a player who has left, and while another procedure owns the
+    // table.
+    const { state, events } = createDreamerDirectionScenario()
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '0',
+    }
+
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '0' }), undefined)
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '9' }), undefined)
+
+    state.players['1'].hasLeft = true
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    state.players['1'].hasLeft = false
+    assert.equal(state.players['0'].hasUsedAccusationThisRound, false)
+
+    state.resetResolution = {
+      id: 'reset-block',
+      callerPlayerID: '0',
+      kind: 'reset',
+      revealOrder: [],
+      revealStepIndex: 0,
+    }
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    state.resetResolution = null
+
+    // ...and a live accusation blocks every ordinary move, including a BS call and a toggle.
+    assert.equal(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    assert.ok(state.accusation)
+    assert.notEqual(callBSMove({ ...context, playerID: '2' }), undefined)
+    assert.notEqual(passMove({ ...context, playerID: '0' }), undefined)
+    assert.notEqual(toggleDirectionMove({ ...context, playerID: '1' }), undefined)
+  }
+
+  {
+    // Only the accuser drives their own accusation to its end.
+    const { state, events } = createDreamerDirectionScenario()
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '2',
+    }
+
+    assert.equal(toggleDirectionMove({ ...context, playerID: '1' }), undefined)
+    assert.equal(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+
+    const accusationID = state.accusation!.id
+    assert.equal(state.accusation?.wasSuccessful, true)
+
+    // Not the accused, not a bystander, and not with a stale id.
+    assert.notEqual(beginAccusationPunishmentMove({ ...context, playerID: '1' }, { accusationID }), undefined)
+    assert.notEqual(beginAccusationPunishmentMove({ ...context, playerID: '0' }, { accusationID }), undefined)
+    assert.notEqual(beginAccusationPunishmentMove(context, { accusationID: 'accuse-nope' }), undefined)
+    assert.equal(state.accusation?.isPunishing, false)
+
+    // The finalize is refused until the travel has actually been armed.
+    assert.notEqual(finalizeAccusationMove(context, { accusationID }), undefined)
+    assert.ok(state.accusation)
+
+    assert.equal(beginAccusationPunishmentMove(context, { accusationID }), undefined)
+    assert.equal(state.accusation?.isPunishing, true)
+    assert.notEqual(beginAccusationPunishmentMove(context, { accusationID }), undefined)
+    assert.notEqual(finalizeAccusationMove({ ...context, playerID: '0' }, { accusationID }), undefined)
+    assert.equal(finalizeAccusationMove(context, { accusationID }), undefined)
+    assert.equal(state.accusation, null)
+  }
+
+  {
+    // Only The Dreamer can be accused. Characters are public, so naming anybody else is refused
+    // outright rather than resolved as a miss, and costs the accuser nothing.
+    const { state, events } = createDreamerDirectionScenario()
+    state.players['1'].character = 'The Believer'
+
+    const context: TestContext = {
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events,
+      playerID: '0',
+    }
+
+    assert.notEqual(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation === null, true)
+    assert.equal(state.players['0'].hasUsedAccusationThisRound, false)
+    assert.equal(state.players['0'].matchStats.accusationCount, 0)
+
+    // ...and the accusation is still there to spend once there is a Dreamer to spend it on.
+    state.players['1'].character = 'The Dreamer'
+    assert.equal(accuseDreamerMove(context, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.accusation?.accuserPlayerID, '0')
+  }
+}
+
+/**
+ * `turn.activePlayers` makes every seat permanently active in boardgame.io's eyes, so the framework
+ * no longer drops out-of-turn moves and each move has to enforce the turn itself. This is the
+ * regression test for those guards.
+ *
+ * It can only cover the guards, not the config: this harness calls the move functions directly
+ * rather than through the reducer, so `IsPlayerActive` never runs here either way.
+ */
+function runTurnOwnershipCheck() {
+  const state = createScenarioState(4)
+  const { events } = createEventRecorder()
+  const revealedTableCard = card('clubs_03.png')
+
+  state.players['0'].hand = [card('clubs_ace.png'), card('clubs_queen.png')]
+  state.players['1'].character = 'The Dreamer'
+  state.players['1'].hand = [card('diamonds_queen.png')]
+  state.players['2'].character = 'The Drunkard'
+  state.players['2'].hand = [card('hearts_queen.png')]
+  state.players['3'].character = 'The Cat'
+  state.players['3'].hand = [card('spades_ace.png')]
+  state.round.trumpRank = 'Q'
+  state.round.direction = 'clockwise'
+  state.round.lastNonPassingPlayerID = '1'
+  state.round.maxCardsOnTable = 6
+  state.table.plays = [
+    {
+      id: 'play-revealed',
+      playerID: '3',
+      cards: [revealedTableCard],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: 1,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-hidden',
+      playerID: '1',
+      cards: [card('spades_king.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+  ]
+  state.players['1'].pendingRevealPlayID = 'play-hidden'
+
+  beginTurn({
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 2,
+    },
+    events,
+  })
+
+  const outOfTurn = (playerID: string): TestContext => ({
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 2,
+    },
+    events,
+    playerID,
+    random: {
+      Shuffle: identityShuffle,
+    },
+  })
+
+  // Every turn-bound move, from a seat that is not the current player.
+  assert.notEqual(playMove(outOfTurn('2'), { cardIDs: [state.players['2'].hand[0].id] }), undefined)
+  assert.notEqual(playRandomMove(outOfTurn('2'), { cardCount: 1 }), undefined)
+  assert.notEqual(passMove(outOfTurn('2')), undefined)
+  assert.notEqual(callBSMove(outOfTurn('2'), { targetPlayerID: '1' }), undefined)
+  assert.notEqual(callResetMove(outOfTurn('2')), undefined)
+  assert.notEqual(catHideCardMove(outOfTurn('3'), { cardID: revealedTableCard.id }), undefined)
+
+  // Nothing moved: no card left a hand, the table is untouched, and no procedure opened.
+  assert.equal(state.table.plays.length, 2)
+  assert.equal(state.players['2'].hand.length, 1)
+  assert.equal(state.players['3'].hand.length, 1)
+  assert.equal(isCardFaceUpOnTable(state.table.plays[0], revealedTableCard.id), true)
+  assert.equal(state.bsResolution, null)
+  assert.equal(state.resetResolution, null)
+  assert.equal(state.round.passStreak, 0)
+
+  // The two powers that are defined by acting out of turn still work.
+  assert.equal(toggleDirectionMove(outOfTurn('1')), undefined)
+  assert.equal(state.round.direction, 'counterclockwise')
+  assert.equal(accuseDreamerMove(outOfTurn('2'), { targetPlayerID: '1' }), undefined)
+  assert.equal(state.accusation?.accuserPlayerID, '2')
+
+  // ...and the same moves are legal for the seat whose turn it actually is, which is what proves
+  // the refusals above were about the turn and not about the scenario being unplayable.
+  const freshState = createScenarioState(4)
+  freshState.players['0'].hand = [card('clubs_queen.png')]
+  freshState.players['1'].hand = [card('diamonds_queen.png')]
+  freshState.players['2'].hand = [card('hearts_queen.png')]
+  freshState.players['3'].hand = [card('spades_ace.png')]
+  freshState.round.trumpRank = 'Q'
+
+  assert.equal(playMove({
+    G: freshState,
+    ctx: {
+      currentPlayer: '0',
+      turn: 2,
+    },
+    events,
+    playerID: '0',
+  }, {
+    cardIDs: [freshState.players['0'].hand[0].id],
+  }), undefined)
+  assert.equal(freshState.table.plays.length, 1)
 }
 
 function runSpyRulesCheck() {
@@ -2387,7 +3168,9 @@ function runSpyRulesCheck() {
 
   assert.equal(callResult, undefined)
   assert.equal(state.bsResolution?.targetPlayID, state.table.plays[0]?.id)
-  assert.equal(state.bsResolution?.targetWasHonest, false)
+  assert.equal(state.bsResolution?.targetVerdict?.targetWasHonest, false)
+
+  completeBSReveal(state, events, 4)
 
   const finalizeResult = finalizeBSResolutionMove({
     G: state,
@@ -2750,12 +3533,300 @@ function runLeaveCharacterEffectsCheck() {
   }
 }
 
+/**
+ * Builds a 4-seat table with hidden plays in front of seats 0, 1 and 3, seat 2 holding nothing, and
+ * seat 0 as the caller challenging seat 1. Direction is clockwise, so the reveal must walk
+ * counterclockwise from the accused: 1, then 0, then 3 (2 is skipped).
+ */
+function createBSRevealScenario() {
+  const state = createScenarioState(4)
+
+  state.round.trumpRank = 'Q'
+  state.round.direction = 'clockwise'
+  state.round.lastNonPassingPlayerID = '1'
+
+  for (const playerID of state.seatOrder) {
+    state.players[playerID].hand = [card('clubs_ace.png')]
+  }
+
+  state.table.plays = [
+    {
+      id: 'play-0',
+      playerID: '3',
+      cards: [card('spades_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: null,
+      wasTrumpSelection: true,
+    },
+    {
+      id: 'play-1',
+      playerID: '0',
+      cards: [card('hearts_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-2',
+      playerID: '1',
+      cards: [card('clubs_king.png'), card('diamonds_king.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 3,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+  ]
+  state.players['1'].pendingRevealPlayID = 'play-2'
+
+  return state
+}
+
+function runBSRevealProcedureCheck() {
+  const state = createBSRevealScenario()
+  const { events, record } = createEventRecorder()
+  const callerContext: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 5,
+    },
+    events,
+    playerID: '0',
+  }
+
+  assert.equal(callBSMove(callerContext), undefined)
+  assert.ok(state.bsResolution)
+
+  const resolutionID = state.bsResolution.id
+  // Accused first, then counterclockwise against the clockwise turn direction. Seat 2 has nothing
+  // face down, so it never comes to the centre.
+  assert.deepEqual(state.bsResolution.revealOrder, ['1', '0', '3'])
+  assert.equal(state.bsResolution.revealStepIndex, 0)
+  assert.equal(state.bsResolution.isPunishing, false)
+
+  // A card belonging to a player who is not the focused one is out of turn.
+  assert.notEqual(
+    revealBSCardMove(callerContext, { resolutionID, cardID: state.table.plays[1].cards[0].id }),
+    undefined,
+  )
+  // Continue is refused while the focused player still has anything face down.
+  assert.notEqual(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+  // And so is the finalize, so the procedure cannot be skipped.
+  assert.notEqual(finalizeBSResolutionMove(callerContext, { resolutionID }), undefined)
+
+  const [firstTargetCard, secondTargetCard] = state.table.plays[2].cards
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: firstTargetCard.id }), undefined)
+  assert.deepEqual(state.table.plays[2].revealedCardIDs, [firstTargetCard.id])
+  // Still one card short.
+  assert.notEqual(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+  // Flipping an already face-up card is a no-op, not a way to satisfy the step.
+  assert.notEqual(revealBSCardMove(callerContext, { resolutionID, cardID: firstTargetCard.id }), undefined)
+
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: secondTargetCard.id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+  assert.equal(state.bsResolution?.revealStepIndex, 1)
+
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: state.table.plays[1].cards[0].id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: state.table.plays[0].cards[0].id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+
+  assert.equal(state.bsResolution?.revealStepIndex, 3)
+  // Nothing left to advance through.
+  assert.notEqual(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+
+  assert.equal(beginBSPunishmentMove(callerContext, { resolutionID }), undefined)
+  assert.equal(state.bsResolution?.isPunishing, true)
+  // Punish is not idempotent; a second press must not re-arm the travel.
+  assert.notEqual(beginBSPunishmentMove(callerContext, { resolutionID }), undefined)
+  // The table is still intact, so every client can measure the cards for the travel animation.
+  assert.equal(state.table.plays.length, 3)
+
+  assert.equal(finalizeBSResolutionMove(callerContext, { resolutionID }), undefined)
+  assert.equal(state.bsResolution, null)
+  // Seat 1 played Kings against a Q trump, so the accused lied and takes all four table cards.
+  assert.equal(state.players['1'].hand.length, 5)
+  assert.equal(state.players['1'].matchStats.punishmentCount, 1)
+  assert.equal(state.players['0'].matchStats.bsWinCount, 1)
+  assert.equal(record.nextPlayerID, '0')
+  assert.match(
+    state.history.find((event) => event.kind === 'verdict')?.detail ?? '',
+    /was dishonest/i,
+  )
+}
+
+function runBSResolutionCallerOnlyCheck() {
+  const state = createBSRevealScenario()
+  const { events } = createEventRecorder()
+  const callerContext: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 5,
+    },
+    events,
+    playerID: '0',
+  }
+
+  assert.equal(callBSMove(callerContext), undefined)
+  assert.ok(state.bsResolution)
+
+  const resolutionID = state.bsResolution.id
+  // The accused, who has the strongest motive to drive the reveal themselves.
+  const otherContext: TestContext = { ...callerContext, playerID: '1' }
+  const targetCardID = state.table.plays[2].cards[0].id
+
+  assert.notEqual(revealBSCardMove(otherContext, { resolutionID, cardID: targetCardID }), undefined)
+  assert.notEqual(advanceBSRevealMove(otherContext, { resolutionID }), undefined)
+  assert.notEqual(beginBSPunishmentMove(otherContext, { resolutionID }), undefined)
+  assert.notEqual(finalizeBSResolutionMove(otherContext, { resolutionID }), undefined)
+  assert.equal(state.table.plays[2].revealedCardIDs ?? undefined, undefined)
+
+  // A stale resolution id is refused even from the caller, so a queued click cannot land on the
+  // next resolution.
+  assert.notEqual(revealBSCardMove(callerContext, { resolutionID: 'bs-stale', cardID: targetCardID }), undefined)
+  assert.notEqual(advanceBSRevealMove(callerContext, { resolutionID: 'bs-stale' }), undefined)
+}
+
+function runBSResolutionHiddenStateCheck() {
+  const state = createBSRevealScenario()
+  const { events } = createEventRecorder()
+  const callerContext: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: '0',
+      turn: 5,
+    },
+    events,
+    playerID: '0',
+  }
+  const playerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+  // Seat 2 is a bystander: no table cards of their own, so nothing is exempt from masking for them.
+  const viewAsBystander = () => playerView({ G: state, playerID: '2' })
+  const getViewedPlay = (playID: string) => viewAsBystander().table.plays.find((play) => play.id === playID)
+
+  assert.equal(callBSMove(callerContext), undefined)
+  assert.ok(state.bsResolution)
+
+  const resolutionID = state.bsResolution.id
+  const [firstTargetCard, secondTargetCard] = state.table.plays[2].cards
+
+  // Nothing about the outcome may reach a client before the caller has revealed it.
+  assert.equal(viewAsBystander().bsResolution?.targetVerdict, null)
+  assert.equal(viewAsBystander().bsResolution?.punishment, null)
+  assert.equal(getViewedPlay('play-2')?.cards.every((viewedCard) => viewedCard.rank === 'Joker'), true)
+  assert.doesNotMatch(state.tableStatus, /honest|lie|dishonest|punish/i)
+
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: firstTargetCard.id }), undefined)
+  // A flipped card is visible to everyone; its partner still is not.
+  assert.equal(getViewedPlay('play-2')?.cards[0].sprite, 'clubs_king.png')
+  assert.equal(getViewedPlay('play-2')?.cards[1].rank, 'Joker')
+  // The verdict is still withheld: the accused's step is not confirmed yet.
+  assert.equal(viewAsBystander().bsResolution?.targetVerdict, null)
+
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: secondTargetCard.id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+
+  assert.equal(viewAsBystander().bsResolution?.targetVerdict?.targetWasHonest, false)
+  // The punishment, which the Reverse Rule can still swap, waits for the whole table.
+  assert.equal(viewAsBystander().bsResolution?.punishment, null)
+  assert.doesNotMatch(state.tableStatus, /honest|lie|dishonest|punish/i)
+
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: state.table.plays[1].cards[0].id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+  assert.equal(revealBSCardMove(callerContext, { resolutionID, cardID: state.table.plays[0].cards[0].id }), undefined)
+  assert.equal(advanceBSRevealMove(callerContext, { resolutionID }), undefined)
+
+  assert.equal(viewAsBystander().bsResolution?.punishment?.punishedPlayerID, '1')
+  // Every table card is face up for every viewer once the reveal is done.
+  assert.equal(
+    viewAsBystander().table.plays.every((play) => play.cards.every((viewedCard) => viewedCard.rank !== 'Joker')),
+    true,
+  )
+}
+
+function runResetRevealProcedureCheck() {
+  const state = createBSRevealScenario()
+  const { events } = createEventRecorder()
+  // Seat 3 opened the round, so a Reset called by seat 3 starts its walk on itself.
+  const callerContext: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: '3',
+      turn: 5,
+    },
+    events,
+    playerID: '3',
+    random: {
+      Shuffle: identityShuffle,
+    },
+  }
+
+  state.round.maxCardsOnTable = 4
+
+  assert.equal(callResetMove(callerContext), undefined)
+  assert.ok(state.resetResolution)
+
+  const resolutionID = state.resetResolution.id
+  // Caller first, then counterclockwise against the clockwise turn direction. Seat 2 has nothing
+  // face down, so it never comes to the centre.
+  assert.deepEqual(state.resetResolution.revealOrder, ['3', '1', '0'])
+  assert.equal(state.resetResolution.revealStepIndex, 0)
+
+  // The table no longer flips itself face up, so a bystander still sees card backs.
+  const viewAsBystander = () => BlowCowGame.playerView({ G: state, playerID: '2' }) as BlowCowState
+  assert.equal(
+    viewAsBystander().table.plays.every((play) => play.cards.every((viewedCard) => viewedCard.rank === 'Joker')),
+    true,
+  )
+  assert.doesNotMatch(state.tableStatus, /honest|lie|dishonest/i)
+
+  // Nothing may be skipped: neither out-of-turn cards, nor Continue, nor the finalize itself.
+  assert.notEqual(
+    revealResetCardMove(callerContext, { resolutionID, cardID: state.table.plays[1].cards[0].id }),
+    undefined,
+  )
+  assert.notEqual(advanceResetRevealMove(callerContext, { resolutionID }), undefined)
+  assert.notEqual(finalizeResetResolutionMove(callerContext, { resolutionID }), undefined)
+
+  // A non-caller cannot drive the procedure either.
+  const otherContext: TestContext = { ...callerContext, playerID: '1' }
+  assert.notEqual(
+    revealResetCardMove(otherContext, { resolutionID, cardID: state.table.plays[0].cards[0].id }),
+    undefined,
+  )
+  assert.notEqual(advanceResetRevealMove(otherContext, { resolutionID }), undefined)
+
+  completeResetReveal(state, events, 5)
+
+  assert.equal(state.resetResolution?.revealStepIndex, 3)
+  assert.equal(
+    viewAsBystander().table.plays.every((play) => play.cards.every((viewedCard) => viewedCard.rank !== 'Joker')),
+    true,
+  )
+
+  assert.equal(finalizeResetResolutionMove(callerContext, { resolutionID }), undefined)
+  assert.equal(state.resetResolution, null)
+  assert.equal(state.table.plays.length, 0)
+  // Four table cards redistributed across four seats, on top of the one card each already held.
+  assert.deepEqual(state.seatOrder.map((seatID) => state.players[seatID].hand.length), [2, 2, 2, 2])
+}
+
 const checks = [
   ['BS resolution', runBSResolutionCheck],
+  ['BS reveal procedure', runBSRevealProcedureCheck],
+  ['BS resolution caller only', runBSResolutionCallerOnlyCheck],
+  ['BS resolution hidden state', runBSResolutionHiddenStateCheck],
   ['punishment scored-out immediate leave', runPunishmentScoredOutImmediateLeaveCheck],
   ['leave removes table cards', runLeaveRemovesTableCardsCheck],
   ['all-pass reset', runAllPassResetCheck],
   ['reset redistribution', runResetRedistributionCheck],
+  ['reset reveal procedure', runResetRevealProcedureCheck],
   ['final-two resolution window', runFinalTwoResolutionWindowCheck],
   ['match stats tracking', runMatchStatsTrackingCheck],
   ['default rank selection', runDefaultRankSelectionCheck],
@@ -2771,7 +3842,10 @@ const checks = [
   ['confused rules', runConfusedRulesCheck],
   ['dreamer repeat trump', runDreamerRepeatTrumpCheck],
   ['dreamer direction cheat', runDreamerDirectionCheatCheck],
+  ['dreamer sneak play', runDreamerSneakPlayCheck],
   ['dreamer illegal count', runDreamerIllegalCountCheck],
+  ['accusation rules', runAccusationRulesCheck],
+  ['turn ownership guards', runTurnOwnershipCheck],
   ['spy rules', runSpyRulesCheck],
   ['characters disabled', runCharactersDisabledCheck],
   ['leave character effects', runLeaveCharacterEffectsCheck],

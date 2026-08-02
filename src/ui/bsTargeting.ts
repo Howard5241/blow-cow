@@ -8,11 +8,14 @@
  *
  * Every predicate below reads only fields that survive `hideSecretState`
  * (`blowCowGame.ts:2672`), which masks card identities but not `character`,
- * `wasTrumpSelection`, `claimedRank`, `declaredCardCount`, or `usedDreamerDirectionChange`.
+ * `wasTrumpSelection`, `claimedRank`, or `declaredCardCount`.
+ *
+ * Nothing here mirrors The Dreamer's rules. Those are only ever judged by `accuseDreamer`, on the
+ * server, from state (`G.directionTamper`) that never reaches a client — an accusation is meant to
+ * be a guess, so the board must not be able to check the answer first.
  */
-import { getTableCardCount, type BlowCowState } from '../game/blowCowGame.ts'
+import type { BlowCowState } from '../game/blowCowGame.ts'
 import {
-  getDisplayedPlayCardCount,
   getHiddenOverlayCardIDs,
   getLatestHiddenPlay,
   type BlowCowTablePlay,
@@ -25,8 +28,6 @@ export type ClientBSTargetSelection = {
   targetPlay: BlowCowTablePlay
   kind: ClientBSTargetKind
 }
-
-export type DreamerCheatKind = 'repeatTrump' | 'directionChange' | 'illegalCount'
 
 /** Mirrors `getPendingPlay` (blowCowGame.ts:835). */
 export function getClientPendingPlay(state: BlowCowState, seatID: string | null | undefined) {
@@ -154,49 +155,3 @@ export function resolveClientBSTargetSelection(
   return { targetSeatID: requestedTargetSeatID, targetPlay: requestedTargetPlay, kind: 'grandmasterOverride' }
 }
 
-/**
- * Mirrors the four Dreamer catch predicates used by `createBSResolution`
- * (blowCowGame.ts:1382-1399). Any non-null result means calling BS on this play also catches
- * the cheat, which overrides the Reverse Rule.
- */
-export function getDreamerCheatForPlay(
-  state: BlowCowState,
-  play: BlowCowTablePlay | null,
-): DreamerCheatKind | null {
-  if (!play || state.players[play.playerID]?.character !== 'The Dreamer') {
-    return null
-  }
-
-  if (
-    play.wasTrumpSelection
-    && state.round.previousTrumpRank !== null
-    && play.claimedRank === state.round.previousTrumpRank
-  ) {
-    return 'repeatTrump'
-  }
-
-  if (play.usedDreamerDirectionChange) {
-    return 'directionChange'
-  }
-
-  if (
-    play.cards.length > getDisplayedPlayCardCount(play)
-    || getTableCardCount(state.table) > state.round.maxCardsOnTable
-  ) {
-    return 'illegalCount'
-  }
-
-  return null
-}
-
-export function getDreamerCheatLabel(cheatKind: DreamerCheatKind) {
-  if (cheatKind === 'repeatTrump') {
-    return 'reused the previous round trump on the opening play'
-  }
-
-  if (cheatKind === 'directionChange') {
-    return 'changed the turn direction during that hidden play'
-  }
-
-  return 'broke the normal card-count limits'
-}
