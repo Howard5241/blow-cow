@@ -34,16 +34,27 @@ export type SeatRow = {
   isConnected: boolean
   isTargetPlayer: boolean
   isViewingPlayer: boolean
+  /**
+   * The leave-triggered ability that moved this player's points, already formatted. Null for players
+   * who are still in, and for those whose ability never met its condition. It never clears.
+   */
+  leaveEffect: { label: string; isGain: boolean } | null
   name: string
   pointRanks: string[]
   points: number
+  /** This seat started as The Seeker and traded that card in for the one it shows now. */
+  wasSeekerPick: boolean
 }
+
+/** Which way a points pill last moved, so the flash can be read without reading the number. */
+export type PointsFlashDirection = 'gain' | 'loss'
 
 export type CharacterCardOverlay = {
   playerName: string
   seatLabel: string
   characterName: string
   sprite: string
+  wasSeekerPick: boolean
 }
 
 export type HistoryEvent = {

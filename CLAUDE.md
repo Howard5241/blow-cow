@@ -98,10 +98,29 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 - `src/game/` — rules, helpers, character definitions.
 - `src/ui/` — board UI and sprite helpers.
 - `src/App.tsx`, `src/config.ts` — lobby flow and client configuration.
-- `server/server.cjs` — local server runtime, including the custom `/games/:name/:id/rejoin` route.
+- `server/server.cjs` — local server runtime, including the custom `/games/:name/:id/rejoin` route,
+  the persistent match store, and the abandoned-match sweeper.
 - `server/completedGameArchive.ts` — archives finished matches to `data/completed-games/`.
 - `scripts/check-blowcow-gameplay.ts` — targeted gameplay checks.
 - Keep modules small and focused; keep shared types and constants in dedicated files.
+
+## Match Persistence
+
+- Matches are stored with boardgame.io's `FlatFile` store under `data/matches/`, so rooms survive a
+  crash, a reboot, and the routine `--watch` restarts that `npm run dev:server` performs whenever a
+  file under `src/game/` changes. Override the location with `BLOW_COW_MATCH_DIR`.
+- The store is asynchronous. Anything that wraps or reads `server.db` must `await` it —
+  `db.fetch(...).state` on an unawaited Promise is `undefined`, which fails silently.
+- `releaseStaleConnections` clears every `isConnected` flag when the store opens, before the server
+  listens. A crashed process never runs the disconnect handler, so without this every restored room
+  would look occupied and `/rejoin` would refuse it with a 409.
+- `sweepAbandonedMatches` wipes matches untouched for `BLOW_COW_MATCH_TTL_MS` (24h default) that have
+  nobody connected, on boot and every 15 minutes.
+- The client stores its whole seat under `ACTIVE_ROOM_STORAGE_KEY`, so a reload reconnects with the
+  same credentials rather than going back through the lobby.
+- `POST /games/:name/:id/clear` deletes a room manually. `getRoomClearBlockReason` in
+  `src/lobbyRooms.ts` is shared by that route and the lobby's Clear button, so keep new room-level
+  rules there rather than writing them twice.
 
 ## Completed Match Archives
 

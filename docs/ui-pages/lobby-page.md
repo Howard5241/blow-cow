@@ -67,11 +67,13 @@ main.app-shell
 | Room Card | `article` | `room-card` | Summarizes one open room. | Repeated inside Room List. |
 | Room Card Top | `div` | `room-card-top` | Shows the room code and open-seat count. | First row of Room Card. |
 | Room Code Label | `p` + `strong` | `room-label`, `room-id` | Labels and displays the match ID. | Left side of Room Card Top. |
-| Open Seats Pill | `span` | `seat-pill` | Shows available seats in the room. | Right side of Room Card Top. |
+| Open Seats Pill | `span` | `seat-pill` | Shows available seats, or `Game over` in the `finished` variant once the room's match has ended. | Right side of Room Card Top. |
 | Seat Row | `div` | `seat-row` | Shows one chip per room seat. | Middle row of Room Card. |
 | Seat Chip | `span` | `seat-chip` | Shows a filled, offline, or open seat. | Repeated inside Seat Row. |
-| Room Card Footer | `div` | `room-card-footer` | Shows the last update time and quick-join action. | Final row of Room Card. |
-| Quick Join Button | `button` | `subtle-button` | Joins an open seat or reclaims the matching offline seat represented by the card. | Action inside Room Card Footer. |
+| Room Card Footer | `div` | `room-card-footer` | Shows the last update time and the room's actions. | Final row of Room Card. |
+| Room Card Actions | `div` | `room-card-actions` | Groups the clear and quick-join buttons so they stay together when the footer stacks. | Right side of Room Card Footer. |
+| Clear Room Button | `button` | `subtle-button clear-room-button` | Deletes the room from the lobby. Disabled, with the reason as its tooltip, whenever the room may not be cleared. | First action inside Room Card Actions. |
+| Quick Join Button | `button` | `subtle-button` | Joins an open seat or reclaims the matching offline seat represented by the card. | Second action inside Room Card Actions. |
 
 ## Notes
 
@@ -81,3 +83,23 @@ main.app-shell
 - In manual-rank mode, `The Confused` is unavailable until `J` is part of the selected deck.
 - Room-code join and quick join both reclaim an offline seat instead of taking a new one when the local display name exactly matches that offline player.
 - Offline claimed seats are labeled directly in the room list so players can see when a name-based reclaim is possible.
+- A room may be cleared when its game has ended, or while nobody is connected to it. Anything else is
+  a table with players at it and is never anyone else's to delete. `getRoomClearBlockReason` in
+  `src/lobbyRooms.ts` is the single source of that rule: the button's disabled state and its tooltip
+  come from it, and so does the server's 409, so the lobby can never offer a clear that is refused.
+- Clearing takes two presses. The first arms that one card's button, which relabels to `Confirm
+  Clear`; arming a different room disarms the first. Clearing deletes a stored match with no undo,
+  and the room list is a column of near-identical cards.
+- Clearing needs no credentials. The rule is about the room's state rather than who is asking, and
+  requiring credentials would leave the abandoned rooms nobody can authenticate for as exactly the
+  ones nobody can clear.
+- A player still sitting on a finished game's results when someone clears that room is returned to
+  the Lobby by Leave Room, rather than being told the leave failed.
+- The Lobby page is skipped entirely when the browser has a stored seat. `ACTIVE_ROOM_STORAGE_KEY`
+  holds the whole seat — match, player, credentials, name — so a reload after a server restart or a
+  dropped connection reconnects directly to the table without the room list, the room code, or the
+  rejoin route.
+- A restored seat is verified once, in the background, while the table is already rendering. It is
+  dropped back to the Lobby only when the server positively reports the match gone (404) or the seat
+  now carries a different name. An unreachable server is never treated as a missing room, since that
+  is the case the restore exists for.

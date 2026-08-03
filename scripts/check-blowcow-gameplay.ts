@@ -13,9 +13,13 @@ import {
   createDeck,
   createInitialBlowCowState,
   DEFAULT_BLOW_COW_SPEED_MULTIPLIER,
+  formatLeaveEffectLabel,
   type BlowCowFinalizeResetResolutionArgs,
   getDefaultStandardRankCount,
+  getSeekerCharacterChoices,
   isCardFaceUpOnTable,
+  isSeeker,
+  type BlowCowSeekCharacterArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
   type BlowCowRevealBSCardArgs,
@@ -71,6 +75,10 @@ const toggleDirectionMove = BlowCowGame.moves.toggleDirection as (context: TestC
 const catHideCardMove = BlowCowGame.moves.catHideCard as (
   context: TestContext,
   args: BlowCowCatHideCardArgs,
+) => unknown
+const seekCharacterMove = BlowCowGame.moves.seekCharacter as (
+  context: TestContext,
+  args: BlowCowSeekCharacterArgs,
 ) => unknown
 const finalizeBSResolutionMove = BlowCowGame.moves.finalizeBSResolution as (
   context: TestContext,
@@ -3189,6 +3197,152 @@ function runSpyRulesCheck() {
   assert.equal(state.players['0'].matchStats.bsWinCount, 1)
 }
 
+function runSeekerRulesCheck() {
+  // Not turn-bound: '1' takes a card while '0' is on the clock, and the turn is untouched by it.
+  {
+    const state = createScenarioState(3)
+
+    state.players['1'].character = 'The Seeker'
+    state.players['2'].character = 'The Spy'
+
+    assert.ok(isSeeker(state, '1'))
+
+    const choices = getSeekerCharacterChoices(state, '1')
+    assert.ok(!choices.includes('The Seeker' as never), 'The Seeker cannot be taken again.')
+    assert.ok(!choices.includes('The Spy'), 'A character another seat holds is not on offer.')
+    assert.ok(!choices.includes('The Believer'), 'The Believer is held by the other two seats.')
+    assert.ok(choices.includes('The Cat'))
+
+    const seekResult = seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 4,
+      },
+      events: createEventRecorder().events,
+      playerID: '1',
+    }, {
+      characterName: 'The Cat',
+    })
+
+    assert.equal(seekResult, undefined)
+    assert.equal(state.players['1'].character, 'The Cat')
+    assert.equal(state.players['1'].seekerPickedCharacter, 'The Cat')
+    assert.equal(isSeeker(state, '1'), false)
+    assert.match(
+      state.history.find((entry) => entry.title.includes('used The Seeker'))?.detail ?? '',
+      /Took The Cat from the character pool/i,
+    )
+    assert.ok(state.archive.turns
+      .flatMap((turn) => turn.actions)
+      .some((action) => action.kind === 'seekCharacter' && action.characterUsed === 'The Seeker'))
+
+    // Spent, so a second call finds nothing to spend.
+    assert.notEqual(seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 5,
+      },
+      events: createEventRecorder().events,
+      playerID: '1',
+    }, {
+      characterName: 'The Rogue' as never,
+    }), undefined)
+  }
+
+  // A character somebody else already holds, and a name nobody is offering, are both refused.
+  {
+    const state = createScenarioState(3)
+
+    state.players['0'].character = 'The Seeker'
+    state.players['1'].character = 'The Pawn'
+
+    const takenResult = seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events: createEventRecorder().events,
+      playerID: '0',
+    }, {
+      characterName: 'The Pawn',
+    })
+
+    assert.notEqual(takenResult, undefined)
+    assert.equal(state.players['0'].character, 'The Seeker')
+
+    assert.notEqual(seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events: createEventRecorder().events,
+      playerID: '0',
+    }, {
+      characterName: 'Not A Character' as never,
+    }), undefined)
+
+    // Only the seat holding the card may spend it.
+    assert.notEqual(seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events: createEventRecorder().events,
+      playerID: '2',
+    }, {
+      characterName: 'The Cat',
+    }), undefined)
+    assert.equal(state.players['2'].character, 'The Believer')
+  }
+
+  // Scoped to the room's pool, so a card the host left out of the match cannot be sought out.
+  {
+    const state = createInitialBlowCowState(3, reverseShuffle, {
+      useCharacters: true,
+      characterPool: ['The Seeker', 'The Cat', 'The Spy'],
+    })
+    const seekerPlayerID = state.seatOrder.find((playerID) => isSeeker(state, playerID))
+
+    assert.ok(seekerPlayerID, 'Expected a Seeker to be dealt from a three-card pool of three players.')
+
+    const choices = getSeekerCharacterChoices(state, seekerPlayerID)
+    assert.ok(!choices.includes('The Dreamer'), 'A character outside the room pool is not on offer.')
+    assert.ok(choices.every((characterName) => characterName === 'The Cat' || characterName === 'The Spy'))
+  }
+
+  // Refused while a resolution is running, like every other move.
+  {
+    const state = createScenarioState(3)
+
+    state.players['0'].character = 'The Seeker'
+    state.resetResolution = {
+      id: 'reset-1',
+      callerPlayerID: '1',
+      kind: 'reset',
+      revealOrder: [],
+      revealStepIndex: 0,
+    }
+
+    assert.notEqual(seekCharacterMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 3,
+      },
+      events: createEventRecorder().events,
+      playerID: '0',
+    }, {
+      characterName: 'The Cat',
+    }), undefined)
+    assert.equal(state.players['0'].character, 'The Seeker')
+  }
+}
+
 function runCharactersDisabledCheck() {
   const state = createInitialBlowCowState(4, reverseShuffle, {
     useCharacters: false,
@@ -3421,6 +3575,9 @@ function runLeaveCharacterEffectsCheck() {
       state.history.find((event) => event.playerID === '0' && event.kind === 'system')?.detail ?? '',
       /exactly 2 points, so the total became 0 instead/i,
     )
+    // The ability is written as a delta so the board and the results tooltip can name a number.
+    assert.deepEqual(state.players['0'].leaveEffect, { character: 'The Speedrunner', pointDelta: -2 })
+    assert.equal(formatLeaveEffectLabel(state.players['0'].leaveEffect!), '-2 points (The Speedrunner)')
   }
 
   {
@@ -3447,6 +3604,7 @@ function runLeaveCharacterEffectsCheck() {
       state.history.find((event) => event.playerID === '0' && event.kind === 'system')?.detail ?? '',
       /without ever passing, so 2 points were lost/i,
     )
+    assert.deepEqual(state.players['0'].leaveEffect, { character: 'The Streamer', pointDelta: -2 })
   }
 
   {
@@ -3473,6 +3631,60 @@ function runLeaveCharacterEffectsCheck() {
       state.history.find((event) => event.playerID === '0' && event.kind === 'system')?.detail ?? '',
       /without ever calling BS, so 1 point was lost/i,
     )
+    assert.deepEqual(state.players['0'].leaveEffect, { character: 'The Pacifist', pointDelta: -1 })
+    // Singular, so the label cannot read "-1 points".
+    assert.equal(formatLeaveEffectLabel(state.players['0'].leaveEffect!), '-1 point (The Pacifist)')
+  }
+
+  {
+    // The one ability that pays out. It has no condition beyond leaving, so it always fires.
+    const state = createScenarioState()
+    const { events, record } = createEventRecorder()
+
+    state.players['0'].character = 'The Privileged'
+    state.players['0'].hand = []
+    state.players['0'].points = 2
+    state.players['1'].hand = [card('clubs_ace.png')]
+
+    beginTurn({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 1,
+      },
+      events,
+    })
+
+    assert.equal(record.endedGame?.pointsByPlayer['0'], 3)
+    assert.equal(state.players['0'].points, 3)
+    assert.deepEqual(state.players['0'].leaveEffect, { character: 'The Privileged', pointDelta: 1 })
+    assert.equal(formatLeaveEffectLabel(state.players['0'].leaveEffect!), '+1 point (The Privileged)')
+  }
+
+  {
+    // The Drunkard needs a play on record and no manual one, so an untouched hand leaves it silent.
+    const state = createScenarioState()
+    const { events } = createEventRecorder()
+
+    state.players['0'].character = 'The Drunkard'
+    state.players['0'].hand = []
+    state.players['0'].points = 5
+    state.players['0'].matchStats.playCount = 2
+    state.players['0'].hasUsedManualPlay = false
+    state.players['1'].hand = [card('clubs_ace.png')]
+
+    beginTurn({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 1,
+      },
+      events,
+    })
+
+    assert.equal(state.players['0'].points, 2)
+    assert.deepEqual(state.players['0'].leaveEffect, { character: 'The Drunkard', pointDelta: -3 })
+    assert.equal(formatLeaveEffectLabel(state.players['0'].leaveEffect!), '-3 points (The Drunkard)')
   }
 
   {
@@ -3497,6 +3709,8 @@ function runLeaveCharacterEffectsCheck() {
     assert.equal(state.players['0'].points, 3)
     assert.equal(state.history.length, 2)
     assert.equal(state.history[0]?.kind, 'leave')
+    // No ability fired, so there is nothing for the board or the results table to label.
+    assert.equal(state.players['0'].leaveEffect, null)
   }
 
   {
@@ -3530,6 +3744,9 @@ function runLeaveCharacterEffectsCheck() {
       /left the game last/i,
     )
     assert.match(state.history.at(-1)?.detail ?? '', /without ever passing, so 2 points were lost/i)
+    // The last player out triggers just like everyone else, which is what the win screen pauses on.
+    assert.equal(state.players['0'].leaveEffect, null)
+    assert.deepEqual(state.players['1'].leaveEffect, { character: 'The Streamer', pointDelta: -2 })
   }
 }
 
@@ -3832,6 +4049,7 @@ const checks = [
   ['default rank selection', runDefaultRankSelectionCheck],
   ['character assignment', runCharacterAssignmentCheck],
   ['manual character pool', runManualCharacterPoolCheck],
+  ['seeker rules', runSeekerRulesCheck],
   ['foreigner rules', runForeignerRulesCheck],
   ['grandmaster rules', runGrandmasterRulesCheck],
   ['pawn rules', runPawnRulesCheck],

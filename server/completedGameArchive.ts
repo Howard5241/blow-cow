@@ -45,10 +45,25 @@ type CompletedGameArchiveFetchResult = {
   initialState?: unknown
 }
 
+/**
+ * boardgame.io ships both synchronous stores (`InMemory`) and asynchronous ones (`FlatFile`), and
+ * this module has to work against either — a sync store awaited is just the same value. Getting this
+ * wrong is quiet rather than loud: reading `.state` off an unawaited Promise yields `undefined`, and
+ * `archiveCompletedMatch` would return `null` and skip every archive without throwing.
+ */
+type MaybePromise<Value> = Value | Promise<Value>
+
 type CompletedGameArchiveDB = {
-  fetch: (matchID: string, opts: CompletedGameArchiveFetchOptions) => CompletedGameArchiveFetchResult
-  setState: (matchID: string, state: CompletedGameArchiveStoredState, deltalog?: unknown[]) => void
-  setMetadata: (matchID: string, metadata: CompletedGameArchiveMetadata) => void
+  fetch: (
+    matchID: string,
+    opts: CompletedGameArchiveFetchOptions,
+  ) => MaybePromise<CompletedGameArchiveFetchResult>
+  setState: (
+    matchID: string,
+    state: CompletedGameArchiveStoredState,
+    deltalog?: unknown[],
+  ) => MaybePromise<void>
+  setMetadata: (matchID: string, metadata: CompletedGameArchiveMetadata) => MaybePromise<void>
 }
 
 type CompletedGameArchiveMetadataBlock = {
@@ -318,12 +333,12 @@ function appendNdjsonLine(filePath: string, value: unknown) {
   appendFileSync(filePath, `${JSON.stringify(value)}\n`, 'utf8')
 }
 
-function archiveCompletedMatch(
+async function archiveCompletedMatch(
   db: CompletedGameArchiveDB,
   matchID: string,
   startedAt: number | null,
 ) {
-  const snapshot = db.fetch(matchID, {
+  const snapshot = await db.fetch(matchID, {
     state: true,
     metadata: true,
     log: true,
@@ -368,23 +383,32 @@ export function installCompletedGameArchiver(db: CompletedGameArchiveDB) {
   const originalSetState = db.setState.bind(db)
   const originalSetMetadata = db.setMetadata.bind(db)
 
-  db.setState = (matchID, state, deltalog) => {
+  db.setState = async (matchID, state, deltalog) => {
     if (state?.G?.gameStatus === 'active' && !matchStartedAtByID.has(matchID)) {
       matchStartedAtByID.set(matchID, Date.now())
     }
 
-    originalSetState(matchID, state, deltalog)
+    await originalSetState(matchID, state, deltalog)
   }
 
-  db.setMetadata = (matchID, metadata) => {
-    originalSetMetadata(matchID, metadata)
+  db.setMetadata = async (matchID, metadata) => {
+    await originalSetMetadata(matchID, metadata)
 
     if (archivedMatchIDs.has(matchID) || metadata.gameover === undefined || metadata.gameover === null) {
       return
     }
 
-    ensureArchiveDirectories()
-    archiveCompletedMatch(db, matchID, matchStartedAtByID.get(matchID) ?? null)
+    // Claimed before the first await, so a second write for the same finished match cannot slip past
+    // the guard while this one is still reading the snapshot back off disk.
     archivedMatchIDs.add(matchID)
+
+    try {
+      ensureArchiveDirectories()
+      await archiveCompletedMatch(db, matchID, matchStartedAtByID.get(matchID) ?? null)
+    } catch (error) {
+      // This runs inside the store write the game master awaits. Archiving is bookkeeping, so a
+      // failure here must not reject that write and take the finished match down with it.
+      console.error(`Could not archive completed match ${matchID}`, error)
+    }
   }
 }

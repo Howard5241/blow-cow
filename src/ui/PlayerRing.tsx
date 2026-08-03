@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react'
 import { SeatBlock } from './SeatBlock.tsx'
-import type { SeatHalf, SeatRow } from './boardTypes.ts'
+import type { PointsFlashDirection, SeatHalf, SeatRow } from './boardTypes.ts'
 
 // Screen y grows downward, so sin(90deg) puts the anchor seat at the bottom of the ring.
 const BOTTOM_SEAT_ANGLE_DEG = 90
@@ -55,12 +55,13 @@ type PlayerRingProps = {
   /** The centre hub. */
   children: ReactNode
   enteringCardIDSet: Set<string>
-  flashingPointSeatIDSet: Set<string>
   getSeatLabel: (seatIndex: number) => string
   onCatHideCard: (cardID: string) => void
   onOpenCharacterCard: (seat: SeatRow) => void
   onRevealCard: (cardID: string) => void
   onSelectSeat: (seatID: string) => void
+  /** Which way each mid-flash seat's points last moved. Seats that are not flashing are absent. */
+  pointsFlashDirectionBySeatID: Record<string, PointsFlashDirection>
   punishmentImpactSeatID: string | null
   registerFrontCard: (overlayCardID: string, element: HTMLDivElement | null) => void
   registerHandCountPill: (seatID: string, element: HTMLSpanElement | null) => void
@@ -83,12 +84,12 @@ export function PlayerRing({
   calloutTextBySeatID,
   children,
   enteringCardIDSet,
-  flashingPointSeatIDSet,
   getSeatLabel,
   onCatHideCard,
   onOpenCharacterCard,
   onRevealCard,
   onSelectSeat,
+  pointsFlashDirectionBySeatID,
   punishmentImpactSeatID,
   registerFrontCard,
   registerHandCountPill,
@@ -121,7 +122,7 @@ export function PlayerRing({
             enteringCardIDSet={enteringCardIDSet}
             isAccusedCheat={seat.id === accusedCheatSeatID}
             isRevealFocused={seat.id === focusedSeatID}
-            isPointsFlashing={flashingPointSeatIDSet.has(seat.id)}
+            pointsFlashDirection={pointsFlashDirectionBySeatID[seat.id] ?? null}
             isPunishmentImpact={seat.id === punishmentImpactSeatID}
             isSelectable={isSelectable}
             isSelected={seat.id === selectedSeatID}

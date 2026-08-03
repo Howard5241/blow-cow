@@ -3,7 +3,9 @@ import type { BoardProps } from 'boardgame.io/react'
 import {
   BLOW_COW_RANKS,
   countsTowardReverseRule,
+  formatLeaveEffectLabel,
   getActivePlayerIDs,
+  getSeekerCharacterChoices,
   getTableCardCount,
   sortCards,
   type BlowCowAccusation,
@@ -27,9 +29,11 @@ import {
   type BlowCowSneakPlayArgs,
   type BlowCowRank,
   type BlowCowResetResolution,
+  type BlowCowSeekCharacterArgs,
   type BlowCowSelectTrumpAndPlayArgs,
   type BlowCowState,
 } from '../game/blowCowGame.ts'
+import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.ts'
 import { getCharacterCardSprite } from './characterCardSprites.ts'
 import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
 import { getAvatarSprite } from './avatarSprites.ts'
@@ -65,6 +69,7 @@ import type {
   CharacterCardOverlay,
   HistoryEvent,
   MatchPlayer,
+  PointsFlashDirection,
   SeatRow,
 } from './boardTypes.ts'
 
@@ -127,6 +132,8 @@ type EndGameRow = {
   punishmentCount: number
   bsWinRate: number | null
   isWinner: boolean
+  /** Formatted leave-triggered point change, or null when no ability fired for this player. */
+  leaveEffectLabel: string | null
 }
 
 type EndGameChartPoint = {
@@ -371,6 +378,7 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     pass: (args?: BlowCowPassArgs) => void
     play: (args: BlowCowPlayArgs) => void
     playRandom: (args: BlowCowPlayRandomArgs) => void
+    seekCharacter: (args: BlowCowSeekCharacterArgs) => void
     sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
@@ -733,7 +741,11 @@ export function BlowCowBoard({
   const [enteringFrontCardIDs, setEnteringFrontCardIDs] = useState<string[]>([])
   const [frontCardEntrySequence, setFrontCardEntrySequence] = useState<FrontCardEntrySequence | null>(null)
   const [revealFlippingCardIDs, setRevealFlippingCardIDs] = useState<string[]>([])
-  const [flashingPointSeatIDs, setFlashingPointSeatIDs] = useState<string[]>([])
+  /**
+   * Keyed by seat rather than a flat list because the flash has to say which way the total moved:
+   * scoring is green, and a leave-triggered penalty is red.
+   */
+  const [pointsFlashDirectionBySeatID, setPointsFlashDirectionBySeatID] = useState<Record<string, PointsFlashDirection>>({})
   /**
    * One callout per seat rather than one for the whole table, because they no longer expire. A
    * player's line stays over their block until they start a turn, say something else, or the round
@@ -755,6 +767,14 @@ export function BlowCowBoard({
   const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  /**
+   * Local, and deliberately not in `G`: the win screen exists so each player can look at the final
+   * table — the last leave-effect labels land on it — before the results panel covers everything.
+   * How long anyone wants for that is their own business, and nobody should be waiting on a player
+   * who has already closed the tab. It never resets because a finished match never restarts; the
+   * only route back to staging is a new match.
+   */
+  const [hasDismissedWinScreen, setHasDismissedWinScreen] = useState(false)
   const [leadInProgress, setLeadInProgress] = useState<RevealLeadInProgress | null>(null)
   const [isBSPunishPromptReady, setIsBSPunishPromptReady] = useState(false)
   /**
@@ -777,6 +797,14 @@ export function BlowCowBoard({
   const [resetDealSequence, setResetDealSequence] = useState<PunishmentMoveSequence | null>(null)
   const [departedResetCardIDs, setDepartedResetCardIDs] = useState<string[]>([])
   const [selectedCharacterCard, setSelectedCharacterCard] = useState<CharacterCardOverlay | null>(null)
+  /**
+   * The Seeker's picker. Both pieces are local and neither belongs in `G`: nobody else is waiting on
+   * this choice, and the picker is only ever mounted on the one client that has it to make. It opens
+   * by default and closes for good once the move lands, because taking a character is precisely what
+   * stops that player being The Seeker — so there is no dismissal flag to reset either.
+   */
+  const [hasDismissedSeekerPicker, setHasDismissedSeekerPicker] = useState(false)
+  const [selectedSeekerCharacter, setSelectedSeekerCharacter] = useState<BlowCowImplementedCharacterName | null>(null)
   const [copyRoomCodeStatus, setCopyRoomCodeStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const {
     message: failMessage,
@@ -917,8 +945,26 @@ export function BlowCowBoard({
     }
   }, [copyRoomCodeStatus])
 
+  /*
+   * Declared up here rather than beside the other character derivations because the Escape handler
+   * below has to know whether the picker is up. Still holding the card is the whole condition, on or
+   * off this player's turn: the server treats the swap as spending it, so `character` stops reading
+   * `The Seeker` the moment the choice lands and both of these close with it.
+   *
+   * The picker opens itself — choosing is this player's first job of the match and there is nothing
+   * to gain by making them find the button — and dismissing it is sticky, so it can never pop back
+   * over a live turn.
+   */
+  const isSeeker = Boolean(
+    currentSeatID
+      && G.gameStatus === 'active'
+      && G.players[currentSeatID]?.character === 'The Seeker'
+      && !G.players[currentSeatID].hasLeft,
+  )
+  const isSeekerPickerOpen = isSeeker && !hasDismissedSeekerPicker
+
   const hasEscapableLayer = Boolean(
-    selectedCharacterCard || isHistoryOpen || selectedTargetSeatID,
+    selectedCharacterCard || isSeekerPickerOpen || isHistoryOpen || selectedTargetSeatID,
   )
 
   // Escape closes one layer at a time, innermost first.
@@ -937,6 +983,11 @@ export function BlowCowBoard({
         return
       }
 
+      if (isSeekerPickerOpen) {
+        setHasDismissedSeekerPicker(true)
+        return
+      }
+
       if (isHistoryOpen) {
         setIsHistoryOpen(false)
         return
@@ -951,7 +1002,7 @@ export function BlowCowBoard({
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [hasEscapableLayer, selectedCharacterCard, isHistoryOpen, clearFailMessage])
+  }, [hasEscapableLayer, selectedCharacterCard, isSeekerPickerOpen, isHistoryOpen, clearFailMessage])
 
   useEffect(() => {
     if (G.gameStatus === 'staging' || !G.useCharacters || G.gameStatus === 'finished') {
@@ -1620,6 +1671,8 @@ export function BlowCowBoard({
   const isDreamer = currentPlayerState?.character === 'The Dreamer'
   const isDrunkard = currentPlayerState?.character === 'The Drunkard'
   const isForeigner = currentPlayerState?.character === 'The Foreigner'
+  const seekerCharacterChoices = isSeeker && currentSeatID ? getSeekerCharacterChoices(G, currentSeatID) : []
+  const canSeekCharacter = isSeeker && !isResolutionSequenceActive && seekerCharacterChoices.length > 0
   const isRepeatingPreviousTrump = selectedTrumpRank === G.round.previousTrumpRank
   const canDreamerRepeatPreviousTrump = isDreamer && isRepeatingPreviousTrump
   const canSelectTrumpAndPlay = isInteractiveTurn
@@ -1792,14 +1845,17 @@ export function BlowCowBoard({
     && !accusation.isPunishing
     ? accusedCheatSeatID
     : null
+  // Filtered rather than cleared on the way in: a player who has left is not saying anything any
+  // more, and their block now carries a permanent leave-effect label in the same place.
   const calloutTextBySeatID = Object.fromEntries(
-    Object.entries(playerCallouts).map(([seatID, callout]) => [seatID, callout.text]),
+    Object.entries(playerCallouts)
+      .filter(([seatID]) => !G.players[seatID]?.hasLeft)
+      .map(([seatID, callout]) => [seatID, callout.text]),
   )
   const revealFlippingCardIDSet = new Set(revealFlippingCardIDs)
   const activeMoveSequence = punishmentMoveSequence ?? resetMoveSequence
   const resetPileShuffleDurationMs = scaleSequenceDelay(RESET_PILE_SHUFFLE_DURATION_MS, G.speedMultiplier)
   const enteringHandCardIndexByID = new Map(enteringHandCardIDs.map((cardID, index) => [cardID, index]))
-  const flashingPointSeatIDSet = new Set(flashingPointSeatIDs)
   const reversedHistory = [...G.history].reverse()
   const latestPassEvent = reversedHistory.find((event) => event.kind === 'action' && event.playerID !== null && event.title.endsWith(' passed')) ?? null
 
@@ -1879,26 +1935,35 @@ export function BlowCowBoard({
       return
     }
 
-    const awardedPointSeatIDs = G.seatOrder.filter((seatID) => {
-      const previousPoints = previousPointsBySeat.get(seatID) ?? 0
-      const nextPoints = nextPointsBySeat.get(seatID) ?? 0
-      return nextPoints > previousPoints
+    // Both directions, not just gains: a leave-triggered penalty is the only way a total ever goes
+    // down, and it lands at the same moment as the label explaining it. Flashing the pill is what
+    // ties the two together.
+    const changedPointSeatIDs = G.seatOrder.filter((seatID) => {
+      return (nextPointsBySeat.get(seatID) ?? 0) !== (previousPointsBySeat.get(seatID) ?? 0)
     })
 
-    if (awardedPointSeatIDs.length === 0) {
+    if (changedPointSeatIDs.length === 0) {
       return
     }
 
-    setFlashingPointSeatIDs((previousSeatIDs) => [...new Set([...previousSeatIDs, ...awardedPointSeatIDs])])
+    setPointsFlashDirectionBySeatID((previousDirections) => ({
+      ...previousDirections,
+      ...Object.fromEntries(changedPointSeatIDs.map((seatID) => [
+        seatID,
+        (nextPointsBySeat.get(seatID) ?? 0) > (previousPointsBySeat.get(seatID) ?? 0) ? 'gain' : 'loss',
+      ])),
+    }))
 
-    for (const seatID of awardedPointSeatIDs) {
+    for (const seatID of changedPointSeatIDs) {
       const existingTimeoutID = pointFlashTimeoutIDsRef.current.get(seatID)
       if (existingTimeoutID !== undefined) {
         window.clearTimeout(existingTimeoutID)
       }
 
       pointFlashTimeoutIDsRef.current.set(seatID, window.setTimeout(() => {
-        setFlashingPointSeatIDs((previousSeatIDs) => previousSeatIDs.filter((previousSeatID) => previousSeatID !== seatID))
+        setPointsFlashDirectionBySeatID((previousDirections) => Object.fromEntries(
+          Object.entries(previousDirections).filter(([flashingSeatID]) => flashingSeatID !== seatID),
+        ))
         pointFlashTimeoutIDsRef.current.delete(seatID)
       }, PLAYER_POINTS_FLASH_DURATION_MS))
     }
@@ -2242,9 +2307,16 @@ export function BlowCowBoard({
       isConnected: seatID === currentSeatID ? isConnected : Boolean(matchPlayer?.isConnected),
       isTargetPlayer: seatID === visibleTargetSeatID,
       isViewingPlayer: seatID === currentSeatID,
+      leaveEffect: player.leaveEffect
+        ? {
+            label: formatLeaveEffectLabel(player.leaveEffect),
+            isGain: player.leaveEffect.pointDelta > 0,
+          }
+        : null,
       name: getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom),
       pointRanks: player.scoredSets.map((scoredSet) => scoredSet.rank),
       points: player.points,
+      wasSeekerPick: player.seekerPickedCharacter !== null,
     }
   })
 
@@ -2356,6 +2428,8 @@ export function BlowCowBoard({
   const winnerLabel = winnerID
     ? getSeatDisplayName(winnerID, currentSeatID, playerName, playersFromRoom)
     : 'Unknown player'
+  const isGameFinished = G.gameStatus === 'finished' && Boolean(winnerID)
+  const isWinScreenOpen = isGameFinished && !hasDismissedWinScreen
   const endGameRows: EndGameRow[] = G.placements.map((seatID, placeIndex) => {
     const player = G.players[seatID]
     const lieRate = formatPercent(player.matchStats.lieCount, player.matchStats.playCount)
@@ -2378,6 +2452,8 @@ export function BlowCowBoard({
       punishmentCount: player.matchStats.punishmentCount,
       bsWinRate,
       isWinner: seatID === winnerID,
+      // Why the Points column can disagree with the ranks this player scored.
+      leaveEffectLabel: player.leaveEffect ? formatLeaveEffectLabel(player.leaveEffect) : null,
     }
   })
   const endGameChartPoints = buildEndGameChartPoints(G.telemetry.events)
@@ -2508,6 +2584,15 @@ export function BlowCowBoard({
       trumpRank: currentTrump === null ? selectedTrumpRank : null,
     })
     setSelectedCardIDs([])
+  }
+
+  const handleSeekCharacter = () => {
+    if (!canSeekCharacter || !selectedSeekerCharacter || !seekerCharacterChoices.includes(selectedSeekerCharacter)) {
+      return
+    }
+
+    moves.seekCharacter({ characterName: selectedSeekerCharacter })
+    setSelectedSeekerCharacter(null)
   }
 
   const handleSeatSelect = (seatID: string) => {
@@ -2740,6 +2825,7 @@ export function BlowCowBoard({
       seatLabel: getSeatLabel(seat.seatIndex),
       characterName: seat.characterName ?? 'Unknown character',
       sprite: seat.characterSprite,
+      wasSeekerPick: seat.wasSeekerPick,
     })
   }
 
@@ -2958,10 +3044,9 @@ export function BlowCowBoard({
   }
 
   /*
-   * The only action in this row that belongs to a player who is not on the clock, so it is the only
-   * one shown while the row is headed with somebody else's name. It appears for The Dreamer alone,
-   * which is safe because nobody else's client can know who The Dreamer is — `character` is only
-   * ever populated on the seat you are sitting in.
+   * One of two actions in this row that belong to a player who is not on the clock — `Seek
+   * Character` is the other — and the only one of the two that sends a move. It appears for The
+   * Dreamer alone, which gives nothing away: characters are public, and their own badge says so.
    */
   const sneakPlayAction = {
     description: isResolutionSequenceActive
@@ -2982,6 +3067,26 @@ export function BlowCowBoard({
     onClick: handleSneakPlay,
   }
 
+  /*
+   * The second action in this row that does not belong to the player on the clock, and it opens a
+   * panel rather than sending a move. It is only ever there while this player still holds The
+   * Seeker, which is nothing to hide: characters are public, and their own badge already says so.
+   */
+  const seekCharacterAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : seekerCharacterChoices.length === 0
+      ? 'Every other character in this room is already sitting at the table, so there is nothing left to take.'
+      : 'Use The Seeker to take any character card nobody else holds. It replaces The Seeker for the rest of the match.',
+    disabled: !canSeekCharacter,
+    icon: '',
+    key: 'seek-character',
+    label: 'Seek Character',
+    onClick: () => {
+      setHasDismissedSeekerPicker(false)
+    },
+  }
+
   // Call BS and Accuse are not here: they live on the player blocks, because both need a
   // clicked target. See `renderSeatTargetActions`.
   // Labels the action row for whoever is on the clock. Spectators and waiting players see the
@@ -2993,6 +3098,7 @@ export function BlowCowBoard({
   const actionButtons = [
     currentTrump === null ? selectTrumpAction : playAction,
     ...(isDreamer && !isCurrentPlayersTurn && !isSpectator ? [sneakPlayAction] : []),
+    ...(isSeeker ? [seekCharacterAction] : []),
     ...(isDrunkard ? [playRandomAction] : []),
     {
       description: isResolutionSequenceActive
@@ -3028,7 +3134,32 @@ export function BlowCowBoard({
 
   return (
     <section className="table-board game-board-layout" ref={tableBoardRef}>
-      {G.gameStatus === 'finished' && winnerID ? (
+      {/*
+        * Deliberately not a full-cover overlay: the ring stays visible behind it, because the last
+        * player's leave-triggered ability lands at the same moment the game ends and its label is
+        * on their block. Jumping straight to the results table would bury it.
+        */}
+      {isWinScreenOpen ? (
+        <div aria-labelledby="win-screen-title" aria-modal="true" className="win-screen-overlay" role="dialog">
+          <section className="win-screen-panel">
+            <p className="panel-kicker">Game Over</p>
+            <h2 id="win-screen-title">{winnerLabel} Wins</h2>
+
+            <button
+              autoFocus
+              className="primary-button win-screen-continue"
+              onClick={() => {
+                setHasDismissedWinScreen(true)
+              }}
+              type="button"
+            >
+              Continue
+            </button>
+          </section>
+        </div>
+      ) : null}
+
+      {isGameFinished && hasDismissedWinScreen ? (
         <div aria-labelledby="endgame-title" aria-modal="true" className="endgame-overlay" role="dialog">
           <section className="endgame-panel">
             <div className="endgame-header">
@@ -3075,7 +3206,25 @@ export function BlowCowBoard({
                       </td>
                       <td>
                         <div className="endgame-player-cell">
-                          <strong>{row.name}</strong>
+                          <div className="endgame-player-name">
+                            <strong>{row.name}</strong>
+
+                            {/*
+                              * Focusable rather than hover-only, and carrying the label on the
+                              * badge itself, so the point change is reachable without a pointer.
+                              */}
+                            {row.leaveEffectLabel ? (
+                              <span
+                                aria-label={`Leave ability point change: ${row.leaveEffectLabel}`}
+                                className="endgame-info-badge"
+                                role="note"
+                                tabIndex={0}
+                              >
+                                i
+                                <span className="endgame-info-tooltip">{row.leaveEffectLabel}</span>
+                              </span>
+                            ) : null}
+                          </div>
                           <span className="room-note">{getSeatLabel(row.seatIndex)}</span>
                         </div>
                       </td>
@@ -3226,6 +3375,7 @@ export function BlowCowBoard({
                 <h2 id="character-card-overlay-title">{selectedCharacterCard.characterName}</h2>
                 <p className="room-note">
                   {selectedCharacterCard.playerName} · {selectedCharacterCard.seatLabel}
+                  {selectedCharacterCard.wasSeekerPick ? ' · Taken with The Seeker' : ''}
                 </p>
               </div>
 
@@ -3246,6 +3396,80 @@ export function BlowCowBoard({
                 className="character-card-overlay-image"
                 src={selectedCharacterCard.sprite}
               />
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {/*
+        * Mounted only on The Seeker's own client, so dimming the board here costs nobody else
+        * anything — the match carries on behind it and every other player can act normally. The
+        * cards are shown at a readable size rather than as a list of names, because the sprite is
+        * the character sheet: it already carries the ability text this panel must not repeat.
+        */}
+      {isSeekerPickerOpen ? (
+        <div
+          aria-labelledby="seeker-picker-title"
+          aria-modal="true"
+          className="character-card-overlay seeker-picker-overlay"
+          role="dialog"
+        >
+          <section className="character-card-overlay-panel seeker-picker-panel">
+            <div className="character-card-overlay-header">
+              <div className="character-card-overlay-copy">
+                <p className="panel-kicker">The Seeker</p>
+                <h2 id="seeker-picker-title">Take a Character Card</h2>
+                <p className="room-note">
+                  {seekerCharacterChoices.length === 0
+                    ? 'Every other character in this room is already sitting at the table, so there is nothing left to take.'
+                    : 'Anything nobody else holds is yours for the taking. It replaces The Seeker for the rest of the match.'}
+                </p>
+              </div>
+
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  setHasDismissedSeekerPicker(true)
+                }}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="seeker-picker-grid">
+              {seekerCharacterChoices.map((characterName) => (
+                <button
+                  aria-pressed={selectedSeekerCharacter === characterName}
+                  className={`seeker-picker-option${selectedSeekerCharacter === characterName ? ' selected' : ''}`}
+                  key={characterName}
+                  onClick={() => {
+                    setSelectedSeekerCharacter(characterName)
+                  }}
+                  type="button"
+                >
+                  <img alt={characterName} src={getCharacterCardSprite(characterName)} />
+                </button>
+              ))}
+            </div>
+
+            <div className="seeker-picker-footer">
+              <p className="room-note">
+                {isResolutionSequenceActive
+                  ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+                  : selectedSeekerCharacter
+                  ? 'Taking a card spends The Seeker, so this is the only choice you get.'
+                  : 'Nothing is decided until you confirm, and you can close this and come back to it at any point.'}
+              </p>
+
+              <button
+                className="primary-button"
+                disabled={!canSeekCharacter || !selectedSeekerCharacter}
+                onClick={handleSeekCharacter}
+                type="button"
+              >
+                {selectedSeekerCharacter ? `Take ${selectedSeekerCharacter}` : 'Take Character'}
+              </button>
             </div>
           </section>
         </div>
@@ -3516,7 +3740,7 @@ export function BlowCowBoard({
         bsVerdictSeatID={bsVerdictSeatID}
         calloutTextBySeatID={calloutTextBySeatID}
         enteringCardIDSet={enteringFrontCardIDSet}
-        flashingPointSeatIDSet={flashingPointSeatIDSet}
+        pointsFlashDirectionBySeatID={pointsFlashDirectionBySeatID}
         getSeatLabel={getSeatLabel}
         onCatHideCard={handleCatHideCard}
         onOpenCharacterCard={handleOpenCharacterCard}

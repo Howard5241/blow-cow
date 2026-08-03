@@ -25,6 +25,7 @@ lerna-debug.log*
 
 # Generated project data
 data/completed-games/
+data/matches/
 
 # Tool caches
 .eslintcache

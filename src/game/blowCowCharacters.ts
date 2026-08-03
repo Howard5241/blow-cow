@@ -17,6 +17,7 @@ export const BLOW_COW_CHARACTER_NAMES = [
   'The Streamer',
   'The Pacifist',
   'The Pawn',
+  'The Seeker',
 ] as const
 
 export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
@@ -24,13 +25,13 @@ export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
 export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, string> = {
   'The Dreamer': 'You may cheat. You will be punished if caught. Unlimited use.',
   'The Believer': 'No special ability.',
-  'The Cat': 'On your turn, flip one revealed table card face down. Unlimited use.',
+  'The Cat': 'On your turn, flip one or more revealed table card face down. Unlimited use.',
   'The Contrarian': 'On your turn, change the game direction. Unlimited use.',
   'The Confused': 'Jacks also function as Jokers.',
   'The Deranged': 'Whenever you score a point, remove up to two cards from your hand. Unlimited use.',
   'The Drunkard': 'You may play random cards. Lose 3 points on leaving if every play was random.',
   'The Foreigner': 'When you pass, add any card from outside the game to your hand. Unlimited use.',
-  'The Grandmaster': 'Call BS on any player once per game.',
+  'The Grandmaster': 'Once per game, call BS on any other player with a hidden play.',
   'The Invisible Hand': 'Before starting a round, choose its rank, direction, and starting player once per game.',
   'The Philanthropist': 'As the starting player, declare that you may play three cards on any turn that round once per game.',
   'The Privileged': 'You are always the starting player unless another ability overrides it. Gain 1 point after leaving.',
@@ -39,7 +40,8 @@ export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, strin
   'The Spy': 'On your turn, reveal one random card from your previous play when it has at least two hidden cards. Unlimited use.',
   'The Streamer': 'Lose 2 points on leaving if you never passed.',
   'The Pacifist': 'Lose 1 point on leaving if you never called BS.',
-  'The Pawn': 'Use En Passant to call BS on the player before the previous non-passing player when both played two cards. Unlimited use.',
+  'The Pawn': 'Use En Passant to call BS on the player before the latest non-passing player when that latest player played two cards. Unlimited use.',
+  'The Seeker': 'At the start of the game, take one character card of your choice from the pool.',
 }
 
 export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
@@ -57,6 +59,7 @@ export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Streamer',
   'The Pacifist',
   'The Pawn',
+  'The Seeker',
 ] as const satisfies readonly BlowCowCharacterName[]
 
 export type BlowCowImplementedCharacterName = (typeof BLOW_COW_IMPLEMENTED_CHARACTER_NAMES)[number]

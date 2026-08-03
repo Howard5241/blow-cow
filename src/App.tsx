@@ -3,7 +3,13 @@ import { useEffect, useState } from 'react'
 import { LobbyClient } from 'boardgame.io/client'
 import { SocketIO } from 'boardgame.io/multiplayer'
 import { Client } from 'boardgame.io/react'
-import { GAME_NAME, GAME_SERVER_URL, GAME_TITLE, PLAYER_NAME_STORAGE_KEY } from './config.ts'
+import {
+  ACTIVE_ROOM_STORAGE_KEY,
+  GAME_NAME,
+  GAME_SERVER_URL,
+  GAME_TITLE,
+  PLAYER_NAME_STORAGE_KEY,
+} from './config.ts'
 import {
   BLOW_COW_SPEED_MULTIPLIERS,
   BLOW_COW_RANKS,
@@ -21,6 +27,7 @@ import {
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   type BlowCowImplementedCharacterName,
 } from './game/blowCowCharacters.ts'
+import { getRoomClearBlockReason, hasRoomGameEnded } from './lobbyRooms.ts'
 import { BlowCowBoard } from './ui/BlowCowBoard.tsx'
 import './App.css'
 
@@ -36,6 +43,8 @@ type LobbyMatch = {
   players: LobbyPlayer[]
   createdAt?: number
   updatedAt?: number
+  /** Present once the match has ended. See `BlowCowClearableRoom` for why the lobby only checks that. */
+  gameover?: unknown
 }
 
 type ActiveRoom = {
@@ -50,8 +59,15 @@ type JoinedRoom = {
   playerCredentials: string
 }
 
-type BusyAction = 'create' | 'join' | 'leave' | null
+type BusyAction = 'create' | 'join' | 'leave' | 'clear' | null
 type ServerState = 'checking' | 'online' | 'offline'
+
+/**
+ * Whether a stored seat is still worth walking back into. `unreachable` is deliberately distinct
+ * from `gone`: a server that cannot be reached is the exact situation this recovery exists for, so
+ * it must never be the reason the seat is thrown away.
+ */
+type StoredRoomCheck = 'valid' | 'gone' | 'unreachable'
 
 const lobbyClient = new LobbyClient({ server: GAME_SERVER_URL })
 
@@ -96,6 +112,79 @@ async function reclaimOfflineSeat(matchID: string, playerID: string, playerName:
   }
 
   return await response.json() as JoinedRoom
+}
+
+function readStoredActiveRoom(): ActiveRoom | null {
+  const storedActiveRoom = window.localStorage.getItem(ACTIVE_ROOM_STORAGE_KEY)
+  if (!storedActiveRoom) {
+    return null
+  }
+
+  try {
+    const parsedActiveRoom = JSON.parse(storedActiveRoom) as Partial<ActiveRoom>
+
+    if (
+      typeof parsedActiveRoom?.matchID !== 'string'
+      || typeof parsedActiveRoom.playerID !== 'string'
+      || typeof parsedActiveRoom.credentials !== 'string'
+      || typeof parsedActiveRoom.playerName !== 'string'
+    ) {
+      return null
+    }
+
+    return {
+      matchID: parsedActiveRoom.matchID,
+      playerID: parsedActiveRoom.playerID,
+      credentials: parsedActiveRoom.credentials,
+      playerName: parsedActiveRoom.playerName,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Checked with a raw request rather than `lobbyClient.getMatch` because the decision turns on the
+ * status code, and `LobbyClientError` only carries it inside a message string. Confusing a 404 with
+ * a dropped connection here would drop the player out of a room that is still waiting for them.
+ */
+async function checkStoredRoom(storedRoom: ActiveRoom): Promise<StoredRoomCheck> {
+  let response: Response
+
+  try {
+    response = await fetch(`${GAME_SERVER_URL}/games/${GAME_NAME}/${storedRoom.matchID}`)
+  } catch {
+    return 'unreachable'
+  }
+
+  if (response.status === 404) {
+    return 'gone'
+  }
+
+  if (!response.ok) {
+    return 'unreachable'
+  }
+
+  try {
+    const match = await response.json() as LobbyMatch
+    const storedSeat = match.players.find((player) => String(player.id) === storedRoom.playerID)
+
+    // A seat whose name has changed was given away while this browser was gone, so the stored
+    // credentials no longer open it.
+    return storedSeat?.name === storedRoom.playerName ? 'valid' : 'gone'
+  } catch {
+    return 'unreachable'
+  }
+}
+
+async function requestRoomClear(matchID: string) {
+  const response = await fetch(`${GAME_SERVER_URL}/games/${GAME_NAME}/${matchID}/clear`, {
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new Error((await response.text()) || 'Could not clear that room.')
+  }
 }
 
 function getErrorMessage(error: unknown) {
@@ -173,9 +262,14 @@ function App() {
     () => [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES],
   )
   const [matches, setMatches] = useState<LobbyMatch[]>([])
-  const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(null)
+  const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(readStoredActiveRoom)
+  // A room that came from storage has to be proven to still exist; one this session just joined does
+  // not, so a fresh start is verified before it begins.
+  const [hasVerifiedStoredRoom, setHasVerifiedStoredRoom] = useState(() => activeRoom === null)
   const [activeRoomPlayers, setActiveRoomPlayers] = useState<LobbyPlayer[]>([])
   const [busyAction, setBusyAction] = useState<BusyAction>(null)
+  /** The one room whose Clear button is armed. Only ever one, so arming another disarms the first. */
+  const [pendingClearMatchID, setPendingClearMatchID] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [serverState, setServerState] = useState<ServerState>('checking')
   const [statusMessage, setStatusMessage] = useState('Checking the lobby service...')
@@ -206,6 +300,54 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(PLAYER_NAME_STORAGE_KEY, playerName)
   }, [playerName])
+
+  /*
+   * The seat itself is stored, not just the room code: `credentials` are what the socket authenticates
+   * with, and the server persists them alongside the match, so a reload after a crash reconnects to
+   * the same seat without going through the lobby or the rejoin route at all.
+   */
+  useEffect(() => {
+    if (activeRoom) {
+      window.localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, JSON.stringify(activeRoom))
+      return
+    }
+
+    window.localStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY)
+  }, [activeRoom])
+
+  /*
+   * Runs once, and only for a seat restored from storage. The table renders immediately rather than
+   * waiting on this — reconnecting is the common case and the client shows its own loading state —
+   * so this only ever has to undo a restore that turned out to be stale.
+   */
+  useEffect(() => {
+    if (hasVerifiedStoredRoom || !activeRoom) {
+      return
+    }
+
+    let cancelled = false
+
+    const verifyStoredRoom = async () => {
+      const storedRoomCheck = await checkStoredRoom(activeRoom)
+
+      if (cancelled) {
+        return
+      }
+
+      if (storedRoomCheck === 'gone') {
+        setActiveRoom(null)
+        setStatusMessage(`Room ${activeRoom.matchID} is no longer open. Pick another table.`)
+      }
+
+      setHasVerifiedStoredRoom(true)
+    }
+
+    void verifyStoredRoom()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeRoom, hasVerifiedStoredRoom])
 
   useEffect(() => {
     if (activeRoom) {
@@ -442,6 +584,36 @@ function App() {
     await joinRoom(matchID)
   }
 
+  const handleClearRoom = async (matchID: string) => {
+    /*
+     * The first press only arms the button. Clearing deletes a stored match with no undo, and the
+     * room list is a column of near-identical cards, so one stray click should not be enough.
+     */
+    if (pendingClearMatchID !== matchID) {
+      setPendingClearMatchID(matchID)
+      return
+    }
+
+    setPendingClearMatchID(null)
+    setBusyAction('clear')
+    setErrorMessage('')
+
+    try {
+      await requestRoomClear(matchID)
+      // Dropped locally rather than waiting on the next poll, so the card goes when the button says
+      // it did. The poll reconciles either way.
+      setMatches((previousMatches) => previousMatches.filter((match) => match.matchID !== matchID))
+      setStatusMessage(`Cleared room ${matchID}.`)
+    } catch (error) {
+      // A refusal here almost always means someone reconnected since this card was drawn; the
+      // running refresh will redraw it with the button correctly disabled.
+      setStatusMessage('Could not clear that room.')
+      setErrorMessage(getErrorMessage(error))
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   const toggleManualRank = (rank: BlowCowRank) => {
     setManualSelectedRanks((previousRanks) => previousRanks.includes(rank)
       ? previousRanks.filter((entry) => entry !== rank)
@@ -488,8 +660,19 @@ function App() {
       setMatches(nextMatches)
       setServerState('online')
     } catch (error) {
-      setStatusMessage('Could not leave the room cleanly.')
-      setErrorMessage(getErrorMessage(error))
+      /*
+       * The room may simply be gone — anyone can clear a finished game from the lobby while its
+       * players are still sitting on the results, and leaving a match that no longer exists has
+       * already got what it wanted. Without this, that player is stuck at a dead table.
+       */
+      if (await checkStoredRoom(activeRoom) === 'gone') {
+        setActiveRoomPlayers([])
+        setActiveRoom(null)
+        setStatusMessage(`Room ${activeRoom.matchID} is no longer open.`)
+      } else {
+        setStatusMessage('Could not leave the room cleanly.')
+        setErrorMessage(getErrorMessage(error))
+      }
     } finally {
       setBusyAction(null)
     }
@@ -829,6 +1012,8 @@ function App() {
                 const rejoinablePlayer = getRejoinableOfflinePlayer(match, trimmedPlayerName)
                 const canJoinMatch = availableSeats > 0 || Boolean(rejoinablePlayer)
                 const quickJoinLabel = rejoinablePlayer ? 'Rejoin This Room' : 'Join This Room'
+                const clearBlockReason = getRoomClearBlockReason(match)
+                const isClearArmed = pendingClearMatchID === match.matchID
 
                 return (
                   <article className="room-card" key={match.matchID}>
@@ -837,8 +1022,11 @@ function App() {
                         <p className="room-label">Room Code</p>
                         <strong className="room-id">{match.matchID}</strong>
                       </div>
-                      <span className="seat-pill">
-                        {availableSeats} open {availableSeats === 1 ? 'seat' : 'seats'}
+                      {/* Without this the only sign a room is clearable would be the button itself. */}
+                      <span className={`seat-pill${hasRoomGameEnded(match) ? ' finished' : ''}`}>
+                        {hasRoomGameEnded(match)
+                          ? 'Game over'
+                          : `${availableSeats} open ${availableSeats === 1 ? 'seat' : 'seats'}`}
                       </span>
                     </div>
 
@@ -855,16 +1043,31 @@ function App() {
 
                     <div className="room-card-footer">
                       <span>Updated {formatTimestamp(match.updatedAt ?? match.createdAt)}</span>
-                      <button
-                        className="subtle-button"
-                        disabled={isBusy || !canJoinMatch}
-                        onClick={() => {
-                          void handleQuickJoin(match.matchID)
-                        }}
-                        type="button"
-                      >
-                        {quickJoinLabel}
-                      </button>
+
+                      <div className="room-card-actions">
+                        <button
+                          className={`subtle-button clear-room-button${isClearArmed ? ' armed' : ''}`}
+                          disabled={isBusy || clearBlockReason !== null}
+                          onClick={() => {
+                            void handleClearRoom(match.matchID)
+                          }}
+                          title={clearBlockReason ?? 'Remove this room from the lobby. This cannot be undone.'}
+                          type="button"
+                        >
+                          {isClearArmed ? 'Confirm Clear' : 'Clear'}
+                        </button>
+
+                        <button
+                          className="subtle-button"
+                          disabled={isBusy || !canJoinMatch}
+                          onClick={() => {
+                            void handleQuickJoin(match.matchID)
+                          }}
+                          type="button"
+                        >
+                          {quickJoinLabel}
+                        </button>
+                      </div>
                     </div>
                   </article>
                 )

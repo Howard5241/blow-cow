@@ -12,8 +12,20 @@ main.app-shell.table-mode
   section.table-shell
     div.loading-card?
     section.table-board.game-board-layout
+      div.win-screen-overlay?
+        section.win-screen-panel
+          button.primary-button.win-screen-continue
       div.endgame-overlay?
       div.character-card-overlay?
+      div.character-card-overlay.seeker-picker-overlay?
+        section.character-card-overlay-panel.seeker-picker-panel
+          div.character-card-overlay-header
+          div.seeker-picker-grid
+            button.seeker-picker-option*
+              img
+          div.seeker-picker-footer
+            p.room-note
+            button.primary-button
       div.board-overlay.history-overlay?
       div.board-bs-flash?
       div.bs-call-trail?
@@ -40,6 +52,7 @@ main.app-shell.table-mode
             span.seat-stat.seat-stat-points
           div.seat-front-cards
             div.front-card-row?
+          span.seat-leave-effect?
           span.player-play-callout?
           div.seat-target-actions?
           div.seat-reveal-actions?
@@ -75,14 +88,23 @@ main.app-shell.table-mode
 | Board BS Flash | `div` | `board-bs-flash` | Washes the whole felt red while a BS call resolves, then fades back to the mono background. | Conditional child of Board Root, above the background and below all content. |
 | BS Call Trail | `div` | `bs-call-trail` | Inert layer hosting the lead-in x marks in board coordinates. | Conditional child of Board Root, present only while the BS lead-in is playing. |
 | BS Call Trail Mark | `img` | `bs-call-trail-mark` | One `x_icon.png`, popping in on a stagger to draw a line from the caller's avatar to the accused's. | Repeated inside BS Call Trail. |
-| Endgame Overlay | `div` | `endgame-overlay` | Covers the board when the match is over. | Conditional child of Board Root. |
+| Win Screen Overlay | `div` | `win-screen-overlay` | Bare centring layer for the Win Screen Panel. Paints nothing at all — no wash, no blur — so the final board stays fully visible, and passes the pointer straight through. | Conditional child of Board Root while the match is finished and this viewer has not continued yet. |
+| Win Screen Panel | `section` | `win-screen-panel` | Small card holding the `Game Over` kicker, `{Name} Wins`, and the Continue action. Sized to its content rather than to the board. | Centred child of Win Screen Overlay; the only part of the overlay that takes clicks. |
+| Win Screen Continue Button | `button` | `primary-button win-screen-continue` | Dismisses the win screen and opens the Endgame Overlay. Autofocused. | Last control in Win Screen Panel. |
+| Endgame Overlay | `div` | `endgame-overlay` | Covers the board when the match is over. | Conditional child of Board Root, shown only after this viewer has pressed Continue on the Win Screen. |
 | Endgame Panel | `section` | `endgame-panel` | Holds the winner summary, leave action, and results. | Child of Endgame Overlay. |
 | Endgame Results Table | `table` | `endgame-table` | Lists final placement and match stats. | Main content in Endgame Panel. |
+| Endgame Leave Effect Info Icon | `span` | `endgame-info-badge` | An `i` badge beside a player's name whose tooltip gives the leave-triggered point change, such as `-2 points (The Speedrunner)`. Explains a Points column that does not match the ranks that player scored. Hoverable and focusable. | Beside the name in that player's Endgame Results Table row, only when an ability fired. |
 | Endgame Chart Panel | `section` | `endgame-chart-panel` | Holds the postgame hand-count chart and legend. | Rendered under Endgame Results Table inside Endgame Panel. |
 | Endgame Chart | `svg` | `endgame-chart` | Shows each player's cards-in-hand line over the full match timeline. | Inside Endgame Chart Panel. |
 | Endgame Chart Legend | `div` | `endgame-chart-legend` | Labels each player line and the final hand count at match end. | Below Endgame Chart inside Endgame Chart Panel. |
 | Character Card Overlay | `div` | `character-card-overlay` | Enlarges one character card so the sprite text is readable. | Conditional child of Board Root; sits above the other overlays. |
-| Character Card Overlay Panel | `section` | `character-card-overlay-panel` | Holds the enlarged character card and close action. | Child of Character Card Overlay. |
+| Character Card Overlay Panel | `section` | `character-card-overlay-panel` | Holds the enlarged character card and close action. Its subtitle adds `Taken with The Seeker` when that seat traded its original card in. | Child of Character Card Overlay. |
+| Seeker Picker Overlay | `div` | `character-card-overlay seeker-picker-overlay` | The Seeker's one-time character choice. Reuses the enlarged-card overlay shell. Mounted only on the client holding The Seeker, and only while it is still unspent. | Conditional child of Board Root, at the same level as Character Card Overlay. |
+| Seeker Picker Panel | `section` | `character-card-overlay-panel seeker-picker-panel` | Wider version of the enlarged-card panel, holding the header, the card grid, and the confirm footer. | Child of Seeker Picker Overlay. |
+| Seeker Picker Grid | `div` | `seeker-picker-grid` | Scrolling grid of every character card still available to take. | Middle of Seeker Picker Panel. |
+| Seeker Picker Option | `button` | `seeker-picker-option`, `selected` | One takeable character card, shown large enough to read the ability printed on the sprite. Clicking selects it; `selected` rings it in gold. | Repeated inside Seeker Picker Grid. |
+| Seeker Picker Footer | `div` | `seeker-picker-footer` | Pairs a status line with the confirm action, which reads `Take {Name}` once a card is picked. | Last row of Seeker Picker Panel. |
 | Board Overlay | `div` | `board-overlay` | Modal backdrop for the History panel. | Conditional child of Board Root. |
 | Board Overlay Panel | `section` | `board-overlay-panel` | Shared modal panel shell with a header, subtitle, and close action. | Child of Board Overlay. |
 | History Overlay | `section` | `board-overlay-panel history-overlay-panel` | Shows the full event log. | Opened by History Toggle in Board Hero Actions. |
@@ -114,13 +136,14 @@ main.app-shell.table-mode
 | Seat Identity | `div` | `seat-block-identity` | Holds the player name, state tags, and the action callout. | Second block inside Seat Block. |
 | Player Name Anchor | `strong` | `seat-block-name`, `data-punishment-target-name` | Displays the player name and anchors punishment-card travel. | Inside Seat Identity. |
 | Seat / State Tag | `span` | `seat-tag` | Shows the seat number and the connection state (`Connected`, `Offline`, or `Left`). There is no BS-target tag; the live target is shown only through the `target-seat` block highlight and the outlined front cards. | Repeated inside Seat Identity. |
+| Seat Leave Effect Label | `span` | `seat-leave-effect`, `gain` | Names the leave-triggered ability that moved this player's points and by how much, such as `-2 points (The Speedrunner)` or `+1 point (The Privileged)`. Red for a penalty, gold for `gain`. Appears the moment the player leaves and never clears. | Conditional child of that Seat Block, directly above it on every side of the ring. |
 | Player Action Callout | `span` | `player-play-callout` | Shows the spoken claim or action line, such as `Two Kings`, `BS!`, `Reset!`, `Pass`, `Nice try, {name}`, or the accused's `Nope`. Every seat has its own, so several players can be mid-sentence at once. | Speech bubble beside its own Seat Block, on the hub-facing side. |
 | Seat Stat Row | `div` | `seat-stat-row` | Holds the cards-in-hand and points readouts side by side. | Third block inside Seat Block. |
 | Hand Stat | `span` | `seat-stat seat-stat-hand` | Shows the cards icon and the cards-in-hand count. | Left half of Seat Stat Row. |
 | Points Stat | `span` | `seat-stat seat-stat-points` | Shows the point icon and the point total, with scored ranks in a tooltip. | Right half of Seat Stat Row. |
 | Seat Stat Icon | `img` | `seat-stat-icon` | Shows `cards_icon.png` or `point_icon.png` to the left of its number. | First child of each Seat Stat. |
 | Hand Count Value | `span` | `seat-stat-value` | Shows cards remaining in hand; also anchors the front-card entry animation. | Inside Hand Stat. |
-| Points Pill | `span` | `seat-stat-value points-pill` | Shows the point total; briefly pulses when that player gains a point. | Inside Points Stat. |
+| Points Pill | `span` | `seat-stat-value points-pill`, `flashing`, `gain`, `loss` | Shows the point total; briefly pulses whenever it changes, green on a gain and red on a loss. A loss only ever comes from a leave-triggered ability. | Inside Points Stat. |
 | Seat Front Cards | `div` | `seat-front-cards` | Reserves the front-card area at the bottom of every Seat Block. | Fourth block inside Seat Block. |
 | Front Card Row | `div` | `front-card-row` | Shows the front-card stack for a seat in its natural table order. Renders nothing at all when the seat has no cards in front. | Inside Seat Front Cards. |
 | Front Card | `div` | `front-card`, `revealable`, `trump-card` | Shows one visible or hidden front card. During The Cat's turn the active Cat player can click any face-up table card to flip it face down. During a reveal step of either procedure, `revealable` marks a face-down card in the focused block that the caller can click to flip face up. `trump-card` glows on a revealed card of the trump rank proper, during a BS resolution only. | Repeated inside Front Card Row. |
@@ -145,7 +168,8 @@ main.app-shell.table-mode
 | Hand Card Button | `button` | `hand-card-button` | Selects or deselects a card from hand. Enabled on the viewing player's own turn, and also while The Dreamer's sneak window is open, since that move needs a selection made out of turn. | Repeated inside Hand Scroll Row. |
 | Hand Motion Card | `div` | `hand-motion-card` | Temporarily animates a card that just left the local hand area. | Repeated inside Hand Animation Layer. |
 | Hand Action Row | `div` | `hand-action-row` | Holds the turn heading plus `Play` / `Select Trump + Play`, `Pass`, `Call Reset`, and any character-specific action. | Right side of Hand Play Row. |
-| Sneak Play Button | `button` | `action-button` | Sends exactly one selected card onto the table in front of The Dreamer during somebody else's turn, claiming the live trump, with no callout and no announcement. The only action-row control that belongs to a player who is not on the clock. Carries `sneak_play_icon.png`. | Inside its own Action Button Item, shown only to The Dreamer and only while another player is acting. |
+| Seek Character Button | `button` | `action-button` | Reopens the Seeker Picker Overlay. Opens a panel rather than sending a move, and is the second control in this row that does not belong to the player on the clock. Carries no icon. | Inside its own Action Button Item, shown only while this player still holds The Seeker. |
+| Sneak Play Button | `button` | `action-button` | Sends exactly one selected card onto the table in front of The Dreamer during somebody else's turn, claiming the live trump, with no callout and no announcement. One of the two action-row controls that belong to a player who is not on the clock, and the only one that sends a move. Carries `sneak_play_icon.png`. | Inside its own Action Button Item, shown only to The Dreamer and only while another player is acting. |
 | Hand Action Heading | `p` | `hand-action-heading` | Reads `Your Turn`, or `{Name}'s Turn` when somebody else is acting. | Full-width first item of Hand Action Row, filling the space above the bottom-aligned buttons. |
 | Action Button Item | `div` | `action-button-item`, `trump-action-item`, `drunkard-random-item`, `foreigner-pass-item` | Wraps one action button and its tooltip; may also hold the inline trump selector, the Drunkard random-play selector, or the Foreigner pass selector. | Repeated inside Hand Action Row. |
 | Trump Action Combo | `div` | `trump-action-combo` | Places the trump selector beside `Select Trump + Play`. | Used only for the select-trump action. |
@@ -181,6 +205,12 @@ main.app-shell.table-mode
 - Hand Play Row reserves its height from `--seat-block-height` and pushes the hand scroller and action row to opposite edges, each capped at `calc(50% - var(--viewing-seat-gap) / 2)`. Equal caps mean the leftover column is always centred on the board, which is where the dropped block lands, so neither the hand nor the buttons can ever sit under it.
 - Below `1040px` the hand stage stacks and there is no middle column, so the drop is switched off and the viewing player stays on the ring with everybody else. The ring is still an ellipse there, so the BS focus transform still works; only `--seat-focus-scale` is reduced, because the blocks are relatively larger against a shorter ring.
 - A player who leaves keeps their Seat Block in the ring, dimmed through `left-seat` and no longer selectable. Seat angles never change mid-match, so no animation anchor ever moves.
+- Five character abilities fire on leaving and move that player's point total: The Speedrunner (`-2`), The Streamer (`-2`), The Pacifist (`-1`), The Drunkard (`-3`), and The Privileged (`+1`). When one fires, a Seat Leave Effect Label appears above that block naming the ability and the change, the Points Pill flashes in the matching direction, and both the label and the new total stay for the rest of the match. Nothing appears for a player whose ability never met its condition, or who had none.
+- The label reads from `G.players[id].leaveEffect`, which the server writes in the same step that applies the points. Recording the delta rather than reconstructing it later is what lets the label, the Points column, and the results tooltip all name the same number; The Speedrunner in particular is applied as `-points` rather than as an assignment to `0` for exactly that reason. `formatLeaveEffectLabel` is exported from the game module and used by both surfaces, so their wording cannot drift.
+- The Seat Leave Effect Label does not point at the hub the way Player Action Callout does. It sits directly above the block at every seat angle, because it is a permanent record rather than something the player just said, and a bubble that moved with the angle would read as speech. The two can never collide: the board stops feeding callouts to a seat once its player has left, filtered at render rather than cleared, so no effect is needed. Below `720px` the label goes static and takes `order: -1` inside the block, for the same reason Seat Reveal Actions goes static there.
+- The match does not jump to the results table when it ends. A small Win Screen Panel names the winner and waits for a Continue press first, so the final board stays readable — the last player out triggers their leave ability at the very moment the game ends, and its label would otherwise be buried instantly. It is shown for every ending, not only the second-to-last player leaving.
+- That is also why the win screen dims nothing and repeats nothing. It carries no backdrop and no closing table status: both would work against the one job it has, which is to keep the finished board legible. Its overlay is `pointer-events: none` so only the card itself is interactive.
+- Continue is local state, not a move in `G`, and each player presses their own. How long anyone wants with the final board is their own business, and a synced gate would leave everyone waiting on a player who has already closed the tab. It never needs resetting because a finished match never restarts: the only route back to staging is a new match, which remounts the board.
 - Below `720px` the ring gives up on being a ring and becomes a plain grid with the viewing player last. Every ref still points at the same element and all animation geometry is measured with `getBoundingClientRect`, so the card-travel sequences keep working with no JS changes. That breakpoint also zeroes `transform`, so there is no centre for a focused block to travel to; instead `focused-seat` takes `order: -1` and spans the full grid width, with taller front cards for touch. Seat Reveal Actions goes static and sits inside the block rather than below it. `accused-cheat-seat` needs no breakpoint handling, being pure colour.
 - `Call BS` and `Accuse` are not in the action row. Both buttons live on the opponent's own Seat Block, pointing at the hub, and appear as soon as that block is hovered. Clicking a block still selects it, which pins the buttons open; that is the touch path, where there is no hover. Clicking again or pressing `Escape` clears the selection.
 - The bubble is mounted on every selectable block and hidden with `visibility`, not `display`, so it never affects layout and stays out of the tab order until it is revealed. It overlaps its block by 2px so the pointer never crosses a dead gap on the way to the buttons. Below `720px` it is dropped from the flow with `display: none` and only selection brings it back.
@@ -215,10 +245,10 @@ main.app-shell.table-mode
 - There is no `En Passant` button. The Pawn's en-passant target is one of the seats the server already accepts, so the Pawn hovers that Seat Block and presses `Call BS`.
 - When the viewing player is The Grandmaster and it is their turn, any seat with a hidden play can be challenged once. Spending the override is reported through the fail message on later attempts.
 - When the viewing player is The Cat and it is their turn, any face-up `front-card` in any Seat Block becomes a click target that flips back face down for everyone without changing gameplay legality.
-- Every action button pairs an icon with its label: `play_icon.png` for `Play` and `Select Trump + Play`; `play_random_icon.png` for `Play Random`; `sneak_play_icon.png` for `Sneak Play`; `pass_icon.png` for `Pass`; `reset_icon.png` for `Call Reset`. The sprites are white glyphs, so they are filtered to black on the light enabled button and left white but dimmed on the dark disabled one.
+- Every action button pairs an icon with its label: `play_icon.png` for `Play` and `Select Trump + Play`; `play_random_icon.png` for `Play Random`; `sneak_play_icon.png` for `Sneak Play`; `pass_icon.png` for `Pass`; `reset_icon.png` for `Call Reset`. The sprites are white glyphs, so they are filtered to black on the light enabled button and left white but dimmed on the dark disabled one. `Seek Character` is the one action with no icon, there being no sprite for it.
 - When the viewing player is The Drunkard, the action row can show a `Play Random` combo with a card-count selector and, before trump is live, the same trump selector used by the normal opening play.
 - When the viewing player is The Foreigner, the `Pass` action can expose an inline selector for choosing an outside card, a Joker, or `None` before sending the pass move.
-- The action row is otherwise entirely turn-bound, so `Sneak Play` is the exception that makes the row live while it is headed with somebody else's name. Showing it to The Dreamer alone gives nothing away, because `character` is only ever populated on the seat the viewer occupies. Its tooltip explains the window; there is no fail message, because unlike `Call BS` and `Accuse` the button is genuinely disabled when the move would be refused.
+- The action row is otherwise entirely turn-bound, so `Sneak Play` and `Seek Character` are the two exceptions that make the row live while it is headed with somebody else's name. Showing them to The Dreamer and The Seeker alone gives nothing away, because characters are public anyway: `hideSecretState` does not mask `character`, and every Seat Block already shows its own character badge. Its tooltip explains the window; there is no fail message, because unlike `Call BS` and `Accuse` the button is genuinely disabled when the move would be refused.
 - `turn-direction-indicator` becomes a hover-highlighted button that flips the current direction for The Contrarian on their own turn, and for The Dreamer on any player's turn. Its mirrored counterclockwise glyph keeps a positive CSS rotation because mirroring reverses the perceived spin. For The Dreamer it is a cheat, measured against the direction the *current* turn opened on: flipping back within the same turn erases the tamper along with the advantage, and once that turn ends the tamper is uncatchable.
 - `front-card-row` keeps cards in their natural table order; face-up cards are not regrouped ahead of face-down cards. Cards overlap so a full row fits the block, but each card stays about half visible. Cards are never removed from the row, because their elements anchor the punishment and reset travel sequences.
 - A seat with no cards in front renders no front-card markup at all. `seat-front-cards` keeps its reserved height, so every Seat Block stays the same size and the ring radii, which assume a fixed block height, do not shift.
@@ -231,7 +261,13 @@ main.app-shell.table-mode
 - Punishment cards always animate toward `data-punishment-target-name` on the Seat Block name.
 - The seat callout is driven by the latest qualifying player action and fades out automatically after a short moment.
 - `endgame-chart-panel` is populated from authoritative game telemetry stored in `G.telemetry.events`, not from ad hoc client-side reconstruction.
-- `board-error-toast`, `punishment-move-layer`, `board-overlay`, `character-card-overlay`, and `endgame-overlay` are board-level overlays. `Escape` closes the topmost one, then falls through to clearing the seat selection.
+- `board-error-toast`, `punishment-move-layer`, `board-overlay`, `character-card-overlay`, `seeker-picker-overlay`, `win-screen-overlay`, and `endgame-overlay` are board-level overlays. `Escape` closes the topmost one, then falls through to clearing the seat selection.
+- The Seeker trades their card in for any other one still going spare, and the picker opens by itself at the start of the match. Choosing overwrites `character` outright, which is also what spends the ability: the server's whole permission check is `character === 'The Seeker'`, so it closes the moment the move lands and there is no separate used-flag anywhere.
+- Nothing about that choice freezes the table. `seekCharacter` is not turn-bound, so it can be made while anybody is acting, and no other client renders any part of the picker or waits on it. The picker's open state and the highlighted card are local React state for the same reason. It is still refused while a BS resolution, a Reset, or an accusation is running, like every other move, so a character cannot change underneath a procedure that has already been decided.
+- There is no deadline on the choice. One that expired would take the ability away from an unlucky player rather than from a slow one. The cost is that a Seeker can hold the card and pick reactively, which is a real strategic upgrade over choosing blind.
+- The picker offers `getSeekerCharacterChoices`: the room's own `characterPool`, minus every character already sitting at the table, minus The Seeker itself. Scoping it to the room pool rather than to every implemented character keeps the host's staging settings meaningful and inherits the rule keeping The Confused out of a Jack-less deck for free. A player who has already left still holds their card, so their character stays claimed.
+- Seeker Picker Option shows the card sprite and nothing else, and the footer names the choice rather than describing it. The sprite is the character sheet — it already carries the ability text, which is why this panel is wide and the cards are large instead of being a list of names with descriptions beside them.
+- A taken card is public the instant it lands, like every character: the seat's badge simply changes. `seekerPickedCharacter` is the only surviving trace that the seat started as The Seeker, since `character` has been overwritten by then, and it surfaces as a `Taken with The Seeker` line in that seat's Character Card Overlay.
 - `table-shell` keeps a persistent ambient tint and noise layer that changes to a different random palette at the start of each new round.
 - When the viewing player is punished, the red flash is shown on `hand-stage`.
 - The room code lives behind the info icon beside `Live match`, and the adjacent button copies it.

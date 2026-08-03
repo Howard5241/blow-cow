@@ -6,7 +6,7 @@ import {
   CARDS_ICON_SPRITE,
   POINT_ICON_SPRITE,
 } from './iconSprites.ts'
-import type { SeatHalf, SeatRow } from './boardTypes.ts'
+import type { PointsFlashDirection, SeatHalf, SeatRow } from './boardTypes.ts'
 
 type SeatBlockProps = {
   /**
@@ -31,7 +31,8 @@ type SeatBlockProps = {
   /** This player was just caught cheating as The Dreamer, and stays red until they are punished. */
   isAccusedCheat?: boolean
   enteringCardIDSet: Set<string>
-  isPointsFlashing: boolean
+  /** Which way this seat's points last moved, or null when the pill is not flashing. */
+  pointsFlashDirection: PointsFlashDirection | null
   isPunishmentImpact: boolean
   isSelectable: boolean
   isSelected: boolean
@@ -63,7 +64,7 @@ export function SeatBlock({
   enteringCardIDSet,
   isAccusedCheat = false,
   isRevealFocused = false,
-  isPointsFlashing,
+  pointsFlashDirection,
   isPunishmentImpact,
   isSelectable,
   isSelected,
@@ -219,7 +220,7 @@ export function SeatBlock({
           <img alt="" className="seat-stat-icon" src={POINT_ICON_SPRITE} />
           <span
             aria-label={`Points: ${seat.points}. ${seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet.'}`}
-            className={`seat-stat-value points-pill${isPointsFlashing ? ' flashing' : ''}`}
+            className={`seat-stat-value points-pill${pointsFlashDirection ? ` flashing ${pointsFlashDirection}` : ''}`}
           >
             {seat.points}
           </span>
@@ -236,6 +237,21 @@ export function SeatBlock({
           seatName={seat.name}
         />
       </div>
+
+      {/*
+        * The leave-triggered ability that moved this player's points, and the reason the total on
+        * the pill below no longer matches the ranks they scored. It never goes away, so it takes
+        * the spot directly above the block on every side of the ring; the board stops feeding this
+        * seat callouts once its player has left, so the two cannot collide.
+        */}
+      {seat.leaveEffect ? (
+        <span
+          className={`seat-leave-effect${seat.leaveEffect.isGain ? ' gain' : ''}`}
+          role="status"
+        >
+          {seat.leaveEffect.label}
+        </span>
+      ) : null}
 
       {/*
         * A direct child of the block, not of the identity row, so it can sit outside the block

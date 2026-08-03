@@ -1,6 +1,7 @@
 import {
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   assignRandomImplementedCharacters,
+  getAvailableImplementedCharacterNames,
   isImplementedCharacterName,
   type BlowCowCharacterName,
   type BlowCowImplementedCharacterName,
@@ -84,10 +85,39 @@ export type BlowCowPlayerState = {
   turnStartingDirection?: BlowCowDirection | null
   hasUsedManualPlay: boolean
   hasUsedGrandmasterBSOverride: boolean
+  /**
+   * The character this player took with The Seeker, or null. `character` has already been overwritten
+   * with it by then, so this is the only surviving trace that the seat started the match as The
+   * Seeker — worth keeping, because the badge everyone reads gives no hint that the card was chosen.
+   */
+  seekerPickedCharacter: BlowCowCharacterName | null
   /** One accusation per player per round, spent whether or not it lands. Cleared by `beginNextRound`. */
   hasUsedAccusationThisRound: boolean
   hasLeft: boolean
   leaveOrder: number | null
+  /** The leave-triggered ability that moved this player's points, or null. Set once, never cleared. */
+  leaveEffect: BlowCowLeaveEffect | null
+}
+
+/**
+ * A leave-triggered character ability that changed a player's point total.
+ *
+ * Kept in `G` rather than left to the history log because two surfaces need it long after the fact:
+ * the label that sits above the block for the rest of the match, and the results table, which has to
+ * explain why a total does not match the ranks that were scored. Public in every sense — characters
+ * are public, and the ability announces itself in the log the moment it fires.
+ */
+export type BlowCowLeaveEffect = {
+  character: BlowCowCharacterName
+  /** Signed, and never 0: only abilities that actually moved the total are recorded. */
+  pointDelta: number
+}
+
+/** `-2 points (The Speedrunner)`. Shared so the seat label and the results tooltip cannot drift. */
+export function formatLeaveEffectLabel(leaveEffect: BlowCowLeaveEffect) {
+  const magnitude = Math.abs(leaveEffect.pointDelta)
+
+  return `${leaveEffect.pointDelta > 0 ? '+' : '-'}${magnitude} point${magnitude === 1 ? '' : 's'} (${leaveEffect.character})`
 }
 
 export type BlowCowPlayerMatchStats = {
@@ -275,6 +305,7 @@ export type BlowCowArchiveInitialState = {
 export type BlowCowArchiveTurnActionKind =
   | 'revealPendingPlay'
   | 'toggleDirection'
+  | 'seekCharacter'
   | 'hideTableCard'
   | 'gainOutsideCard'
   | 'play'
@@ -398,6 +429,10 @@ export type BlowCowCallBSArgs = {
 
 export type BlowCowCatHideCardArgs = {
   cardID: string
+}
+
+export type BlowCowSeekCharacterArgs = {
+  characterName: BlowCowImplementedCharacterName
 }
 
 export type BlowCowAccuseDreamerArgs = {
@@ -921,6 +956,8 @@ function createEmptyPlayerState(playerID: string, seatIndex: number): BlowCowPla
     hasUsedAccusationThisRound: false,
     hasLeft: false,
     leaveOrder: null,
+    leaveEffect: null,
+    seekerPickedCharacter: null,
   }
 }
 
@@ -1511,6 +1548,35 @@ function isContrarian(state: BlowCowState, playerID: string) {
 
 function isPawn(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Pawn'
+}
+
+/**
+ * Holding the card is the whole permission, and taking a character spends it by overwriting
+ * `character`. So this doubles as the "has not chosen yet" test and needs no separate flag.
+ */
+export function isSeeker(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Seeker'
+}
+
+/**
+ * What The Seeker may take: every character the room put in play, minus the ones already sitting at
+ * the table, minus The Seeker itself — taking that again would only re-ask the same question.
+ *
+ * Scoped to `state.characterPool` rather than to every implemented character, because the pool is
+ * the host's statement of which cards exist in this match and a card that was never dealt is not one
+ * to seek out. That also inherits, for free, the rule keeping The Confused out of a Jack-less deck.
+ *
+ * Players who have already left still hold their card, so their character stays claimed.
+ */
+export function getSeekerCharacterChoices(state: BlowCowState, playerID: string) {
+  const claimedCharacterNames = new Set(
+    Object.values(state.players)
+      .filter((player) => player.id !== playerID)
+      .map((player) => player.character),
+  )
+
+  return getAvailableImplementedCharacterNames(state.deckConfig.selectedRanks, state.characterPool)
+    .filter((characterName) => characterName !== 'The Seeker' && !claimedCharacterNames.has(characterName))
 }
 
 function canUseGrandmasterBSOverride(state: BlowCowState, playerID: string) {
@@ -2116,69 +2182,92 @@ function revealPendingPlayAtTurnStart(
   })
 }
 
+/**
+ * Applies the point change, records it for the board and the results table, and logs it. The three
+ * always happen together, so no branch below can move a total without leaving a trace of why.
+ */
+function recordLeaveCharacterEffect(
+  state: BlowCowState,
+  playerID: string,
+  character: BlowCowCharacterName,
+  pointDelta: number,
+  detail: string,
+  turnNumber: number,
+) {
+  const player = getPlayerState(state, playerID)
+
+  player.points += pointDelta
+  player.leaveEffect = { character, pointDelta }
+  appendHistoryEvent(
+    state,
+    'system',
+    `${formatPlayerLabel(state, playerID)} triggered ${character}`,
+    detail,
+    playerID,
+    turnNumber,
+  )
+}
+
 function applyLeaveCharacterEffect(state: BlowCowState, playerID: string, turnNumber: number) {
   const player = getPlayerState(state, playerID)
 
   if (player.character === 'The Speedrunner' && player.leaveOrder === 1 && player.points === 2) {
-    player.points = 0
-    appendHistoryEvent(
+    // Written as a delta rather than an assignment so the label can name a number. The guard pins
+    // the total at 2, so this is always exactly -2 and always lands on 0.
+    recordLeaveCharacterEffect(
       state,
-      'system',
-      `${formatPlayerLabel(state, playerID)} triggered The Speedrunner`,
-      'Left first with exactly 2 points, so the total became 0 instead.',
       playerID,
+      'The Speedrunner',
+      -player.points,
+      'Left first with exactly 2 points, so the total became 0 instead.',
       turnNumber,
     )
     return
   }
 
   if (player.character === 'The Privileged') {
-    player.points += 1
-    appendHistoryEvent(
+    recordLeaveCharacterEffect(
       state,
-      'system',
-      `${formatPlayerLabel(state, playerID)} triggered The Privileged`,
-      'Left the game, so 1 point was added.',
       playerID,
+      'The Privileged',
+      1,
+      'Left the game, so 1 point was added.',
       turnNumber,
     )
     return
   }
 
   if (player.character === 'The Streamer' && player.matchStats.passCount === 0) {
-    player.points -= 2
-    appendHistoryEvent(
+    recordLeaveCharacterEffect(
       state,
-      'system',
-      `${formatPlayerLabel(state, playerID)} triggered The Streamer`,
-      'Left the game without ever passing, so 2 points were lost.',
       playerID,
+      'The Streamer',
+      -2,
+      'Left the game without ever passing, so 2 points were lost.',
       turnNumber,
     )
     return
   }
 
   if (player.character === 'The Pacifist' && player.matchStats.callBSCount === 0) {
-    player.points -= 1
-    appendHistoryEvent(
+    recordLeaveCharacterEffect(
       state,
-      'system',
-      `${formatPlayerLabel(state, playerID)} triggered The Pacifist`,
-      'Left the game without ever calling BS, so 1 point was lost.',
       playerID,
+      'The Pacifist',
+      -1,
+      'Left the game without ever calling BS, so 1 point was lost.',
       turnNumber,
     )
     return
   }
 
   if (player.character === 'The Drunkard' && player.matchStats.playCount > 0 && !player.hasUsedManualPlay) {
-    player.points -= 3
-    appendHistoryEvent(
+    recordLeaveCharacterEffect(
       state,
-      'system',
-      `${formatPlayerLabel(state, playerID)} triggered The Drunkard`,
-      'Left the game after only ever using Play Random, so 3 points were lost.',
       playerID,
+      'The Drunkard',
+      -3,
+      'Left the game after only ever using Play Random, so 3 points were lost.',
       turnNumber,
     )
   }
@@ -2635,6 +2724,58 @@ function resolveCatHideCard(
     cards: [targetCard],
   })
   G.tableStatus = buildTurnStatus(G, playerID)
+}
+
+/**
+ * The Seeker trades their card in for any other one still going spare.
+ *
+ * Deliberately not turn-bound. The choice is made once, at the start of the match, and whoever
+ * happens to be on the clock then is nobody's business but the shuffle's — binding it to their own
+ * turn would freeze the table until The Seeker looked at their screen, which is the one thing this
+ * ability must not do. It is still refused while a resolution is running, like every other move, so
+ * a character cannot change underneath a procedure that has already been decided.
+ *
+ * There is no deadline. A choice that expired would take the ability away from an unlucky player
+ * rather than from a slow one, and the pick is public the moment it lands either way.
+ */
+function resolveSeekerCharacterChoice(
+  context: BlowCowMoveContext,
+  args?: BlowCowSeekCharacterArgs,
+) {
+  const { G, ctx, playerID } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G)) {
+    return INVALID_MOVE
+  }
+
+  const player = G.players[playerID]
+  if (!player || player.hasLeft || !isSeeker(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  const requestedCharacterName = args?.characterName
+  if (
+    !isImplementedCharacterName(requestedCharacterName)
+    || !getSeekerCharacterChoices(G, playerID).includes(requestedCharacterName)
+  ) {
+    return INVALID_MOVE
+  }
+
+  player.character = requestedCharacterName
+  player.seekerPickedCharacter = requestedCharacterName
+
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, playerID)} used The Seeker`,
+    `Took ${requestedCharacterName} from the character pool.`,
+    playerID,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'seekCharacter',
+    detail: `Took ${requestedCharacterName} from the character pool.`,
+    characterUsed: 'The Seeker',
+  })
 }
 
 /**
@@ -3543,6 +3684,8 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
     player.hasUsedAccusationThisRound = false
     player.hasLeft = false
     player.leaveOrder = null
+    player.leaveEffect = null
+    player.seekerPickedCharacter = null
   }
 
   state.round.startingPlayerID = getDefaultStartingPlayerID(state, shuffledSeatOrder[0] ?? state.hostPlayerID) ?? state.hostPlayerID
@@ -3664,6 +3807,9 @@ export const BlowCowGame = {
     },
     catHideCard: (context: BlowCowMoveContext, args: BlowCowCatHideCardArgs) => {
       return resolveCatHideCard(context, args)
+    },
+    seekCharacter: (context: BlowCowMoveContext, args: BlowCowSeekCharacterArgs) => {
+      return resolveSeekerCharacterChoice(context, args)
     },
     pass: (context: BlowCowMoveContext, args?: BlowCowPassArgs) => {
       const { G, ctx, playerID, events } = context

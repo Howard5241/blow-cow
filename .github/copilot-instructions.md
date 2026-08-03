@@ -88,4 +88,7 @@ counterpart; keep the two in sync when project-wide guidance changes.
 - This repository uses `concurrently` to run the Vite client and local boardgame.io server together during development.
 - The in-game screen is wired to real gameplay state and multiplayer flow, and page-level UI docs live under `docs/ui-pages/`.
 - Finished matches are archived locally under `data/completed-games/`, with detailed snapshots in `matches/` and compact analysis lines in `index/games.ndjson` and `index/player-games.ndjson`.
+- Live matches persist to `data/matches/` through boardgame.io's `FlatFile` store, so rooms survive crashes and `--watch` restarts. The store is asynchronous, so anything wrapping `server.db` must `await` it. Stale `isConnected` flags are cleared when the store opens, and matches nobody has touched for 24 hours are swept away.
+- The client keeps its whole seat (match, player, credentials, name) in `localStorage`, so reloading a tab reconnects to the same table instead of returning to the lobby.
+- Each lobby room has a Clear button that deletes it, allowed only when the game has ended or nobody is connected. `getRoomClearBlockReason` in `src/lobbyRooms.ts` is shared by the button and the server's `/clear` route, so room-level rules belong there rather than in both places.
 - `npm run lint` currently reports pre-existing problems in `src/ui/BlowCowBoard.tsx` and `src/App.tsx`. Those are not caused by new work and should not be fixed unless asked.
