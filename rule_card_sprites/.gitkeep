@@ -1,0 +1,3 @@
+Rule card illustrations live here as PNGs named after the rule card title, for example
+"Reverse Rule.png". A trailing suffix is tolerated, so "Reverse Rule 2.png" resolves too.
+Rules with no illustration yet fall back to a placeholder tile in the Rules panel.

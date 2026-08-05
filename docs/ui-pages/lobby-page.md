@@ -20,6 +20,14 @@ main.app-shell
   section.lobby-grid
     article.panel.stack-gap      (player setup + create room)
     article.panel.stack-gap      (join by code + room list)
+  div.board-overlay.lobby-overlay?     (house rules editor)
+    section.board-overlay-panel.rules-overlay-panel
+      div.board-overlay-header
+      div.rule-card-grid
+        article.rule-card*
+          div.rule-card-footer
+            div.rule-status-options
+      div.rule-card-pager
 ```
 
 ## UI Elements
@@ -48,6 +56,15 @@ main.app-shell
 | Character Chip | `button` | `character-chip` | Toggles one implemented character in or out of the pool and shows its ability tooltip on hover or focus. | Repeated inside Character Chip Grid. |
 | Character Chip Tooltip | `span` | `character-chip-tooltip` | Shows the selected character's ability, plus the J requirement when The Confused is unavailable. | Nested inside each Character Chip. |
 | Character Pool Hint | `p` | `character-pool-hint` | Explains why `The Confused` is unavailable without `J` in a manual deck. | Conditional below Character Chip Grid. |
+| House Rules Panel | `div` | `manual-rank-panel` | Collapsed entry point for the rule cards. | Below Character Pool Panel, always shown. |
+| Changed Rule Count | `span` | `rank-selection-count` | Shows how many rule cards are not `Active`. | Right side of House Rules Panel header. |
+| House Rules Summary | `div` | `house-rules-summary` | Names the changed rules, or says every card is active, beside the button that opens the editor. | Body of House Rules Panel. |
+| Rule Status Hint | `p` | `rule-status-hint` | Carries the summary text. | Left side of House Rules Summary. |
+| Open Rule Cards Button | `button` | `secondary-button` | Opens the House Rules Overlay. | Right side of House Rules Summary. |
+| House Rules Overlay | `div` + `section` | `board-overlay lobby-overlay`, `board-overlay-panel rules-overlay-panel` | Centred modal holding the rule-card editor. Closes on Escape, on the Close button, or on a backdrop click. | Rendered at the end of App Shell when open. |
+| Rule Card Deck | shared component | `rule-card-grid`, `rule-card-pager` | The same paged deck of illustrated rule cards the in-match Rules panel uses, four to a page. | Body of House Rules Overlay. |
+| Rule Status Options | `div` | `rule-status-options` | Groups the status buttons a rule supports. | Footer of each rule card in the deck. |
+| Rule Status Option | `button` | `rule-status-option`, `selected` | Selects one status. Only the statuses that rule defines are rendered, so a rule that cannot be removed shows no `Removed` button at all. | Repeated inside Rule Status Options. |
 | Standard Ranks Group | `fieldset` | `deck-mode-group` | Switches between default and manual rank selection. | After Game Speed Selector. |
 | Rank Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Default` or `Manual` rank mode. | Repeated inside Standard Ranks Group. |
 | Rank Mode Tooltip | `span` | `deck-mode-tooltip` | Shows the mode description on hover or focus. | Nested inside each Rank Mode Option. |
@@ -78,8 +95,12 @@ main.app-shell
 ## Notes
 
 - `status-banner` and `error-banner` are page-level state, not panel-local state.
-- Create-room order is: seats, game speed, character cards, optional character pool selection, rank mode, then optional manual rank selection.
+- Create-room order is: seats, game speed, character cards, optional character pool selection, house rules, rank mode, then optional manual rank selection.
 - The character pool defaults to all implemented characters and only narrows when the creator deselects specific cards.
+- House rules default to every rule card `Active`, and `rules` is omitted from `setupData` entirely while that holds, the same way a full character pool is.
+- A rule card only offers the statuses it defines. `removedDescription` and `upgradedDescription` in `src/game/blowCowRules.ts` are what make a variant exist, so an undescribed variant cannot be selected here and cannot reach the server.
+- The rule cards live behind a button rather than inline. Twelve illustrated tiles made the left column several screens tall, and the overlay is the same `rules-overlay-panel` the match uses, so a host sees the cards exactly as the players will.
+- `Removed` is enforced during the match. `Upgraded` is not yet — the card's `+` title and upgraded description are shown to players, but the game still plays the rule as written, which is what the overlay's subtitle says.
 - In manual-rank mode, `The Confused` is unavailable until `J` is part of the selected deck.
 - Room-code join and quick join both reclaim an offline seat instead of taking a new one when the local display name exactly matches that offline player.
 - Offline claimed seats are labeled directly in the room list so players can see when a name-based reclaim is possible.

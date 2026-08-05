@@ -18,6 +18,9 @@ export const BLOW_COW_CHARACTER_NAMES = [
   'The Pacifist',
   'The Pawn',
   'The Seeker',
+  'The Broken',
+  'The Prototype',
+  'The Mastermind',
 ] as const
 
 export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
@@ -34,7 +37,7 @@ export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, strin
   'The Grandmaster': 'Once per game, call BS on any other player with a hidden play.',
   'The Invisible Hand': 'Before starting a round, choose its rank, direction, and starting player once per game.',
   'The Philanthropist': 'As the starting player, declare that you may play three cards on any turn that round once per game.',
-  'The Privileged': 'You are always the starting player unless another ability overrides it. Gain 1 point after leaving.',
+  'The Privileged': 'You are always the starting player unless you were punished last round or another ability overrides it. Gain 1 point after leaving.',
   'The Rogue': 'At round start, show an all-Club hand to become the starting player. Unlimited use.',
   'The Speedrunner': 'If first to leave with exactly 2 points, leave with 0 points instead.',
   'The Spy': 'On your turn, reveal one random card from your previous play when it has at least two hidden cards. Unlimited use.',
@@ -42,6 +45,9 @@ export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, strin
   'The Pacifist': 'Lose 1 point on leaving if you never called BS.',
   'The Pawn': 'Use En Passant to call BS on the player before the latest non-passing player when that latest player played two cards. Unlimited use.',
   'The Seeker': 'At the start of the game, take one character card of your choice from the pool.',
+  'The Broken': 'At the start of the game, remove one rule card of your choice from the game.',
+  'The Prototype': 'Use Defy to destroy one card in your hand and one random rule card, without ending your turn. Once per round.',
+  'The Mastermind': 'Use Conspire to open another player\'s hand and play out of it instead of your own. Once per round.',
 }
 
 export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
@@ -60,6 +66,9 @@ export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Pacifist',
   'The Pawn',
   'The Seeker',
+  'The Broken',
+  'The Prototype',
+  'The Mastermind',
 ] as const satisfies readonly BlowCowCharacterName[]
 
 export type BlowCowImplementedCharacterName = (typeof BLOW_COW_IMPLEMENTED_CHARACTER_NAMES)[number]

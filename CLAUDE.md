@@ -69,6 +69,35 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   existing generic fields (`cards`, `cardsByPlayer`, `detail`) over widening the schema.
 - Characters live in `src/game/blowCowCharacters.ts`. Character-specific behavior is implemented as
   small predicates (`isDreamer`, `isPawn`, …) plus targeted branches, not subclassing.
+- Rule cards live in `src/game/blowCowRules.ts`: the rules of the game serialized as data, so they
+  can be shown to players and changed by a character. Each rule's status is
+  `active`, `removed`, or `upgraded`, stored on `G.rules`. A rule may only take a status it defines
+  a description for, which is what makes it removable or upgradable — `normalizeRulesSelection` is
+  the single sanitiser enforcing that, and every caller routes through it.
+- **`removed` is enforced; `upgraded` is not.** Every removable rule has a branch at its enforcement
+  site, all reached through `isRuleRemoved(state, ruleID)`. That helper optional-chains `state.rules`
+  on purpose, because a match staged before rule cards existed restores without the field. Upgraded
+  variants stay display-only.
+- The Broken (`breakRule` move) removes one rule at the start of the game. Like The Seeker's pick it
+  is not turn-bound and has no deadline, so `G.rules` can change mid-turn — read it at the moment of
+  enforcement rather than caching a decision. `brokenRemovedRuleID` on the player is the spent flag,
+  since breaking a rule leaves `character` alone.
+- The Prototype (`defy` move) destroys a hand card and a random rule card, once per round, without
+  ending the turn. It shares The Broken's pool through `getBreakableRuleIDs`, draws from it with
+  `random.Shuffle`, and is refused when that pool is empty, so the action can never do only half of
+  what its card says. `hasUsedDefyThisRound` is the spent flag, cleared by `beginNextRound`.
+- The Mastermind (`conspire` move) opens another player's hand and commits the turn to a play out of
+  it, once per round. `G.conspiracy` is the live record; while it stands, `pass`, `callBS`,
+  `callReset` and `accuseDreamer` all refuse for its owner, and `performPlay` reads the cards out of
+  `conspiracy.targetPlayerID`'s hand instead of the mover's. The play is still the mover's in every
+  other respect — it lands in front of them, and they answer the BS call it draws. There is no
+  cancel, so `hasUsedConspireThisRound` is spent at the peek, not at the play, and the table-room
+  check happens in `resolveConspire` rather than being discovered afterwards: opening a hand that
+  cannot be played out of would strand the turn with no legal move. It is the one ability that widens
+  `hideSecretState` — one extra hand, for one seat, until the play clears the conspiracy.
+- Removing a rule takes any ability built on it with it: Pass removes The Foreigner's ability, Joker
+  removes The Confused's, Reveal removes The Spy's, and a Dreamer cheat against a removed rule stops
+  being a cheat. That is a consequence, not a special case — see the interaction list in `RULES.md`.
 
 ## Frontend Conventions
 
@@ -76,12 +105,24 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 - Responsive layouts for desktop and mobile browsers.
 - Prefer clear card, hand, table, turn, and player-status components over monolithic views.
   `src/ui/BlowCowBoard.tsx` is already very large — add to it carefully and factor out where sensible.
+- `src/ui/RuleCardDeck.tsx` is the paged rule-card grid, shared by three surfaces: the in-match Rules
+  panel, the lobby's House Rules editor, and The Broken's picker. Each passes a different
+  `renderCardFooter`, so one set of cards carries no controls, status buttons, or a Select button.
+  Its page size of four is load-bearing: a second row overflows `board-overlay-panel` and brings back
+  the scrollbar the paging exists to avoid.
 - Character card sprites already contain the character name and description. Do not duplicate that
-  description text in the UI unless explicitly requested.
+  description text in the UI unless explicitly requested. Rule cards are the one exception: their
+  illustrations carry no text, so the Rules panel renders the title and description itself.
 - Sprite folders live at the repo root, not in `public/`, and are loaded via `import.meta.glob`:
-  `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`.
-- Character sprite filename matching tolerates suffixes after the character name, such as
-  `The Cat 2.png`.
+  `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`,
+  `rule_card_sprites/`.
+- Character sprite filename matching tolerates suffixes after the name, such as `The Cat 2.png`,
+  because there a suffix only ever means a newer revision of the same art.
+- Rule sprites are the exception: a `Reverse Rule 2.png` beside a `Reverse Rule.png` is the
+  **upgraded** illustration, and every rule that ships one is a rule with an upgraded variant.
+  `getRuleCardSprite(title, isUpgraded)` looks the two up separately for that reason; the tolerant
+  prefix match survives only as a fallback for a rule whose base art is missing. A missing rule
+  sprite renders a placeholder tile.
 
 ## UI Documentation
 
@@ -95,7 +136,7 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 
 ## Code Organization
 
-- `src/game/` — rules, helpers, character definitions.
+- `src/game/` — rules, helpers, character definitions, rule card definitions.
 - `src/ui/` — board UI and sprite helpers.
 - `src/App.tsx`, `src/config.ts` — lobby flow and client configuration.
 - `server/server.cjs` — local server runtime, including the custom `/games/:name/:id/rejoin` route,
@@ -129,6 +170,8 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   `index/player-games.ndjson` hold compact per-match and per-player lines for analysis.
 - Changing archive shapes affects those written files. Keep `schemaVersion` in mind before altering
   the emitted structure.
+- `initial.rules` is the staged rule selection; `endgame.rules` is what the match finished under.
+  They differ whenever The Broken removed a rule, so neither replaces the other.
 
 ## Implementation Priorities
 

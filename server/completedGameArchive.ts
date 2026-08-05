@@ -173,6 +173,8 @@ function buildInitialArchive(
     speedMultiplier: initialArchive.speedMultiplier,
     useCharacters: initialArchive.useCharacters,
     characterPool: [...initialArchive.characterPool],
+    // Additive within schemaVersion 1: readers that predate rule cards simply ignore the key.
+    rules: { ...initialArchive.rules },
     players: initialArchive.playerOrder.map((playerID) => {
       const player = initialArchive.players[playerID]
       return {
@@ -205,6 +207,12 @@ function buildEndgameArchive(
   return {
     winnerID: gameover?.winnerID ?? placements[0]?.playerID ?? null,
     winnerName: gameover?.winnerID ? getPlayerName(metadata, gameover.winnerID) : placements[0]?.playerName ?? null,
+    /*
+     * Recorded alongside the initial block, not instead of it. The Broken can remove a rule after the
+     * deal, so the staged selection and the selection the match actually finished under are two
+     * different facts and an analysis needs both. Additive within schemaVersion 1.
+     */
+    rules: cloneSerializable(state.rules ?? {}),
     placements,
     pointsByPlayer: cloneSerializable(pointsByPlayer),
     players: state.seatOrder.map((playerID) => {

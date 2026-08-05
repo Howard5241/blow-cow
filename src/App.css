@@ -22,9 +22,14 @@
   padding: 48px 0 64px;
 }
 
+/*
+ * Tighter top and bottom than the lobby. The table is one fixed-height composition rather than a
+ * page that scrolls, so every band of page padding is height the board has to give back.
+ */
 .table-mode {
   width: min(1440px, calc(100% - 32px));
-  padding-bottom: 40px;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .hero-panel {
@@ -376,6 +381,68 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(156px, 1fr));
   gap: 10px;
+}
+
+/* Collapsed state of the House Rules panel: what was changed, and the way in to change more. */
+.house-rules-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.house-rules-summary .rule-status-hint {
+  flex: 1 1 220px;
+  margin: 0;
+}
+
+.rule-status-options {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.rule-status-option {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 239, 225, 0.12);
+  background: rgba(3, 10, 9, 0.4);
+  color: var(--muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.rule-status-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.rule-status-option.selected {
+  border-color: rgba(245, 239, 225, 0.28);
+  background: rgba(245, 239, 225, 0.12);
+  color: var(--cream);
+}
+
+.rule-status-option.removed.selected {
+  border-color: rgba(255, 117, 98, 0.32);
+  background: rgba(255, 117, 98, 0.16);
+  color: #ffd0c7;
+}
+
+.rule-status-option.upgraded.selected {
+  border-color: rgba(255, 206, 92, 0.32);
+  background: rgba(255, 206, 92, 0.16);
+  color: var(--gold-text);
+}
+
+.rule-status-hint {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .rank-chip,
@@ -765,7 +832,7 @@
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  padding: 24px;
+  padding: 16px;
   border: 0;
   border-radius: 0;
   /*
@@ -1417,8 +1484,12 @@
   min-width: 0;
 }
 
+/*
+ * Sized to its own short copy rather than claiming a wide basis, so the dead space it used to hold
+ * goes to the action row instead and those buttons stop wrapping onto a second line.
+ */
 .board-hero-copy-wrap {
-  flex: 1 1 760px;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -1541,6 +1612,8 @@
 .board-hero-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   gap: 12px;
 }
@@ -2641,7 +2714,8 @@
   gap: 10px;
 }
 
-.history-toggle.active {
+.history-toggle.active,
+.rules-toggle.active {
   border-color: rgba(255, 206, 92, 0.24);
   background: rgba(255, 206, 92, 0.12);
 }
@@ -2698,6 +2772,282 @@
   width: min(620px, 100%);
 }
 
+/* Wider than the log: rule cards are a grid of illustrations, not a single column of entries. */
+.rules-overlay-panel {
+  width: min(1240px, 100%);
+  gap: 12px;
+  animation: rules-overlay-in 240ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes rules-overlay-in {
+  from {
+    transform: translateY(16px) scale(0.98);
+    opacity: 0;
+  }
+}
+
+/* Only the Close button survives, so the row collapses to it instead of holding a copy block. */
+.board-overlay-header.bare {
+  justify-content: flex-end;
+  margin-bottom: -4px;
+}
+
+/*
+ * Paged rather than scrolled, and one row per page. A fixed column count is what keeps the panel
+ * shorter than the viewport: a second row of cards this size overflows and brings the scrollbar
+ * back, which is the whole reason the page size is four.
+ */
+.rule-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  animation: rule-card-grid-in 260ms ease-out both;
+}
+
+.rule-card-grid.back {
+  animation-name: rule-card-grid-in-back;
+}
+
+@keyframes rule-card-grid-in {
+  from {
+    transform: translateX(26px);
+    opacity: 0;
+  }
+}
+
+@keyframes rule-card-grid-in-back {
+  from {
+    transform: translateX(-26px);
+    opacity: 0;
+  }
+}
+
+.rule-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(245, 239, 225, 0.1);
+  background: rgba(8, 24, 21, 0.72);
+  /* Dealt out left to right. The index comes from the card's position on the page. */
+  animation: rule-card-deal 320ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  animation-delay: calc(var(--rule-card-index, 0) * 55ms);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+@keyframes rule-card-deal {
+  from {
+    transform: translateY(18px) scale(0.96);
+    opacity: 0;
+  }
+}
+
+.rule-card:hover {
+  transform: translateY(-6px);
+  border-color: rgba(245, 239, 225, 0.24);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.38);
+}
+
+.rule-card.upgraded:hover {
+  border-color: rgba(255, 206, 92, 0.5);
+  box-shadow: 0 18px 38px rgba(255, 206, 92, 0.16);
+}
+
+.rule-card.removed:hover {
+  border-color: rgba(255, 117, 98, 0.5);
+  box-shadow: 0 18px 38px rgba(255, 117, 98, 0.16);
+}
+
+.rule-card.upgraded {
+  border-color: rgba(255, 206, 92, 0.28);
+  background: rgba(38, 30, 10, 0.72);
+}
+
+.rule-card.removed {
+  border-color: rgba(255, 117, 98, 0.28);
+  background: rgba(46, 14, 12, 0.72);
+}
+
+.rule-card-illustration {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 14px;
+  background: rgba(3, 10, 9, 0.6);
+}
+
+/*
+ * Anchored to the top edge, not the centre. The art puts its subject in the upper half, so the
+ * default centre crop cuts the top off and shows the middle band instead.
+ */
+.rule-card-illustration img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+  transition: transform 320ms ease;
+}
+
+.rule-card:hover .rule-card-illustration img {
+  transform: scale(1.06);
+}
+
+/* Removed rules read at a glance: the art drains of colour and the title turns red. */
+.rule-card.removed .rule-card-illustration {
+  opacity: 0.42;
+  filter: grayscale(0.6);
+  transition: opacity 220ms ease, filter 220ms ease;
+}
+
+/* Hovering a removed card brings its art back, so you can still see what was taken away. */
+.rule-card.removed:hover .rule-card-illustration {
+  opacity: 0.72;
+  filter: grayscale(0.15);
+}
+
+.rule-card-illustration-placeholder {
+  color: rgba(245, 239, 225, 0.22);
+  font-size: 2.6rem;
+}
+
+.rule-card-status-tag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rule-card-status-tag.removed {
+  border-color: rgba(255, 117, 98, 0.28);
+  background: rgba(255, 117, 98, 0.14);
+  color: #ffd0c7;
+}
+
+.rule-card-status-tag.upgraded {
+  border-color: rgba(255, 206, 92, 0.28);
+  background: rgba(255, 206, 92, 0.14);
+  color: var(--gold-text);
+}
+
+.rule-card-title {
+  margin: 0;
+  font-size: 1.16rem;
+  color: var(--heading);
+}
+
+.rule-card.removed .rule-card-title {
+  color: #ffd0c7;
+}
+
+.rule-card.upgraded .rule-card-title {
+  color: var(--gold-text);
+}
+
+.rule-card-description {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/*
+ * Pushed to the bottom of the card so the controls line up across a row whatever the description
+ * length, which is what stops a grid of otherwise identical cards looking ragged.
+ */
+.rule-card-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.rule-card-select-button {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 239, 225, 0.16);
+  background: rgba(3, 10, 9, 0.4);
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.rule-card-select-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.rule-card-select-button:not(:disabled):hover,
+.rule-card-select-button.selected {
+  border-color: rgba(255, 117, 98, 0.42);
+  background: rgba(255, 117, 98, 0.16);
+  color: #ffd0c7;
+}
+
+/* A rule The Broken cannot touch is dimmed rather than hidden: knowing what is safe is information. */
+.rule-card.unbreakable {
+  opacity: 0.5;
+}
+
+.rule-card.selected {
+  border-color: rgba(255, 117, 98, 0.55);
+  box-shadow: 0 0 0 2px rgba(255, 117, 98, 0.28);
+}
+
+.break-rule-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.break-rule-footer .room-note {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+/*
+ * The board's overlay is absolute inside the table shell. The lobby has no such shell, so its copy
+ * of the same panel is pinned to the viewport instead.
+ */
+.lobby-overlay {
+  position: fixed;
+}
+
+.rule-card-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.rule-card-pager .secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.rule-card-pager-status {
+  min-width: 108px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  text-align: center;
+}
+
 .character-card-overlay-header,
 .board-overlay-header {
   display: flex;
@@ -2713,18 +3063,150 @@
   gap: 8px;
 }
 
-.character-card-overlay-body {
-  display: flex;
-  justify-content: center;
+/*
+ * The enlarged single card, not the Seeker's picker, which reuses this shell and scrolls its own
+ * grid. Everything above the art is squeezed and the panel is told never to scroll: the sprite is
+ * tall and portrait, so on a short viewport the only thing that can give is the art itself, and it
+ * shrinks to fit rather than pushing a scrollbar down the side of the panel.
+ */
+.character-card-overlay-panel:not(.seeker-picker-panel) {
+  gap: 12px;
+  padding: 16px 18px 18px;
+  /*
+   * `clip` rather than `hidden` so the tilted card's near corner and its drop shadow may leave the
+   * panel by the margin below. `hidden` would have to scroll to reach them, which is the scrollbar
+   * this rule exists to remove; the fallback above is for browsers without `clip`.
+   */
+  overflow: hidden;
+  overflow: clip;
+  overflow-clip-margin: 28px;
 }
 
+.character-card-overlay-panel:not(.seeker-picker-panel) .character-card-overlay-header {
+  align-items: center;
+  gap: 12px;
+}
+
+.character-card-overlay-panel:not(.seeker-picker-panel) .character-card-overlay-copy {
+  gap: 2px;
+}
+
+.character-card-overlay-panel:not(.seeker-picker-panel) .character-card-overlay-copy h2 {
+  font-size: 1.08rem;
+}
+
+.character-card-overlay-panel:not(.seeker-picker-panel) .character-card-overlay-copy .room-note {
+  font-size: 0.76rem;
+}
+
+.character-card-overlay-panel:not(.seeker-picker-panel) .character-card-overlay-header .secondary-button {
+  padding: 7px 13px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+}
+
+/*
+ * The stage the card leans in. `min-height: 0` is what lets the art shrink inside the flex column
+ * above it; without it the image would keep its natural height and bring the scrollbar back.
+ */
+.character-card-overlay-body {
+  display: grid;
+  place-items: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  perspective: 1100px;
+}
+
+/*
+ * Tilts toward the pointer, with a glare that tracks it and a holographic sheen that sweeps as it
+ * turns. The pointer handler writes only these four custom properties, so a move costs one style
+ * recalculation on one element and no React render at all.
+ */
+.character-card-overlay-card {
+  position: relative;
+  display: block;
+  /*
+   * The sprites are a uniform 816x1110, which reduces to 136/185. The frame carries that ratio
+   * itself rather than inheriting it from the image, because the glare and the foil are painted on
+   * the frame: any box wider than the picture would light up empty panel beside the card.
+   *
+   * It has to be the frame that is constrained, not the image. An image sized inside a flex frame
+   * takes its width from `max-width` and never gives it back when `max-height` clamps the height,
+   * so the box stayed 460px wide while the picture shrank inside it. With `aspect-ratio` here the
+   * height cap transfers back through the ratio and both axes shrink together.
+   */
+  aspect-ratio: 136 / 185;
+  width: min(100%, 460px);
+  max-height: 100%;
+  border-radius: 20px;
+  transform-style: preserve-3d;
+  transform:
+    rotateX(var(--card-tilt-x, 0deg))
+    rotateY(var(--card-tilt-y, 0deg))
+    scale(calc(1 + var(--card-lift, 0) * 0.03));
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), filter 260ms ease;
+  filter: drop-shadow(0 calc(26px + var(--card-lift, 0) * 12px) calc(38px + var(--card-lift, 0) * 22px) rgba(0, 0, 0, calc(0.3 + var(--card-lift, 0) * 0.14)));
+  --card-pointer-x: 50%;
+  --card-pointer-y: 50%;
+}
+
+/*
+ * Fills the frame exactly, because the frame is already the sprite's own shape. `contain` is
+ * insurance rather than layout: a sprite that ever ships at a different ratio letterboxes here
+ * instead of stretching, and the frame's `aspect-ratio` above is what would need updating.
+ */
 .character-card-overlay-image {
   display: block;
-  width: min(100%, 460px);
-  height: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.98);
-  box-shadow: 0 28px 42px rgba(0, 0, 0, 0.28);
+}
+
+/* The specular highlight: a soft white pool sitting wherever the pointer is. */
+.character-card-overlay-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: var(--card-glare-opacity, 0);
+  transition: opacity 260ms ease;
+  mix-blend-mode: overlay;
+  background: radial-gradient(
+    circle at var(--card-pointer-x) var(--card-pointer-y),
+    rgba(255, 255, 255, 0.62),
+    rgba(255, 255, 255, 0.16) 26%,
+    transparent 52%
+  );
+}
+
+/*
+ * The foil. A hard-edged spectral band whose angle follows the tilt, so the colours slide across
+ * the card as it turns rather than sitting still on top of it.
+ */
+.character-card-overlay-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: calc(var(--card-glare-opacity, 0) * 0.55);
+  transition: opacity 260ms ease;
+  mix-blend-mode: color-dodge;
+  background: linear-gradient(
+    calc(105deg + var(--card-tilt-y, 0deg) * 3),
+    transparent 32%,
+    rgba(255, 206, 92, 0.34) 42%,
+    rgba(118, 184, 255, 0.3) 50%,
+    rgba(255, 117, 98, 0.32) 58%,
+    transparent 68%
+  );
+  background-size: 220% 220%;
+  background-position: var(--card-pointer-x) var(--card-pointer-y);
 }
 
 /*
@@ -2828,6 +3310,47 @@
   color: var(--muted);
   font-size: 0.87rem;
   line-height: 1.35;
+}
+
+/*
+ * The one line in the log that is written at the reader rather than about the match. It gets the
+ * repo's alarm red, a heavier weight than the detail above it, and a slow uneven pulse, so a torn-up
+ * rule reads as damage instead of as another logged action.
+ */
+.history-entry p.history-entry-omen {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 117, 98, 0.2);
+  color: #ffb3a5;
+  font-size: 0.88rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-shadow: 0 0 12px rgba(255, 117, 98, 0.45);
+  animation: history-omen-pulse 2600ms ease-in-out infinite;
+}
+
+@keyframes history-omen-pulse {
+  0%,
+  100% {
+    opacity: 0.82;
+    text-shadow: 0 0 10px rgba(255, 117, 98, 0.32);
+  }
+
+  38% {
+    opacity: 1;
+    text-shadow: 0 0 18px rgba(255, 117, 98, 0.66);
+  }
+
+  46% {
+    opacity: 0.72;
+    text-shadow: 0 0 6px rgba(255, 117, 98, 0.22);
+  }
+
+  58% {
+    opacity: 1;
+    text-shadow: 0 0 20px rgba(255, 117, 98, 0.7);
+  }
 }
 
 .history-entry-label {
@@ -3009,6 +3532,16 @@
     transition: none;
   }
 
+  /*
+   * The card stops moving entirely. The glare and the foil stay, because they are lighting rather
+   * than motion, and they no longer travel once the tilt is pinned flat.
+   */
+  .character-card-overlay-card {
+    transform: none;
+    transition: none;
+    filter: drop-shadow(0 26px 38px rgba(0, 0, 0, 0.3));
+  }
+
   .hand-stage.active-turn::before,
   .hand-stage.punishment-flash,
   .hand-stage.punishment-flash::after,
@@ -3029,7 +3562,11 @@
   .punishment-move-card.active,
   .reset-gather-card.active,
   .reset-deal-card.active,
-  .reset-pile-card.shuffling {
+  .reset-pile-card.shuffling,
+  .rules-overlay-panel,
+  .rule-card-grid,
+  .rule-card,
+  .history-entry p.history-entry-omen {
     animation: none;
   }
 
@@ -3044,8 +3581,21 @@
   .seat-target-actions,
   .seat-target-button,
   .seat-reveal-action-button,
-  .seeker-picker-option {
+  .seeker-picker-option,
+  .rule-card,
+  .rule-card-illustration,
+  .rule-card-illustration img,
+  .rule-card-select-button {
     transition: none;
+  }
+
+  /* The hover tinting still lands; only the lift and the slow zoom are dropped. */
+  .rule-card:hover {
+    transform: none;
+  }
+
+  .rule-card:hover .rule-card-illustration img {
+    transform: none;
   }
 
   /* The selection ring still lands; only the lift it rides in on is dropped. */
@@ -3350,11 +3900,52 @@
 }
 
 /*
- * Full-width first item in the action row rather than a header of its own, so it fills the space
- * the bottom-aligned buttons leave above them without adding another box to the panel.
+ * Full-width first line of the action row rather than a header of its own, so it fills the space
+ * the bottom-aligned buttons leave above them without adding another box to the panel. The line was
+ * already tall enough for a control, and held only the turn heading, so the board hero's actions
+ * moved in beside it instead of costing the page a header of their own.
  */
-.hand-action-heading {
+.hand-action-top {
   flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hand-action-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: 0 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Sized down from the page-level controls these used to be: this row is a strip, not a header. */
+.hand-action-toolbar .subtle-button {
+  padding: 5px 10px;
+  font-size: 0.78rem;
+}
+
+.hand-action-toolbar .secondary-button {
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+}
+
+.hand-action-toolbar .history-count-pill {
+  min-width: 20px;
+  min-height: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 0.7rem;
+}
+
+/* Grows into whatever the toolbar leaves, so it stays hard right whether or not the line wraps. */
+.hand-action-heading {
+  flex: 1 1 auto;
   margin: 0;
   color: var(--gold-text);
   font-size: 0.78rem;
@@ -3362,6 +3953,7 @@
   letter-spacing: 0.16em;
   text-align: right;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 /*
@@ -3387,8 +3979,17 @@
   min-width: 0;
 }
 
+/*
+ * A column rather than a plain block, so the hand keeps the top and the strip below it is pushed to
+ * the floor of the space the row already reserves. The cards never filled that height, which is what
+ * made this the natural home for the board hero's identity half.
+ */
 .hand-scroll-viewport {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
   overflow: visible;
 }
 
@@ -3397,8 +3998,74 @@
   isolation: isolate;
   display: flex;
   align-items: flex-end;
+  flex: 0 0 auto;
   overflow-x: auto;
   padding: 4px 28px 4px 4px;
+}
+
+/*
+ * The borrowed hand reads as taken rather than owned: a tinted, dashed frame around cards that are
+ * somebody else's, so a glance at the strip can never mistake it for the player's own.
+ */
+.hand-scroll-row.conspired {
+  border: 1px dashed rgba(217, 184, 255, 0.55);
+  border-radius: 12px;
+  background: rgba(217, 184, 255, 0.07);
+}
+
+.conspiracy-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 6px;
+  padding-left: 4px;
+  color: rgba(233, 214, 255, 0.86);
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+}
+
+.conspiracy-banner-mark {
+  padding: 3px 9px;
+  border: 1px solid rgba(217, 184, 255, 0.5);
+  border-radius: 999px;
+  background: rgba(217, 184, 255, 0.14);
+  color: #e9d6ff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hand-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 4px;
+}
+
+.hand-meta-title h2 {
+  font-size: 0.95rem;
+  letter-spacing: 0.01em;
+}
+
+/* Glanceable, not clickable: the pills shrink further than the buttons opposite them. */
+.hand-meta-row .status-pill {
+  padding: 3px 9px;
+  font-size: 0.7rem;
+}
+
+.hand-meta-row .inline-icon-button {
+  width: 22px;
+  height: 22px;
+}
+
+.hand-meta-row .inline-info-icon {
+  width: 16px;
+  height: 16px;
+  font-size: 0.66rem;
 }
 
 .hand-scroll-animation-layer {
@@ -3561,6 +4228,11 @@
   min-width: 0;
 }
 
+.mastermind-conspire-item {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
 .trump-action-combo {
   display: flex;
   align-items: stretch;
@@ -3582,6 +4254,12 @@
   min-width: 0;
 }
 
+/* Wider than the rank selectors above it: this one holds player names, not a rank or a count. */
+.mastermind-conspire-select {
+  flex: 0 0 168px;
+  min-width: 0;
+}
+
 .trump-action-combo .action-button {
   flex: 1 1 auto;
   width: auto;
@@ -3593,6 +4271,11 @@
 }
 
 .drunkard-random-combo .action-button {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.mastermind-conspire-combo .action-button {
   flex: 1 1 auto;
   width: auto;
 }
@@ -3665,6 +4348,18 @@
     --seat-block-height: 190px;
   }
 
+  /*
+   * Two columns means two rows, so the illustrations flatten to buy back the height the extra row
+   * costs. The panel can still scroll here, but it usually does not have to.
+   */
+  .rule-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rule-card-illustration {
+    aspect-ratio: 16 / 9;
+  }
+
   .player-ring {
     aspect-ratio: 4 / 3;
     max-height: none;
@@ -3722,6 +4417,10 @@
   .seeker-picker-footer {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .rule-card-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   /* Two cards a row at most here, so each one stays big enough to read on a phone. */
@@ -3843,6 +4542,19 @@
 
   .foreigner-pass-combo .action-button {
     width: 100%;
+  }
+
+  .mastermind-conspire-combo {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .mastermind-conspire-combo .action-button {
+    width: 100%;
+  }
+
+  .mastermind-conspire-select {
+    flex: 1 1 auto;
   }
 
   .hand-scroll-row {

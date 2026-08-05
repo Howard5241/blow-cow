@@ -6,6 +6,18 @@ import {
   type BlowCowCharacterName,
   type BlowCowImplementedCharacterName,
 } from './blowCowCharacters.ts'
+import {
+  BLOW_COW_RULE_IDS,
+  canRuleTakeStatus,
+  getRuleDefinition,
+  getRemovableRuleIDs,
+  isBlowCowRuleID,
+  isBlowCowRuleStatus,
+  isDefaultRulesSelection,
+  normalizeRulesSelection,
+  type BlowCowRuleID,
+  type BlowCowRulesState,
+} from './blowCowRules.ts'
 
 export const BLOW_COW_GAME_NAME = 'blow-cow'
 export const BLOW_COW_MIN_PLAYERS = 2
@@ -91,8 +103,29 @@ export type BlowCowPlayerState = {
    * Seeker — worth keeping, because the badge everyone reads gives no hint that the card was chosen.
    */
   seekerPickedCharacter: BlowCowCharacterName | null
+  /**
+   * The rule this player tore up with The Broken, or null. Doubles as the spent flag — unlike The
+   * Seeker, breaking a rule leaves `character` alone, so there has to be something else to read.
+   */
+  brokenRemovedRuleID: BlowCowRuleID | null
   /** One accusation per player per round, spent whether or not it lands. Cleared by `beginNextRound`. */
   hasUsedAccusationThisRound: boolean
+  /** One Defy per round for The Prototype, spent the moment it lands. Cleared by `beginNextRound`. */
+  hasUsedDefyThisRound: boolean
+  /**
+   * One Conspire per round for The Mastermind, spent the moment the hand is opened rather than when
+   * the play lands — there is no backing out of a conspiracy, so the two are the same commitment.
+   * Cleared by `beginNextRound`.
+   */
+  hasUsedConspireThisRound: boolean
+  /**
+   * Took the table this round, by a BS verdict or a resolved accusation. Both flags exist only so
+   * The Privileged can be denied the next round's start: the claim is read while the new round is
+   * being opened, by which point "this round" has already become the last one, so `beginNextRound`
+   * rolls the first into the second before it picks a starting player.
+   */
+  wasPunishedThisRound: boolean
+  wasPunishedLastRound: boolean
   hasLeft: boolean
   leaveOrder: number | null
   /** The leave-triggered ability that moved this player's points, or null. Set once, never cleared. */
@@ -220,6 +253,24 @@ export type BlowCowAccusation = {
 }
 
 /**
+ * A live conspiracy: The Mastermind has opened another player's hand and now owes the table a play
+ * out of it. Turn-bound and committing — while it stands, the only move its owner may make is a
+ * play, and those cards come out of `targetPlayerID`'s hand rather than their own.
+ *
+ * Public state, unlike the hand it opens. Everyone is told who is conspiring against whom the moment
+ * it lands, because the victim's hand count is about to drop for reasons only this explains. What
+ * stays private is the card faces: `hideSecretState` unmasks the target's hand for the conspirator
+ * alone, and for nobody else, including the target's other opponents.
+ */
+export type BlowCowConspiracy = {
+  /** The Mastermind. Always the player on the clock, since Conspire is turn-bound. */
+  playerID: string
+  targetPlayerID: string
+  /** The turn it was opened on. A conspiracy never outlives its turn. */
+  turnNumber: number
+}
+
+/**
  * A live BS challenge. The caller drives the reveal by hand: one step per player holding face-down
  * table cards, each card flipped with `revealBSCard`, each step confirmed with `advanceBSReveal`.
  * The resolution deliberately carries no card faces — clients read them from `G.table.plays`, which
@@ -262,6 +313,11 @@ export type BlowCowHistoryEvent = {
   playerID: string | null
   title: string
   detail: string
+  /**
+   * A closing line the log renders in its own alarmed style, under the detail. Optional in the type
+   * as well as in practice, because a match staged before it existed restores without the field.
+   */
+  omen?: string
   roundNumber: number
   turnNumber: number
 }
@@ -299,6 +355,7 @@ export type BlowCowArchiveInitialState = {
   speedMultiplier: BlowCowSpeedMultiplier
   useCharacters: boolean
   characterPool: BlowCowImplementedCharacterName[]
+  rules: BlowCowRulesState
   players: Record<string, BlowCowArchiveInitialPlayerState>
 }
 
@@ -306,6 +363,9 @@ export type BlowCowArchiveTurnActionKind =
   | 'revealPendingPlay'
   | 'toggleDirection'
   | 'seekCharacter'
+  | 'breakRule'
+  | 'defy'
+  | 'conspire'
   | 'hideTableCard'
   | 'gainOutsideCard'
   | 'play'
@@ -377,6 +437,7 @@ export type BlowCowSetupData = {
   speedMultiplier?: BlowCowSpeedMultiplier
   useCharacters?: boolean
   characterPool?: BlowCowImplementedCharacterName[]
+  rules?: Partial<BlowCowRulesState>
 }
 
 export type BlowCowState = {
@@ -387,6 +448,12 @@ export type BlowCowState = {
   speedMultiplier: BlowCowSpeedMultiplier
   useCharacters: boolean
   characterPool: BlowCowImplementedCharacterName[]
+  /*
+   * Public on purpose: `hideSecretState` leaves this alone so every seat's Rules panel reads the
+   * same statuses. Nothing in the engine branches on it yet — the rules are still enforced
+   * unconditionally, and this only drives what the panel displays.
+   */
+  rules: BlowCowRulesState
   seatOrder: string[]
   players: Record<string, BlowCowPlayerState>
   round: BlowCowRoundState
@@ -395,6 +462,12 @@ export type BlowCowState = {
   resetResolution: BlowCowResetResolution | null
   accusation: BlowCowAccusation | null
   directionTamper: BlowCowDirectionTamper | null
+  /*
+   * Optional in the type as well as in practice: a match staged before The Mastermind existed
+   * restores from `data/matches/` without the field, and every read of it optional-chains for that
+   * reason. Nobody is mid-conspiracy in a match that never had one.
+   */
+  conspiracy?: BlowCowConspiracy | null
   history: BlowCowHistoryEvent[]
   telemetry: BlowCowTelemetryState
   archive: BlowCowArchiveState
@@ -433,6 +506,18 @@ export type BlowCowCatHideCardArgs = {
 
 export type BlowCowSeekCharacterArgs = {
   characterName: BlowCowImplementedCharacterName
+}
+
+export type BlowCowBreakRuleArgs = {
+  ruleID: BlowCowRuleID
+}
+
+export type BlowCowDefyArgs = {
+  cardID: string
+}
+
+export type BlowCowConspireArgs = {
+  targetPlayerID: string
 }
 
 export type BlowCowAccuseDreamerArgs = {
@@ -698,6 +783,7 @@ function createHistoryEvent(
   detail: string,
   playerID: string | null,
   turnNumber: number,
+  omen?: string,
 ) {
   return {
     id: `history-${state.round.roundNumber}-${turnNumber}-${state.history.length}`,
@@ -705,6 +791,9 @@ function createHistoryEvent(
     playerID,
     title,
     detail,
+    // Omitted rather than set to null when there is none, so the field only exists on the few
+    // events that actually carry one.
+    ...(omen ? { omen } : {}),
     roundNumber: state.round.roundNumber,
     turnNumber,
   } satisfies BlowCowHistoryEvent
@@ -750,8 +839,11 @@ function appendHistoryEvent(
   detail: string,
   playerID: string | null,
   turnNumber: number,
+  omen?: string,
 ) {
-  state.history.push(createHistoryEvent(state, kind, title, detail, playerID, turnNumber))
+  state.history.push(createHistoryEvent(state, kind, title, detail, playerID, turnNumber, omen))
+  // Telemetry carries no omen: it is flavour written for the log's readers, not a fact about the
+  // match, and the analysis lines are the one place that distinction matters.
   appendTelemetryEvent(state, kind, title, detail, playerID, turnNumber)
 }
 
@@ -835,6 +927,7 @@ function createInitialArchiveState(state: BlowCowState): BlowCowArchiveInitialSt
     speedMultiplier: state.speedMultiplier,
     useCharacters: state.useCharacters,
     characterPool: [...state.characterPool],
+    rules: { ...state.rules },
     players: Object.fromEntries(
       Object.entries(state.players).map(([playerID, player]) => [
         playerID,
@@ -954,10 +1047,15 @@ function createEmptyPlayerState(playerID: string, seatIndex: number): BlowCowPla
     hasUsedManualPlay: false,
     hasUsedGrandmasterBSOverride: false,
     hasUsedAccusationThisRound: false,
+    hasUsedDefyThisRound: false,
+    hasUsedConspireThisRound: false,
+    wasPunishedThisRound: false,
+    wasPunishedLastRound: false,
     hasLeft: false,
     leaveOrder: null,
     leaveEffect: null,
     seekerPickedCharacter: null,
+    brokenRemovedRuleID: null,
   }
 }
 
@@ -1181,7 +1279,43 @@ function resolveCharacterPool(setupData: BlowCowSetupData | undefined) {
     : [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES]
 }
 
+function resolveRules(setupData: BlowCowSetupData | undefined) {
+  return normalizeRulesSelection(setupData?.rules)
+}
+
+function formatRulesSummary(rules: BlowCowRulesState) {
+  if (isDefaultRulesSelection(rules)) {
+    return 'left every rule card active'
+  }
+
+  const changedRules = BLOW_COW_RULE_IDS
+    .filter((ruleID) => rules[ruleID] !== 'active')
+    .map((ruleID) => `${getRuleDefinition(ruleID).title} ${rules[ruleID]}`)
+
+  return `marked ${changedRules.join(', ')} (rule cards are not enforced yet)`
+}
+
 export function validateBlowCowSetupData(setupData: BlowCowSetupData | undefined) {
+  if (setupData?.rules !== undefined) {
+    if (typeof setupData.rules !== 'object' || setupData.rules === null || Array.isArray(setupData.rules)) {
+      return 'Choose a valid rule selection.'
+    }
+
+    for (const [ruleID, status] of Object.entries(setupData.rules)) {
+      if (!isBlowCowRuleID(ruleID)) {
+        return 'Rule selection contains an unknown rule.'
+      }
+
+      if (!isBlowCowRuleStatus(status)) {
+        return 'Rule selection contains an unknown rule status.'
+      }
+
+      if (!canRuleTakeStatus(ruleID, status)) {
+        return `${ruleID} does not support the ${status} status.`
+      }
+    }
+  }
+
   if (setupData?.speedMultiplier !== undefined && !isBlowCowSpeedMultiplier(setupData.speedMultiplier)) {
     return 'Choose a valid game speed multiplier.'
   }
@@ -1253,12 +1387,32 @@ export function isTrumpCard(
   card: BlowCowCard,
   trumpRank: BlowCowRank | null,
   playerCharacter: BlowCowCharacterName | null | undefined = null,
+  jokersAreWild = true,
 ) {
   if (!trumpRank) {
     return false
   }
 
-  return isJokerCard(card) || isConfusedWildJack(playerCharacter, card) || card.rank === trumpRank
+  /*
+   * A Joker's rank never matches a real trump, so a removed Joker Rule leaves it worthless. The
+   * Confused's Jacks go with it: the ability says they function as Jokers, and a Joker that is
+   * nothing is nothing to function as.
+   */
+  if (isJokerCard(card) || isConfusedWildJack(playerCharacter, card)) {
+    return jokersAreWild
+  }
+
+  return card.rank === trumpRank
+}
+
+/** `isTrumpCard` with the match's Joker Rule status already applied. Prefer this inside the engine. */
+function isTrumpCardInMatch(
+  state: BlowCowState,
+  card: BlowCowCard,
+  trumpRank: BlowCowRank | null,
+  playerCharacter: BlowCowCharacterName | null | undefined = null,
+) {
+  return isTrumpCard(card, trumpRank, playerCharacter, !isRuleRemoved(state, 'joker'))
 }
 
 export function countsTowardReverseRule(
@@ -1383,8 +1537,14 @@ function getActivePlayerCount(state: Pick<BlowCowState, 'seatOrder' | 'players'>
   return getActivePlayerIDs(state).length
 }
 
+/**
+ * The Privileged forfeit the claim for one round after taking the table, so the seat that earned the
+ * start by winning a BS call or an accusation against them actually keeps it.
+ */
 function getPrivilegedStartingPlayerID(state: Pick<BlowCowState, 'seatOrder' | 'players'>) {
-  return getActivePlayerIDs(state).find((playerID) => state.players[playerID].character === 'The Privileged') ?? null
+  return getActivePlayerIDs(state).find((playerID) => {
+    return state.players[playerID].character === 'The Privileged' && !state.players[playerID].wasPunishedLastRound
+  }) ?? null
 }
 
 function getDefaultStartingPlayerID(
@@ -1579,6 +1739,97 @@ export function getSeekerCharacterChoices(state: BlowCowState, playerID: string)
     .filter((characterName) => characterName !== 'The Seeker' && !claimedCharacterNames.has(characterName))
 }
 
+/**
+ * The single question every enforcement site asks. Optional-chained on purpose: a match staged
+ * before rule cards existed restores from `data/matches/` with no `rules` at all, and the honest
+ * answer for it is that nothing was removed.
+ */
+export function isRuleRemoved(state: BlowCowState, ruleID: BlowCowRuleID) {
+  return state.rules?.[ruleID] === 'removed'
+}
+
+export function isBroken(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Broken'
+}
+
+/**
+ * What is still there to destroy: every rule that defines a removed variant and is still standing. A
+ * rule the host already removed in the lobby is not a second choice to spend an ability on.
+ *
+ * Shared by The Broken, who picks one, and The Prototype, who gets a random one. Both destroy the
+ * same pool, so neither can invent a removal the rule card itself does not describe.
+ */
+export function getBreakableRuleIDs(state: BlowCowState) {
+  return getRemovableRuleIDs().filter((ruleID) => !isRuleRemoved(state, ruleID))
+}
+
+/** Breaking a rule leaves `character` alone, so the spent flag has to be read off the pick itself. */
+export function canBreakRule(state: BlowCowState, playerID: string) {
+  return isBroken(state, playerID) && state.players[playerID]?.brokenRemovedRuleID === null
+}
+
+export function isPrototype(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Prototype'
+}
+
+/**
+ * Defy needs a rule left to destroy, not just an unspent use. Both halves of the action are written
+ * on the card, so the ability is offered only when it can do all of what it says — which also keeps
+ * it from becoming a free way to dump a card once every removable rule is gone.
+ */
+export function canUseDefy(state: BlowCowState, playerID: string) {
+  const player = state.players[playerID]
+
+  return isPrototype(state, playerID)
+    && !player?.hasUsedDefyThisRound
+    && !player?.hasLeft
+    && (player?.hand.length ?? 0) > 0
+    && getBreakableRuleIDs(state).length > 0
+}
+
+export function isMastermind(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Mastermind'
+}
+
+/**
+ * Whose hand The Mastermind may open: every other player still in the game holding at least one
+ * card. An empty hand is excluded because the conspiracy commits its owner to a play, and a play out
+ * of nothing is a turn that can never be finished.
+ */
+export function getConspiracyTargetPlayerIDs(state: BlowCowState, playerID: string) {
+  return getActivePlayerIDs(state).filter((targetPlayerID) => targetPlayerID !== playerID
+    && state.players[targetPlayerID].hand.length > 0)
+}
+
+/**
+ * The character-and-round half of Conspire's legality, mirrored by the board. The turn checks live in
+ * `resolveConspire` alongside the table-room check, which is the one condition this action shares
+ * with the play it commits to: opening a hand the player cannot then play out of would strand the
+ * turn with no legal move left.
+ */
+export function canConspire(state: BlowCowState, playerID: string) {
+  const player = state.players[playerID]
+
+  return isMastermind(state, playerID)
+    && !player?.hasUsedConspireThisRound
+    && !player?.hasLeft
+    && !state.conspiracy
+    && getConspiracyTargetPlayerIDs(state, playerID).length > 0
+}
+
+/**
+ * The conspiracy this player owes a play on, or null. Scoped to the turn it was opened on so a
+ * record that somehow outlived its turn can never redirect a later play to someone else's hand.
+ */
+export function getOpenConspiracy(state: BlowCowState, playerID: string, turnNumber: number) {
+  const conspiracy = state.conspiracy
+  if (!conspiracy || conspiracy.playerID !== playerID || conspiracy.turnNumber !== turnNumber) {
+    return null
+  }
+
+  return conspiracy
+}
+
 function canUseGrandmasterBSOverride(state: BlowCowState, playerID: string) {
   return isGrandmaster(state, playerID) && !state.players[playerID]?.hasUsedGrandmasterBSOverride
 }
@@ -1587,12 +1838,18 @@ function getDreamerDeclaredCardCount(state: BlowCowState, playerID: string, actu
   return isDreamer(state, playerID) && actualCardCount > 2 ? 2 : actualCardCount
 }
 
+/*
+ * All four Dreamer cheat tests are gated on the rule they break still being in play. A cheat is only
+ * a cheat against a live rule: once the Rank Change or Max Cards On Table card is gone, everyone may
+ * do the thing, so the play is honest and there is nothing for an accusation to catch.
+ */
 function canDreamerRepeatPreviousTrump(
   state: BlowCowState,
   playerID: string,
   nextTrumpRank: BlowCowRank | null,
 ) {
   return nextTrumpRank !== null
+    && !isRuleRemoved(state, 'rankChange')
     && state.round.trumpRank === null
     && state.round.previousTrumpRank !== null
     && state.round.previousTrumpRank === nextTrumpRank
@@ -1601,6 +1858,7 @@ function canDreamerRepeatPreviousTrump(
 
 function didDreamerRepeatPreviousTrump(state: BlowCowState, play: BlowCowTablePlay) {
   return play.wasTrumpSelection
+    && !isRuleRemoved(state, 'rankChange')
     && state.round.previousTrumpRank !== null
     && play.claimedRank === state.round.previousTrumpRank
     && isDreamer(state, play.playerID)
@@ -1611,7 +1869,9 @@ function didDreamerPlayExtraCards(state: BlowCowState, play: BlowCowTablePlay) {
 }
 
 function didDreamerExceedTableLimit(state: BlowCowState, play: BlowCowTablePlay) {
-  return isDreamer(state, play.playerID) && getTableCardCount(state.table) > state.round.maxCardsOnTable
+  return isDreamer(state, play.playerID)
+    && !isRuleRemoved(state, 'maxCardsOnTable')
+    && getTableCardCount(state.table) > state.round.maxCardsOnTable
 }
 
 /**
@@ -1882,11 +2142,13 @@ function createBSResolution(
   // Dreamer's rule-breaking is out of scope here and belongs to `accuseDreamer`, which is why the
   // Reverse Rule no longer has a Dreamer exception to make room for.
   const targetCharacter = state.players[targetPlayerID]?.character ?? null
-  const targetWasHonest = targetPlay.cards.every((card) => isTrumpCard(card, trumpRank, targetCharacter))
-  const reverseRuleTriggered = state.table.plays.flatMap((play) => {
-    const playCharacter = state.players[play.playerID]?.character ?? null
-    return play.cards.filter((card) => countsTowardReverseRule(card, trumpRank, playCharacter))
-  }).length >= 4
+  const targetWasHonest = targetPlay.cards.every((card) => isTrumpCardInMatch(state, card, trumpRank, targetCharacter))
+  // Removing the Reverse Rule does not change the count; it stops the count from mattering.
+  const reverseRuleTriggered = !isRuleRemoved(state, 'reverse')
+    && state.table.plays.flatMap((play) => {
+      const playCharacter = state.players[play.playerID]?.character ?? null
+      return play.cards.filter((card) => countsTowardReverseRule(card, trumpRank, playCharacter))
+    }).length >= 4
   const defaultPunishedPlayerID = targetWasHonest ? callerPlayerID : targetPlayerID
   const punishedPlayerID = reverseRuleTriggered
     ? (defaultPunishedPlayerID === callerPlayerID ? targetPlayerID : callerPlayerID)
@@ -1979,36 +2241,67 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     ? ' Change Direction is also available, but Accuse can catch it before the turn ends.'
     : ''
 
-  if (!trumpRank) {
-    return `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play, or pass.${directionActionDetail}`
+  const canPass = !isRuleRemoved(state, 'pass')
+  // With the table cap gone, a full table no longer closes Play, so the two stop being exclusive.
+  const canPlayMore = isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable
+
+  // A conspiracy leaves exactly one legal move, so the status names it instead of listing an action
+  // space that no longer applies.
+  if (state.conspiracy?.playerID === currentPlayerID) {
+    const conspiracyLabel = `${playerLabel} opened ${formatPlayerLabel(state, state.conspiracy.targetPlayerID)}'s hand and must play out of it.`
+
+    return trumpRank
+      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${conspiracyLabel}`
+      : `Round ${state.round.roundNumber}. ${conspiracyLabel} A trump rank is chosen with it.`
   }
+
+  if (!trumpRank) {
+    return canPass
+      ? `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play, or pass.${directionActionDetail}`
+      : `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play.${directionActionDetail}`
+  }
+
+  const tableSummary = `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}.`
 
   if (isFinalTwoResolutionTurn(state, currentPlayerID)) {
     const targetPlayerID = getDefaultBSTargetPlayerID(state, currentPlayerID)
     if (canReset) {
-      return `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Call Reset or Call BS while ${formatPlayerLabel(state, targetPlayerID ?? currentPlayerID)} waits on their final hidden play.${directionActionDetail}`
+      return `${tableSummary} ${playerLabel} may Call Reset or Call BS while ${formatPlayerLabel(state, targetPlayerID ?? currentPlayerID)} waits on their final hidden play.${directionActionDetail}`
     }
 
-    return `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Call BS while ${formatPlayerLabel(state, targetPlayerID ?? currentPlayerID)} waits on their final hidden play.${directionActionDetail}`
+    return `${tableSummary} ${playerLabel} may Call BS while ${formatPlayerLabel(state, targetPlayerID ?? currentPlayerID)} waits on their final hidden play.${directionActionDetail}`
   }
 
-  if (canReset && hasBSTarget) {
-    return hasPawnEnPassantTarget
-      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Call Reset, Call BS, En Passant, or Pass.${directionActionDetail}`
-      : `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Call Reset, Call BS, or Pass.${directionActionDetail}`
+  /*
+   * Assembled rather than written out per case. Every removable rule can take an action off this
+   * list, and seven hand-written sentences would each need the same set of branches.
+   */
+  const availableActions = [
+    ...(canPlayMore ? ['Play'] : []),
+    ...(canReset ? ['Call Reset'] : []),
+    ...(hasBSTarget ? ['Call BS'] : []),
+    ...(hasBSTarget && hasPawnEnPassantTarget ? ['En Passant'] : []),
+    ...(canPass ? ['Pass'] : []),
+  ]
+
+  if (availableActions.length === 0) {
+    return `${tableSummary} ${playerLabel} has no legal action left this turn.${directionActionDetail}`
   }
 
-  if (canReset) {
-    return `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Call Reset or Pass.${directionActionDetail}`
+  return `${tableSummary} ${playerLabel} may ${formatActionList(availableActions)}.${directionActionDetail}`
+}
+
+/** `A`, `A or B`, `A, B, or C` — the Oxford comma matches the sentences this replaced. */
+function formatActionList(actions: string[]) {
+  if (actions.length <= 1) {
+    return actions.join('')
   }
 
-  if (hasBSTarget) {
-    return hasPawnEnPassantTarget
-      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Play, Call BS, En Passant, or Pass.${directionActionDetail}`
-      : `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Play, Call BS, or Pass.${directionActionDetail}`
+  if (actions.length === 2) {
+    return `${actions[0]} or ${actions[1]}`
   }
 
-  return `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} may Play or Pass.${directionActionDetail}`
+  return `${actions.slice(0, -1).join(', ')}, or ${actions[actions.length - 1]}`
 }
 
 function buildGameOverSummary(state: BlowCowState): BlowCowGameOver {
@@ -2072,7 +2365,15 @@ function getRoundStartPlayerOrder(state: BlowCowState) {
 
 function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statusMessage: string) {
   state.round.roundNumber += 1
-  state.round.direction = toggleDirection(state.round.direction)
+  if (!isRuleRemoved(state, 'directionChange')) {
+    state.round.direction = toggleDirection(state.round.direction)
+  }
+  // Before the starting player is picked, not with the other per-round flags below: the round that
+  // just ended is what The Privileged claim is measured against, and that claim is read right here.
+  for (const player of Object.values(state.players)) {
+    player.wasPunishedLastRound = player.wasPunishedThisRound
+    player.wasPunishedThisRound = false
+  }
   state.round.startingPlayerID = getDefaultStartingPlayerID(state, nextStartingPlayerID) ?? nextStartingPlayerID
   state.round.pendingStartingPlayerID = null
   state.round.previousTrumpRank = state.round.trumpRank ?? state.round.previousTrumpRank
@@ -2084,11 +2385,14 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.bsResolution = null
   state.resetResolution = null
   state.accusation = null
-  // Both are round-scoped: nothing from the old round stays accusable, and everyone gets their one
-  // accusation back.
+  // All round-scoped: nothing from the old round stays accusable, and everyone gets their one
+  // accusation back, The Prototype their one Defy, and The Mastermind their one Conspire.
   state.directionTamper = null
+  state.conspiracy = null
   for (const player of Object.values(state.players)) {
     player.hasUsedAccusationThisRound = false
+    player.hasUsedDefyThisRound = false
+    player.hasUsedConspireThisRound = false
   }
   clearPendingRevealIDs(state)
   updateRoundCapacity(state)
@@ -2132,6 +2436,16 @@ function revealPendingPlayAtTurnStart(
 ) {
   const pendingPlay = getPendingRevealPlay(state, currentPlayerID)
   if (!pendingPlay) {
+    return
+  }
+
+  /*
+   * Without the Reveal Rule nothing is flipped at the start of a turn, so the pointer is dropped
+   * rather than acted on and the play stays face down until a BS call or a Reset opens it. The Spy
+   * goes with it: their ability only ever chose how much of this reveal happened.
+   */
+  if (isRuleRemoved(state, 'reveal')) {
+    state.players[currentPlayerID].pendingRevealPlayID = null
     return
   }
 
@@ -2386,6 +2700,9 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   G.players[currentPlayerID].turnStartingDirection = G.round.direction
   // The window on a direction tamper is the turn it happened in, so a new turn closes it.
   G.directionTamper = null
+  // A conspiracy is paid off by the play it commits to, so one still standing here belongs to a turn
+  // that ended some other way — an accusation resolving mid-turn, or a match restored mid-flight.
+  G.conspiracy = null
   G.players[currentPlayerID].matchStats.turnsInGame += 1
   ensureArchiveTurn(G, currentPlayerID, ctx.turn)
   revealPendingPlayAtTurnStart(G, currentPlayerID, ctx.turn, random?.Shuffle)
@@ -2464,7 +2781,12 @@ function validateCommonPlay(
     return false
   }
 
-  if (nextTrumpRank !== null && state.round.previousTrumpRank === nextTrumpRank && !canDreamerRepeatPreviousTrump(state, playerID, nextTrumpRank)) {
+  if (
+    nextTrumpRank !== null
+    && !isRuleRemoved(state, 'rankChange')
+    && state.round.previousTrumpRank === nextTrumpRank
+    && !canDreamerRepeatPreviousTrump(state, playerID, nextTrumpRank)
+  ) {
     return false
   }
 
@@ -2476,7 +2798,9 @@ function validateCommonPlay(
     return false
   }
 
-  return isDreamer(state, playerID) || getTableCardCount(state.table) + cardIDs.length <= state.round.maxCardsOnTable
+  return isDreamer(state, playerID)
+    || isRuleRemoved(state, 'maxCardsOnTable')
+    || getTableCardCount(state.table) + cardIDs.length <= state.round.maxCardsOnTable
 }
 
 type BlowCowPlayMode = 'manual' | 'random'
@@ -2492,14 +2816,24 @@ function performPlay(
     return INVALID_MOVE
   }
 
-  const selectedCards = removeCardsFromPlayerHand(G, playerID, cardIDs)
+  /*
+   * The only thing a conspiracy changes about a play is where the cards come from. It is still The
+   * Mastermind's play in every other respect — it lands in front of them, it makes them the latest
+   * non-passing player, and it is their name on the BS call that answers it. Emptying the target's
+   * hand this way is legal and is part of the bargain: they leave at the start of their next turn
+   * under the Leave Game Rule, which is a gift as often as it is a theft.
+   */
+  const conspiracy = getOpenConspiracy(G, playerID, ctx.turn)
+  const handSourcePlayerID = conspiracy?.targetPlayerID ?? playerID
+
+  const selectedCards = removeCardsFromPlayerHand(G, handSourcePlayerID, cardIDs)
   if (!selectedCards) {
     return INVALID_MOVE
   }
 
   const claimedRank = nextTrumpRank ?? G.round.trumpRank
   if (!claimedRank) {
-    addCardsToPlayerHand(G, playerID, selectedCards, 'other', ctx.turn)
+    addCardsToPlayerHand(G, handSourcePlayerID, selectedCards, 'other', ctx.turn)
     return INVALID_MOVE
   }
 
@@ -2509,10 +2843,12 @@ function performPlay(
   // now that it is scoped to a turn rather than to a play, and can happen on a turn with no play.
   const usedDreamerDirectionChange = isDreamer(G, playerID) && G.directionTamper?.playerID === playerID
   const usedDreamerExtraCardCount = isDreamer(G, playerID) && selectedCards.length > declaredCardCount
-  const usedDreamerExceededTableLimit = isDreamer(G, playerID) && getTableCardCount(G.table) + selectedCards.length > G.round.maxCardsOnTable
+  const usedDreamerExceededTableLimit = isDreamer(G, playerID)
+    && !isRuleRemoved(G, 'maxCardsOnTable')
+    && getTableCardCount(G.table) + selectedCards.length > G.round.maxCardsOnTable
   const playerCharacter = G.players[playerID].character
   const playerMatchStats = G.players[playerID].matchStats
-  const wasHonest = selectedCards.every((card) => isTrumpCard(card, claimedRank, playerCharacter))
+  const wasHonest = selectedCards.every((card) => isTrumpCardInMatch(G, card, claimedRank, playerCharacter))
     && !usedDreamerRepeatTrump
     && !usedDreamerExtraCardCount
     && !usedDreamerExceededTableLimit
@@ -2525,42 +2861,50 @@ function performPlay(
     playerMatchStats.lieCount += 1
   }
 
-  if (playMode === 'random') {
-    appendHistoryEvent(
-      G,
-      'action',
-      `${formatPlayerLabel(G, playerID)} used The Drunkard`,
-      `Randomly selected ${selectedCards.length} card(s) from hand before playing.`,
-      playerID,
-      ctx.turn,
-    )
-  }
-
+  /*
+   * A random play is never announced. Nothing separates it from a manual one on the wire either —
+   * the archive keeps `playMode` for the replay, and `hideSecretState` empties the archive before it
+   * reaches a client — so the table cannot tell whether The Drunkard chose those cards or drew them.
+   * That uncertainty is the whole ability: an announced random play would be a free tell.
+   */
   createPlay(G, playerID, selectedCards, declaredCardCount, claimedRank, ctx.turn, nextTrumpRank !== null)
   G.round.trumpRank = nextTrumpRank ?? G.round.trumpRank
   G.round.status = 'inProgress'
   G.round.passStreak = 0
   G.round.lastNonPassingPlayerID = playerID
+  // The debt the conspiracy created is paid. Clearing it here rather than at turn end is what stops
+  // a second play in the same turn from reaching back into a hand that was opened once.
+  if (conspiracy) {
+    G.conspiracy = null
+  }
+
+  const conspiracyDetailSuffix = conspiracy
+    ? ` The card(s) came out of ${formatPlayerLabel(G, conspiracy.targetPlayerID)}'s hand.`
+    : ''
+  const playDetail = nextTrumpRank !== null
+    ? `Selected ${nextTrumpRank} as trump and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}`
+    : `Claimed ${claimedRank} and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}`
+
   appendHistoryEvent(
     G,
     'action',
     `${formatPlayerLabel(G, playerID)} played ${declaredCardCount} card(s)`,
-    nextTrumpRank !== null
-      ? `Selected ${nextTrumpRank} as trump and placed ${declaredCardCount} card(s) face down.`
-      : `Claimed ${claimedRank} and placed ${declaredCardCount} card(s) face down.`,
+    playDetail,
     playerID,
     ctx.turn,
   )
   appendArchiveTurnAction(G, playerID, ctx.turn, {
     kind: 'play',
-    detail: nextTrumpRank !== null
-      ? `Selected ${nextTrumpRank} as trump and placed ${declaredCardCount} card(s) face down.`
-      : `Claimed ${claimedRank} and placed ${declaredCardCount} card(s) face down.`,
-    characterUsed: playMode === 'random'
+    detail: playDetail,
+    characterUsed: conspiracy
+      ? 'The Mastermind'
+      : playMode === 'random'
       ? 'The Drunkard'
       : usedDreamerRepeatTrump || usedDreamerDirectionChange || usedDreamerExtraCardCount || usedDreamerExceededTableLimit
       ? 'The Dreamer'
       : null,
+    // Whose hand the cards left, which for an ordinary play is nobody's business but the player's own.
+    targetPlayerID: conspiracy?.targetPlayerID ?? null,
     cards: selectedCards,
     declaredCardCount,
     claimedRank,
@@ -2655,7 +2999,7 @@ function resolveDreamerSneakPlay(
 
   const claimedRank = G.round.trumpRank
   const playerMatchStats = G.players[playerID].matchStats
-  const wasHonest = selectedCards.every((card) => isTrumpCard(card, claimedRank, G.players[playerID].character))
+  const wasHonest = selectedCards.every((card) => isTrumpCardInMatch(G, card, claimedRank, G.players[playerID].character))
 
   playerMatchStats.playCount += 1
   playerMatchStats.cardsPlayed += selectedCards.length
@@ -2709,14 +3053,8 @@ function resolveCatHideCard(
   }
 
   targetPlay.rehiddenCardIDs = [...new Set([...(targetPlay.rehiddenCardIDs ?? []), targetCardID])]
-  appendHistoryEvent(
-    G,
-    'action',
-    `${formatPlayerLabel(G, playerID)} used The Cat`,
-    `Flipped ${formatCardLabel(targetCard)} face down on the table.`,
-    playerID,
-    ctx.turn,
-  )
+  // Deliberately silent in the log. The card visibly flips for everyone anyway, so a history line
+  // only adds noise; the archive still records the flip for the replay.
   appendArchiveTurnAction(G, playerID, ctx.turn, {
     kind: 'hideTableCard',
     detail: `Flipped ${formatCardLabel(targetCard)} face down on the table.`,
@@ -2776,6 +3114,188 @@ function resolveSeekerCharacterChoice(
     detail: `Took ${requestedCharacterName} from the character pool.`,
     characterUsed: 'The Seeker',
   })
+}
+
+/**
+ * The Broken tears one rule card out of the match.
+ *
+ * Not turn-bound, for the same reason The Seeker's pick is not: the choice belongs to the start of
+ * the match, and making the table wait on one player's screen is the one thing a start-of-game
+ * ability must not do. The consequence is real and deliberate — a rule can vanish mid-turn, so every
+ * enforcement site reads `G.rules` at the moment it runs rather than caching a decision.
+ *
+ * Refused while a resolution is running, so a procedure that has already been decided cannot have
+ * its own rules pulled out from under it half-way through.
+ */
+function resolveBrokenRuleRemoval(
+  context: BlowCowMoveContext,
+  args?: BlowCowBreakRuleArgs,
+) {
+  const { G, ctx, playerID } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G)) {
+    return INVALID_MOVE
+  }
+
+  const player = G.players[playerID]
+  if (!player || player.hasLeft || !canBreakRule(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  const requestedRuleID = args?.ruleID
+  if (!isBlowCowRuleID(requestedRuleID) || !getBreakableRuleIDs(G).includes(requestedRuleID)) {
+    return INVALID_MOVE
+  }
+
+  const ruleTitle = getRuleDefinition(requestedRuleID).title
+  G.rules[requestedRuleID] = 'removed'
+  player.brokenRemovedRuleID = requestedRuleID
+
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, playerID)} used The Broken`,
+    `Removed the ${ruleTitle} from the game. ${getRuleDefinition(requestedRuleID).removedDescription ?? ''}`.trim(),
+    playerID,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'breakRule',
+    detail: `Removed the ${ruleTitle} from the game.`,
+    characterUsed: 'The Broken',
+  })
+  G.tableStatus = `${ruleTitle} was removed from this match by The Broken.`
+}
+
+/** The line the log adds under a Defy, in its own alarmed style. Destroying a rule should feel wrong. */
+export const DEFY_HISTORY_OMEN = 'Your defiance has corrupted the game!'
+
+/**
+ * The Prototype destroys a card out of their own hand and a rule card off the table of rules.
+ *
+ * Turn-bound and explicitly free: it costs the turn nothing, so the player still acts afterwards.
+ * That is why this never touches `pendingRevealPlayID`, the pass streak, or the turn — the only
+ * things it moves are the hand, the rules, and the once-a-round flag.
+ *
+ * The rule is drawn rather than chosen, so unlike The Broken the target is the shuffle's business.
+ * Emptying the hand here is legal and is often the point: a player with no cards leaves at the start
+ * of their next turn under the Leave Game Rule, which this action does not need to duplicate.
+ */
+function resolveDefy(
+  context: BlowCowMoveContext,
+  args?: BlowCowDefyArgs,
+) {
+  const { G, ctx, playerID, random } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+    return INVALID_MOVE
+  }
+
+  if (!canUseDefy(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  const targetCardID = args?.cardID
+  if (typeof targetCardID !== 'string') {
+    return INVALID_MOVE
+  }
+
+  const destroyableRuleIDs = getBreakableRuleIDs(G)
+  const destroyedRuleID = shuffleCards([...destroyableRuleIDs], random?.Shuffle)[0]
+
+  const destroyedCards = removeCardsFromPlayerHand(G, playerID, [targetCardID])
+  if (!destroyedCards) {
+    return INVALID_MOVE
+  }
+
+  const destroyedCard = destroyedCards[0]
+  const ruleTitle = getRuleDefinition(destroyedRuleID).title
+  G.rules[destroyedRuleID] = 'removed'
+  G.players[playerID].hasUsedDefyThisRound = true
+
+  /*
+   * The rule is named and the card is not. Which rule died is everybody's business — it changes the
+   * game they are all playing — but the card came out of a hidden hand, and naming it would hand the
+   * table a free look at cards nobody paid to see. The archive still records which card it was.
+   */
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, playerID)} used The Prototype`,
+    `Destroyed a card from hand and the ${ruleTitle}. ${getRuleDefinition(destroyedRuleID).removedDescription ?? ''}`.trim(),
+    playerID,
+    ctx.turn,
+    DEFY_HISTORY_OMEN,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'defy',
+    detail: `Destroyed ${formatCardLabel(destroyedCard)} from hand and the ${ruleTitle}.`,
+    characterUsed: 'The Prototype',
+    cards: [destroyedCard],
+  })
+  G.tableStatus = buildTurnStatus(G, playerID)
+}
+
+/**
+ * The Mastermind opening another player's hand, and committing to playing out of it.
+ *
+ * Deliberately not a peek. Conspire spends itself the moment it lands and leaves the turn with
+ * exactly one legal move — `play`, or `selectTrumpAndPlay` before the round has a trump — so the
+ * information and the obligation arrive together. `pass`, `callBS` and `callReset` all refuse while
+ * it stands, which is why the table-room check happens here rather than being discovered afterwards:
+ * opening a hand that cannot be played out of would strand the turn with nothing legal left.
+ *
+ * The conspiracy itself is public, because the victim's hand is about to shrink for reasons nothing
+ * else on the table would explain. What their cards actually are stays between them and The
+ * Mastermind — see `hideSecretState`.
+ */
+function resolveConspire(
+  context: BlowCowMoveContext,
+  args?: BlowCowConspireArgs,
+) {
+  const { G, ctx, playerID } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+    return INVALID_MOVE
+  }
+
+  if (!canConspire(G, playerID) || isFinalTwoResolutionTurn(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  // Room for the smallest play the conspiracy can end in. Anything larger is the play's own problem,
+  // and `validateCommonPlay` still checks it.
+  if (!isRuleRemoved(G, 'maxCardsOnTable') && getTableCardCount(G.table) >= G.round.maxCardsOnTable) {
+    return INVALID_MOVE
+  }
+
+  const targetPlayerID = args?.targetPlayerID
+  if (typeof targetPlayerID !== 'string' || !getConspiracyTargetPlayerIDs(G, playerID).includes(targetPlayerID)) {
+    return INVALID_MOVE
+  }
+
+  G.conspiracy = {
+    playerID,
+    targetPlayerID,
+    turnNumber: ctx.turn,
+  }
+  G.players[playerID].hasUsedConspireThisRound = true
+
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, playerID)} used The Mastermind`,
+    `Opened ${formatPlayerLabel(G, targetPlayerID)}'s hand. This turn's play comes out of it.`,
+    playerID,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'conspire',
+    detail: `Opened ${formatPlayerLabel(G, targetPlayerID)}'s hand and must play out of it this turn.`,
+    characterUsed: 'The Mastermind',
+    targetPlayerID,
+    // The whole hand as it stood when it was opened: the archive is the only record of what The
+    // Mastermind actually got to see, and `hideSecretState` empties it before any client reads it.
+    cards: cloneCards(G.players[targetPlayerID].hand),
+  })
+  G.tableStatus = buildTurnStatus(G, playerID)
 }
 
 /**
@@ -2927,6 +3447,11 @@ function resolveBS(context: BlowCowMoveContext, args?: BlowCowCallBSArgs) {
     return INVALID_MOVE
   }
 
+  // An open conspiracy owes the table a play. See `resolveConspire`.
+  if (getOpenConspiracy(G, playerID, ctx.turn)) {
+    return INVALID_MOVE
+  }
+
   const resolvedTarget = resolveBSTargetSelection(G, playerID, args?.targetPlayerID)
   const trumpRank = G.round.trumpRank
 
@@ -3016,6 +3541,15 @@ function resolveAccuseDreamer(context: BlowCowMoveContext, args?: BlowCowAccuseD
   }
 
   if (G.players[playerID].hasLeft || G.players[playerID].hasUsedAccusationThisRound) {
+    return INVALID_MOVE
+  }
+
+  /*
+   * The one thing that closes the accusation window for its owner. An accusation ends the round, and
+   * `beginNextRound` clears the conspiracy with it — so without this, The Mastermind could open a
+   * hand, read it, and then accuse their way out of the play they committed to.
+   */
+  if (getOpenConspiracy(G, playerID, ctx.turn)) {
     return INVALID_MOVE
   }
 
@@ -3116,6 +3650,7 @@ function finalizeAccusation(context: BlowCowMoveContext, args?: BlowCowFinalizeA
   )
 
   G.players[punishedPlayerID].matchStats.punishmentCount += 1
+  G.players[punishedPlayerID].wasPunishedThisRound = true
   G.accusation = null
 
   appendHistoryEvent(
@@ -3319,9 +3854,11 @@ function finalizeBSResolution(
   const punishmentLabels = punishmentCards.map((card) => formatCardLabel(card))
   const revealedTargetLabels = targetPlayCards.map((card) => formatCardLabel(card))
   const targetCharacter = G.players[resolution.targetPlayerID]?.character ?? null
-  const targetLiedAboutCards = targetPlayCards.some((card) => !isTrumpCard(card, resolution.trumpRank, targetCharacter))
+  const targetLiedAboutCards = targetPlayCards.some((card) => !isTrumpCardInMatch(G, card, resolution.trumpRank, targetCharacter))
   const outcomeDetail = punishment.reverseRuleTriggered
     ? `Four or more ${resolution.trumpRank}s were on the table, so the punishment was reversed.`
+    : isRuleRemoved(G, 'reverse')
+    ? 'The Reverse Rule is not in play, so the default punishment stood.'
     : `Fewer than four ${resolution.trumpRank}s were on the table, so the default punishment stood.`
   const cardLieDetail = targetLiedAboutCards
     ? ' The hidden play was not all trump.'
@@ -3339,6 +3876,7 @@ function finalizeBSResolution(
   )
 
   G.players[punishment.punishedPlayerID].matchStats.punishmentCount += 1
+  G.players[punishment.punishedPlayerID].wasPunishedThisRound = true
   if (punishment.unpunishedPlayerID === resolution.callerPlayerID) {
     G.players[resolution.callerPlayerID].matchStats.bsWinCount += 1
   }
@@ -3399,6 +3937,11 @@ function finalizeBSResolution(
 function resolveReset(context: BlowCowMoveContext) {
   const { G, ctx, playerID } = context
   if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || getTableCardCount(G.table) < G.round.maxCardsOnTable) {
+    return INVALID_MOVE
+  }
+
+  // An open conspiracy owes the table a play. See `resolveConspire`.
+  if (getOpenConspiracy(G, playerID, ctx.turn)) {
     return INVALID_MOVE
   }
 
@@ -3514,14 +4057,29 @@ function finalizeResetResolution(
 }
 
 function hideSecretState(state: BlowCowState, playerID: string | null) {
+  /*
+   * The one hand a player may see that is not their own. Scoped to the conspirator's view alone, so
+   * the table learns that a hand was opened without learning what was in it, and it closes the
+   * moment the conspiracy is paid off by the play. `playerID` is null for the spectator view, and a
+   * conspiracy always names a seat, so no unseated viewer can match this.
+   */
+  const conspiracy = state.conspiracy?.playerID === playerID ? state.conspiracy : null
+
   const nextPlayers = Object.fromEntries(
     Object.entries(state.players).map(([targetPlayerID, player]) => [
       targetPlayerID,
       {
         ...player,
-        hand: playerID === targetPlayerID
+        hand: playerID === targetPlayerID || conspiracy?.targetPlayerID === targetPlayerID
           ? player.hand
           : player.hand.map((card) => createHiddenCard(card)),
+        /*
+         * The Drunkard's random plays are unannounced, and this flag is the one field that would
+         * answer the question the silence exists to keep open. Forced rather than removed, so the
+         * shape stays the same for every seat, and safe to force because it is read only by the
+         * leave check on the server — no client has ever looked at it.
+         */
+        hasUsedManualPlay: playerID === targetPlayerID ? player.hasUsedManualPlay : false,
       },
     ]),
   ) as Record<string, BlowCowPlayerState>
@@ -3579,6 +4137,7 @@ function createStagedBlowCowState(
   const speedMultiplier = resolveSpeedMultiplier(setupData)
   const useCharacters = resolveUseCharacters(setupData)
   const characterPool = useCharacters ? resolveCharacterPool(setupData) : []
+  const rules = resolveRules(setupData)
   const seatOrder = createSeatOrder(normalizedPlayerCount)
   const hostPlayerID = seatOrder[0] ?? '0'
   const history: BlowCowHistoryEvent[] = []
@@ -3590,6 +4149,7 @@ function createStagedBlowCowState(
     speedMultiplier,
     useCharacters,
     characterPool,
+    rules,
     seatOrder,
     players: Object.fromEntries(
       seatOrder.map((playerID, seatIndex) => [playerID, createEmptyPlayerState(playerID, seatIndex)]),
@@ -3613,6 +4173,7 @@ function createStagedBlowCowState(
     resetResolution: null,
     accusation: null,
     directionTamper: null,
+    conspiracy: null,
     history,
     telemetry: {
       events: [],
@@ -3625,7 +4186,7 @@ function createStagedBlowCowState(
     state,
     'system',
     'Room staged',
-    `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, and is waiting for the host to start the match.`,
+    `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, ${formatRulesSummary(rules)}, and is waiting for the host to start the match.`,
     null,
     0,
   )
@@ -3652,6 +4213,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.resetResolution = null
   state.accusation = null
   state.directionTamper = null
+  state.conspiracy = null
   state.round.roundNumber = 1
   state.round.status = 'awaitingTrumpSelection'
   state.round.direction = 'counterclockwise'
@@ -3682,10 +4244,15 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
     player.hasUsedManualPlay = false
     player.hasUsedGrandmasterBSOverride = false
     player.hasUsedAccusationThisRound = false
+    player.hasUsedDefyThisRound = false
+    player.hasUsedConspireThisRound = false
+    player.wasPunishedThisRound = false
+    player.wasPunishedLastRound = false
     player.hasLeft = false
     player.leaveOrder = null
     player.leaveEffect = null
     player.seekerPickedCharacter = null
+    player.brokenRemovedRuleID = null
   }
 
   state.round.startingPlayerID = getDefaultStartingPlayerID(state, shuffledSeatOrder[0] ?? state.hostPlayerID) ?? state.hostPlayerID
@@ -3811,9 +4378,40 @@ export const BlowCowGame = {
     seekCharacter: (context: BlowCowMoveContext, args: BlowCowSeekCharacterArgs) => {
       return resolveSeekerCharacterChoice(context, args)
     },
+    breakRule: (context: BlowCowMoveContext, args: BlowCowBreakRuleArgs) => {
+      return resolveBrokenRuleRemoval(context, args)
+    },
+    defy: (context: BlowCowMoveContext, args: BlowCowDefyArgs) => {
+      return resolveDefy(context, args)
+    },
+    conspire: {
+      /*
+       * The entire point of the move is state the client does not have: the target's hand faces are
+       * masked in every local copy, so an optimistic run would open a hand of card backs and then be
+       * corrected. Deciding it on the server means the hand arrives already unmasked.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext, args: BlowCowConspireArgs) => {
+        return resolveConspire(context, args)
+      },
+    },
     pass: (context: BlowCowMoveContext, args?: BlowCowPassArgs) => {
       const { G, ctx, playerID, events } = context
       if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isFinalTwoResolutionTurn(G, playerID)) {
+        return INVALID_MOVE
+      }
+
+      /*
+       * Without the Pass Rule there is no Pass action at all. The Foreigner and The Streamer both
+       * hang off passing, so removing this card takes The Foreigner's ability with it and makes The
+       * Streamer's penalty unavoidable. That is the cost of the removal, not a special case.
+       */
+      if (isRuleRemoved(G, 'pass')) {
+        return INVALID_MOVE
+      }
+
+      // An open conspiracy owes the table a play. See `resolveConspire`.
+      if (getOpenConspiracy(G, playerID, ctx.turn)) {
         return INVALID_MOVE
       }
 
@@ -3824,7 +4422,7 @@ export const BlowCowGame = {
 
       G.players[playerID].matchStats.passCount += 1
       G.round.passStreak += 1
-      if (G.round.passStreak >= getActivePlayerCount(G)) {
+      if (!isRuleRemoved(G, 'passEnding') && G.round.passStreak >= getActivePlayerCount(G)) {
         G.resetResolution = createResetResolution(G, playerID, 'roundReturn')
         G.tableStatus = `${formatPlayerLabel(G, playerID)} passed. Everyone passed, so the table cards are returning to their owners.`
         appendArchiveTurnAction(G, playerID, ctx.turn, {

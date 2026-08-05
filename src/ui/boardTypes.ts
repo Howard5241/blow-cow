@@ -62,6 +62,8 @@ export type HistoryEvent = {
   kind: BlowCowState['history'][number]['kind']
   title: string
   detail: string
+  /** A closing line rendered in its own alarmed style. Absent on almost every event. */
+  omen?: string
 }
 
 /** Which side of the ring a seat sits on, used to point its action bubble at the hub. */

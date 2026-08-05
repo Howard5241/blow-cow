@@ -173,6 +173,83 @@
 - Those removed sets remain on the table in a permanent scored area that is separate from the active round table.
 - Scored 4-of-a-kind sets do not count toward any active table interaction, including `MaxCardsOnTable`, `Call Reset`, the Reverse Rule, or any other effect that checks cards currently on the round table.
 
+## Rule Cards
+- Every rule above is also a card, so that a rule can be shown to players and, eventually, changed by
+  a character's ability.
+- Each rule card has a status: `Active`, `Removed`, or `Upgraded`.
+- Every rule card starts `Active`.
+- An `Upgraded` rule card's title is written with a trailing `+`, such as `Pass Ending Rule+`.
+- A rule card can only take a status it defines. Some rules may not be removed, and most may not be
+  upgraded.
+- `Removed` is enforced. A removed rule genuinely stops applying for the rest of the match, at the
+  moment it is removed.
+- `Upgraded` is not enforced yet. An upgraded card is shown to players with its `+` title and its
+  upgraded description, but the game still plays the rule as written above.
+- `The Broken` removes one rule card at the start of the game. Only a rule that defines a `Removed`
+  variant can be chosen, and only one that is still `Active`.
+- `The Prototype` destroys one card from their hand and one random rule card with the `Defy` action,
+  once per round. The rule is drawn from the same pool `The Broken` picks from: rules that define a
+  `Removed` variant and are still `Active`. `Defy` is unavailable once that pool is empty.
+
+| Rule Card | Removed | Upgraded |
+| --- | --- | --- |
+| Reverse Rule | yes | no |
+| Pass Rule | yes | no |
+| Joker Rule | yes | no |
+| Max Cards On Table Rule | yes | yes |
+| Max Cards Per Play Rule | no | yes |
+| Direction Change Rule | yes | yes |
+| Pass Ending Rule | yes | yes |
+| Reveal Rule | yes | no |
+| Leave Game Rule | no | yes |
+| Final Ranking Rule | no | yes |
+| Call Reset Rule | no | yes |
+| Rank Change Rule | yes | no |
+
+### Removed Rule Cards
+- `Reverse Rule`: punishment is never reversed. Whoever the BS resolution names takes the table,
+  however many trump-rank cards are on it.
+- `Pass Rule`: `Pass` is not an available action. Every turn has to be resolved some other way.
+- `Joker Rule`: Jokers have no rank at all, so any play containing one is always a lie.
+- `Max Cards On Table Rule`: the table has no limit, and a play may push it to any size. `Call Reset`
+  still unlocks at the original `MaxCardsOnTable` value.
+- `Direction Change Rule`: `Direction` never changes on its own between rounds.
+- `Pass Ending Rule`: consecutive passes never end a round.
+- `Reveal Rule`: played cards stay face down. Nothing is revealed at the start of a turn.
+- `Rank Change Rule`: the same trump rank may be chosen in consecutive rounds.
+
+#### Character Interactions With Removed Rules
+A removed rule takes any ability built on top of it with it. This is a consequence of the removal,
+not a special case:
+- `Pass Rule` removed: The Foreigner has no way to use their ability, and The Streamer's leave
+  penalty becomes unavoidable.
+- `Joker Rule` removed: The Confused's Jacks are worthless too, because the ability makes them
+  function as Jokers and a Joker is now nothing.
+- `Reveal Rule` removed: The Spy has nothing to modify, since their ability only ever chose how much
+  of the start-of-turn reveal happened.
+- `Rank Change Rule` or `Max Cards On Table Rule` removed: the matching Dreamer cheat stops being a
+  cheat, so the play is honest and `Accuse` cannot catch it.
+
+### Upgraded Rule Cards
+- `Max Cards On Table Rule+`: `MaxCardsOnTable` is doubled for every player count.
+- `Max Cards Per Play Rule+`: a play puts down at most 3 cards at a time instead of 2.
+- `Direction Change Rule+`: `Direction` no longer flips on its own. It carries over from the last
+  round, and the starting player sets it on their first turn of the round by clicking the direction
+  arrow, the same way The Contrarian does.
+- `Pass Ending Rule+`: the round ends after `2n` consecutive passes instead of `n`.
+- `Leave Game Rule+`: running out of cards no longer removes a player. A player leaves when they make
+  a successful BS call while holding no cards, meaning they called BS and the challenged player was
+  punished as a result. A player with an empty hand may still take any action except `Play`. If every
+  player starts a round with an empty hand, everyone leaves at once, in turn order beginning with the
+  player whose turn it is.
+- `Final Ranking Rule+`: points are ignored. Placements compare leave order only, and leaving earlier
+  ranks higher.
+- `Call Reset Rule+`: `Call Reset` no longer gathers, shuffles, and redistributes. Each player simply
+  takes back the cards in front of them. The caller still becomes the starting player of the next
+  round.
+
+None of the upgraded variants above are enforced yet.
+
 ## Final Ranking
 - First place goes to the player with the fewest points.
 - Lower points are always better.

@@ -2,7 +2,7 @@
 
 - Render condition: `App` shows the table shell when `activeRoom` exists, and `BlowCowBoard` renders this page when the in-room match state is active or finished.
 - `App` provides `table-shell`; `BlowCowBoard` renders the live board inside it after the staging screen has been started by the host.
-- Layout order: board hero, player ring with its centre hub, then the bottom play strip.
+- Layout order: player ring with its centre hub, then the bottom play strip. The board hero band above them is staging-only; a live match has no header of its own.
 - Players are arranged around a ring like seats at a real table. The ring is rotated so the viewing player owns the bottom angle, meaning the same physical seat appears at a different angle in each client. The viewing player's own block is then dropped out of that bottom angle and down onto the hand stage, so they sit at the near edge of the table with their hand and buttons either side of them.
 
 ## Layout Tree
@@ -17,6 +17,15 @@ main.app-shell.table-mode
           button.primary-button.win-screen-continue
       div.endgame-overlay?
       div.character-card-overlay?
+        section.character-card-overlay-panel
+          div.character-card-overlay-header
+            div.character-card-overlay-copy
+              h2
+              p.room-note
+            button.secondary-button
+          div.character-card-overlay-body
+            div.character-card-overlay-card
+              img.character-card-overlay-image
       div.character-card-overlay.seeker-picker-overlay?
         section.character-card-overlay-panel.seeker-picker-panel
           div.character-card-overlay-header
@@ -27,6 +36,31 @@ main.app-shell.table-mode
             p.room-note
             button.primary-button
       div.board-overlay.history-overlay?
+      div.board-overlay.rules-overlay?
+        div.rule-card-grid
+          article.rule-card*
+            div.rule-card-illustration
+              img?
+              span.rule-card-illustration-placeholder?
+              span.rule-card-status-tag?
+            h3.rule-card-title
+            p.rule-card-description
+            div.rule-card-footer?
+        div.rule-card-pager
+          button.secondary-button
+          span.rule-card-pager-status
+          button.secondary-button
+      div.board-overlay?                       (break rule picker, The Broken only)
+        section.board-overlay-panel.rules-overlay-panel.break-rule-panel
+          div.board-overlay-header
+          div.rule-card-grid
+            article.rule-card*
+              div.rule-card-footer
+                button.rule-card-select-button
+          div.rule-card-pager
+          div.break-rule-footer
+            p.room-note
+            button.primary-button
       div.board-bs-flash?
       div.bs-call-trail?
         img.bs-call-trail-mark*
@@ -34,7 +68,7 @@ main.app-shell.table-mode
       div.board-error-toast?
       div.front-card-entry-layer?
       div.punishment-move-layer?
-      div.board-hero
+      div.board-hero?
       div.player-ring
         article.seat-block*
           img.seat-hover-frame?
@@ -68,9 +102,24 @@ main.app-shell.table-mode
           div.hand-play-row
             div.hand-scroll-viewport
               div.hand-scroll-animation-layer?
+              p.conspiracy-banner?
+                span.conspiracy-banner-mark
               div.hand-scroll-row
+              div.hand-meta-row
+                div.header-title-with-info.hand-meta-title
+                  h2
+                  span.inline-info-trigger
+                  button.inline-icon-button.copy-room-button
+                span.status-pill
+                span.status-pill
             div.hand-action-row
-              p.hand-action-heading
+              div.hand-action-top
+                div.hand-action-toolbar
+                  button.subtle-button.rules-toggle
+                  button.subtle-button.history-toggle
+                    span.history-count-pill
+                  button.secondary-button
+                p.hand-action-heading
               div.action-button-item*
                 button.action-button
                   img.action-button-icon?
@@ -99,7 +148,9 @@ main.app-shell.table-mode
 | Endgame Chart | `svg` | `endgame-chart` | Shows each player's cards-in-hand line over the full match timeline. | Inside Endgame Chart Panel. |
 | Endgame Chart Legend | `div` | `endgame-chart-legend` | Labels each player line and the final hand count at match end. | Below Endgame Chart inside Endgame Chart Panel. |
 | Character Card Overlay | `div` | `character-card-overlay` | Enlarges one character card so the sprite text is readable. | Conditional child of Board Root; sits above the other overlays. |
-| Character Card Overlay Panel | `section` | `character-card-overlay-panel` | Holds the enlarged character card and close action. Its subtitle adds `Taken with The Seeker` when that seat traded its original card in. | Child of Character Card Overlay. |
+| Character Card Overlay Panel | `section` | `character-card-overlay-panel` | Holds the enlarged character card and close action. Its subtitle adds `Taken with The Seeker` when that seat traded its original card in. Carries no kicker, and never scrolls. | Child of Character Card Overlay. |
+| Character Card Overlay Body | `div` | `character-card-overlay-body` | The perspective stage the card leans in, and the flex child that gives up height first when the panel is short. | Second child of Character Card Overlay Panel. |
+| Character Card Tilt Frame | `div` | `character-card-overlay-card` | Tilts the card toward the pointer and hosts the glare and foil layers. Carries the sprite's own `136 / 185` aspect ratio, so its box is exactly the picture. | Wraps the Character Card Overlay Image. |
 | Seeker Picker Overlay | `div` | `character-card-overlay seeker-picker-overlay` | The Seeker's one-time character choice. Reuses the enlarged-card overlay shell. Mounted only on the client holding The Seeker, and only while it is still unspent. | Conditional child of Board Root, at the same level as Character Card Overlay. |
 | Seeker Picker Panel | `section` | `character-card-overlay-panel seeker-picker-panel` | Wider version of the enlarged-card panel, holding the header, the card grid, and the confirm footer. | Child of Seeker Picker Overlay. |
 | Seeker Picker Grid | `div` | `seeker-picker-grid` | Scrolling grid of every character card still available to take. | Middle of Seeker Picker Panel. |
@@ -107,23 +158,41 @@ main.app-shell.table-mode
 | Seeker Picker Footer | `div` | `seeker-picker-footer` | Pairs a status line with the confirm action, which reads `Take {Name}` once a card is picked. | Last row of Seeker Picker Panel. |
 | Board Overlay | `div` | `board-overlay` | Modal backdrop for the History panel. | Conditional child of Board Root. |
 | Board Overlay Panel | `section` | `board-overlay-panel` | Shared modal panel shell with a header, subtitle, and close action. | Child of Board Overlay. |
-| History Overlay | `section` | `board-overlay-panel history-overlay-panel` | Shows the full event log. | Opened by History Toggle in Board Hero Actions. |
+| History Overlay | `section` | `board-overlay-panel history-overlay-panel` | Shows the full event log. | Opened by History Toggle in Hand Action Toolbar. |
 | History Entry | `article` | `history-entry` | Shows one logged event. | Repeated inside History Overlay. |
+| Rules Overlay | `section` | `board-overlay-panel rules-overlay-panel` | Shows the match's rule cards, four to a page. Carries no header copy, only a Close button. | Opened by Rules Toggle in Hand Action Toolbar. |
+| Rule Card Grid | `div` | `rule-card-grid` | Lays the current page's rule cards out in a single row of four, dropping to two columns below 1040px and one below 720px. | Body of Rules Overlay. |
+| Rule Card | `article` | `rule-card`, `removed`, `upgraded` | Shows one rule's illustration, title, and description. `removed` tints the card red and drains the illustration of colour; `upgraded` tints it gold. | Repeated inside Rule Card Grid, once per rule. |
+| Rule Card Illustration | `div` | `rule-card-illustration` | Holds the rule's art, or a placeholder when the sprite is missing. An `upgraded` card uses the rule's `… Rule 2.png` art; every other status uses the plain `… Rule.png`. | First child of Rule Card. |
+| Rule Card Status Tag | `span` | `rule-card-status-tag`, `removed`, `upgraded` | Names a non-active status over the illustration. | Conditional child of Rule Card Illustration. |
+| Rule Card Title | `h3` | `rule-card-title` | Names the rule, with a trailing `+` when upgraded. | Inside Rule Card. |
+| Rule Card Description | `p` | `rule-card-description` | Describes what the rule does at its current status. | Inside Rule Card. |
+| Rule Card Pager | `div` | `rule-card-pager` | Steps between pages of rule cards. | Below Rule Card Grid. |
+| Rule Card Pager Status | `span` | `rule-card-pager-status` | Shows the current page number and the page count. | Between the two pager buttons. |
+| Rule Card Footer | `div` | `rule-card-footer` | Holds whatever controls the surface attaches to a card. Absent in the read-only Rules Overlay. | Last child of Rule Card, pinned to its bottom. |
+| Break Rule Overlay | `section` | `board-overlay-panel rules-overlay-panel break-rule-panel` | The Broken's start-of-game choice, built on the same rule-card deck. Mounted only on that player's client. | Opened by Break Rule in the Hand Action Row, and open by default until dismissed. |
+| Rule Card Select Button | `button` | `rule-card-select-button`, `selected` | Selects one rule to remove. Disabled and labelled `Cannot Be Removed` on a rule with no removed variant. | Inside Rule Card Footer in the Break Rule Overlay. |
+| Break Rule Footer | `div` | `break-rule-footer` | Pairs a status line with the `Break Rule` confirm action. | Last row of Break Rule Overlay. |
 | Board Error Toast | `div` | `board-error-toast`, `error-banner` | Shows in-room sync or room errors. | Conditional overlay inside Board Root. |
 | Front Card Entry Layer | `div` | `front-card-entry-layer` | Hosts animated card travel when a seat's front-card row gains new cards. | Conditional overlay inside Board Root. |
 | Front Card Entry Card | `div` | `front-card-entry-card` | Animates one newly added front card from that seat's Hand Stat Value into its Front Card Row. | Repeated inside Front Card Entry Layer. |
 | Punishment Move Layer | `div` | `punishment-move-layer` | Hosts animated table-card travel during BS punishment, all-pass returns, and Reset gather/deal sequences. | Conditional overlay inside Board Root. |
 | Punishment Move Card | `div` | `punishment-move-card` | Animates one table card toward its current travel target. | Repeated inside Punishment Move Layer. |
-| Board Hero | `div` | `board-hero` | Holds room identity and top-level room actions. | First section inside Board Root. |
-| Live Match Copy Block | `div` | `board-hero-copy-wrap` | Holds the `Live match` title, room-code tooltip, and copy action. | Left side of Board Hero. |
+| Board Hero | `div` | `board-hero` | Room identity and top-level room actions, as a header band. **Staging only.** During a live match it is not rendered at all, and its contents live in Hand Meta Row and Hand Action Toolbar instead. | First section inside Board Root while staging. |
+| Live Match Copy Block | `div` | `board-hero-copy-wrap` | Holds the `Room staging` title, room-code tooltip, and copy action. | Left side of Board Hero. |
+| Board Hero Actions | `div` | `board-hero-actions` | Holds socket state, server state, and the leave-room action. | Right side of Board Hero. |
+| Hand Meta Row | `div` | `hand-meta-row` | The live match's room identity strip: `Live match` title, room-code tooltip, copy action, and the two status pills, all at reduced size. Sits in the space the hand cards leave below them. | Last child of Hand Scroll Viewport. |
+| Live Match Title Block | `div` | `header-title-with-info hand-meta-title` | Groups the title with its info icon and copy button. | First item in Hand Meta Row. |
 | Live Match Info Icon | `span` | `inline-info-trigger`, `inline-info-icon` | Shows the room code in a tooltip. | Beside the `Live match` title. |
 | Copy Room Code Button | `button` | `inline-icon-button`, `copy-room-button` | Copies the room code to the clipboard. | Beside the `Live match` title. |
-| Board Hero Actions | `div` | `board-hero-actions` | Holds the History toggle, socket state, server state, and leave-room action. | Right side of Board Hero. |
-| History Toggle | `button` | `subtle-button history-toggle` | Opens the History Overlay. | First action in Board Hero Actions during a live match. |
+| Socket Status Pill | `span` | `status-pill` | Shows live socket connection state. | Inside Hand Meta Row during a live match, inside Board Hero Actions while staging. |
+| Server Status Pill | `span` | `status-pill` | Shows server availability state. | Beside Socket Status Pill. |
+| Hand Action Top | `div` | `hand-action-top` | The action row's full-width first line, pairing the room controls with the turn heading. Wraps on narrow widths. | First item in Hand Action Row. |
+| Hand Action Toolbar | `div` | `hand-action-toolbar` | Holds the Rules toggle, History toggle, and leave-room action at reduced size. | Left side of Hand Action Top. |
+| Rules Toggle | `button` | `subtle-button rules-toggle` | Opens the Rules Overlay. | First control in Hand Action Toolbar. |
+| History Toggle | `button` | `subtle-button history-toggle` | Opens the History Overlay. | Second control in Hand Action Toolbar. |
 | History Count Pill | `span` | `history-count-pill` | Shows the number of history items. | Child of History Toggle. |
-| Socket Status Pill | `span` | `status-pill` | Shows live socket connection state. | Inside Board Hero Actions. |
-| Server Status Pill | `span` | `status-pill` | Shows server availability state. | Inside Board Hero Actions. |
-| Leave Room Button | `button` | `secondary-button` | Leaves the room and returns to the lobby. | Final action in Board Hero Actions. |
+| Leave Room Button | `button` | `secondary-button` | Leaves the room and returns to the lobby. | Last control in Hand Action Toolbar during a live match, last action in Board Hero Actions while staging. |
 | Player Ring | `div` | `player-ring` | Places one Seat Block per seat evenly around an ellipse, and hosts the Table Center Hub. Every seat is placed here, including the viewing player's. | Middle board section, painted above Bottom Play Strip. |
 | Seat Block | `article` | `seat-block`, `viewing-seat`, `acting-seat`, `target-seat`, `selectable-seat`, `selected-seat`, `focused-seat`, `accused-cheat-seat`, `punishment-impact`, `left-seat`, `disconnected-seat` | Shows one seat and, when selectable, carries the challenge controls. `viewing-seat` is dropped out of the bottom of the ellipse and into the Hand Stage's middle. `focused-seat` is scaled up and pulled onto the hub for that seat's reveal step, in either the BS or the Reset procedure. `accused-cheat-seat` turns the whole block red and pulses it once an accusation resolves, on the accused if it landed and on the accuser if it missed, until `Punish` is pressed. `punishment-impact` briefly punches and flashes red when the final punishment card arrives. | Repeated inside Player Ring, once per seat. Carries `data-seat-id`. |
 | Seat BS Call Frame | `div` | `seat-bs-call-frame` | A red `block_hover_icon.png`, framing the accused player's whole block for the length of a BS resolution, however long the caller takes over it. Painted by masking a flat red through the sprite's alpha. | Conditional child of the accused Seat Block. |
@@ -162,20 +231,26 @@ main.app-shell.table-mode
 | Bottom Play Strip | `section` | `bottom-play-strip` | Holds the hand panel. | Below Player Ring. |
 | Hand Stage | `div` | `hand-stage` | Shows the local hand, its tools, and the remaining action buttons. | Only panel in Bottom Play Strip; briefly flashes red when the viewing player is punished. |
 | Hand Play Row | `div` | `hand-play-row` | Places the hand scroller and the action row against opposite edges, reserving a clear column between them for the viewing player's Seat Block. | Only row of Hand Stage. |
-| Hand Scroll Viewport | `div` | `hand-scroll-viewport` | Provides a non-clipping positioning layer for hand add/remove animations around the hand scroller. | Wraps the Hand Animation Layer and Hand Scroll Row. |
-| Hand Scroll Row | `div` | `hand-scroll-row` | Holds the local hand cards. | Main content area of Hand Scroll Viewport. |
+| Hand Scroll Viewport | `div` | `hand-scroll-viewport` | Provides a non-clipping positioning layer for hand add/remove animations around the hand scroller. A column, so the hand keeps the top and Hand Meta Row is pushed to the floor of the reserved height. | Wraps the Hand Animation Layer, Hand Scroll Row, and Hand Meta Row. |
+| Hand Scroll Row | `div` | `hand-scroll-row`, `conspired` | Holds the local hand cards. Takes `conspired` while The Mastermind has another player's hand open, when the cards shown are that player's rather than the viewer's, and the row gains a tinted dashed frame to say so. | Main content area of Hand Scroll Viewport. |
+| Conspiracy Banner | `p` | `conspiracy-banner` | Names whose hand the strip is currently showing and that a play out of it is the only way to end the turn. Carries a `conspiracy-banner-mark` pill. | Conditional first child of Hand Scroll Viewport, above Hand Scroll Row, on The Mastermind's client only. |
 | Hand Animation Layer | `div` | `hand-scroll-animation-layer` | Temporarily shows departing hand cards during add/remove motion cues. | Conditional overlay inside Hand Scroll Viewport. |
 | Hand Card Button | `button` | `hand-card-button` | Selects or deselects a card from hand. Enabled on the viewing player's own turn, and also while The Dreamer's sneak window is open, since that move needs a selection made out of turn. | Repeated inside Hand Scroll Row. |
 | Hand Motion Card | `div` | `hand-motion-card` | Temporarily animates a card that just left the local hand area. | Repeated inside Hand Animation Layer. |
-| Hand Action Row | `div` | `hand-action-row` | Holds the turn heading plus `Play` / `Select Trump + Play`, `Pass`, `Call Reset`, and any character-specific action. | Right side of Hand Play Row. |
+| Hand Action Row | `div` | `hand-action-row` | Holds Hand Action Top plus `Play` / `Select Trump + Play`, `Pass`, `Call Reset`, and any character-specific action. | Right side of Hand Play Row. |
 | Seek Character Button | `button` | `action-button` | Reopens the Seeker Picker Overlay. Opens a panel rather than sending a move, and is the second control in this row that does not belong to the player on the clock. Carries no icon. | Inside its own Action Button Item, shown only while this player still holds The Seeker. |
+| Break Rule Button | `button` | `action-button` | Reopens the Break Rule Overlay. The third control in this row that does not belong to the player on the clock, and the second that opens a panel rather than sending a move. Carries no icon. | Inside its own Action Button Item, shown only while The Broken has not yet spent the ability. |
+| Defy Button | `button` | `action-button` | Destroys the one selected hand card and a random rule card for The Prototype. The only action-row control that leaves the turn running, which its tooltip says outright. Carries `defy_icon.png`. | Inside its own Action Button Item, shown only to The Prototype, and disabled once used this round or once no removable rule is left. |
 | Sneak Play Button | `button` | `action-button` | Sends exactly one selected card onto the table in front of The Dreamer during somebody else's turn, claiming the live trump, with no callout and no announcement. One of the two action-row controls that belong to a player who is not on the clock, and the only one that sends a move. Carries `sneak_play_icon.png`. | Inside its own Action Button Item, shown only to The Dreamer and only while another player is acting. |
+| Conspire Button | `button` | `action-button` | Opens the selected player's hand for The Mastermind and commits the turn to a play out of it. The only action-row control that takes the turn hostage rather than ending or leaving it, which its tooltip says outright. Carries `conspire_icon.png`. | Inside its own Action Button Item beside the Conspire Select, shown only to The Mastermind, and disabled once used this round, once the table is full, or once nobody else holds a card. |
 | Hand Action Heading | `p` | `hand-action-heading` | Reads `Your Turn`, or `{Name}'s Turn` when somebody else is acting. | Full-width first item of Hand Action Row, filling the space above the bottom-aligned buttons. |
-| Action Button Item | `div` | `action-button-item`, `trump-action-item`, `drunkard-random-item`, `foreigner-pass-item` | Wraps one action button and its tooltip; may also hold the inline trump selector, the Drunkard random-play selector, or the Foreigner pass selector. | Repeated inside Hand Action Row. |
+| Action Button Item | `div` | `action-button-item`, `trump-action-item`, `drunkard-random-item`, `mastermind-conspire-item`, `foreigner-pass-item` | Wraps one action button and its tooltip; may also hold the inline trump selector, the Drunkard random-play selector, the Mastermind target selector, or the Foreigner pass selector. | Repeated inside Hand Action Row. |
 | Trump Action Combo | `div` | `trump-action-combo` | Places the trump selector beside `Select Trump + Play`. | Used only for the select-trump action. |
 | Trump Select | `select` | `trump-select`, `trump-action-select` | Chooses a trump rank before the opening play. | Inside Trump Action Combo. |
 | Drunkard Random Combo | `div` | `drunkard-random-combo` | Places the Drunkard selectors beside `Play Random`. | Used only for the Drunkard random-play action. |
 | Drunkard Random Select | `select` | `drunkard-random-select` | Chooses how many random cards The Drunkard should play. | Inside Drunkard Random Combo. |
+| Mastermind Conspire Combo | `div` | `mastermind-conspire-combo` | Places the conspiracy-target selector beside `Conspire`. | Used only for the Mastermind conspire action. |
+| Mastermind Conspire Select | `select` | `mastermind-conspire-select` | Chooses whose hand The Mastermind opens. Lists every other player still in the game holding at least one card, and is wider than the rank selectors above it because it holds player names. | Inside Mastermind Conspire Combo. |
 | Foreigner Pass Combo | `div` | `foreigner-pass-combo` | Places the outside-card selector beside `Pass` for The Foreigner. | Used only for the Foreigner pass action. |
 | Foreigner Pass Select | `select` | `foreigner-pass-select` | Chooses the outside card, Joker, or `None` before the Foreigner passes. | Inside Foreigner Pass Combo. |
 | Action Button | `button` | `action-button` | Executes one move such as play, pass, or reset. | Main control inside Action Button Item. |
@@ -185,6 +260,7 @@ main.app-shell.table-mode
 
 ## Notes
 
+- A live match has no header band. The board hero was a full-width row of page furniture stacked above a board whose height is otherwise fixed, and it was what pushed the table past the viewport and put a scrollbar on the page. Its contents moved into the two pockets of space the hand stage already reserved and never filled: the identity half — title, room code, copy button, both status pills — into `hand-meta-row` under the hand cards, and the actions — Rules, History, Leave Room — onto the line that held only the turn heading. Everything moved is rendered smaller there, because a strip inside a panel is not a page header. Staging keeps the hero unchanged; it has no hand stage to move anything into.
 - The board is a flat mono felt. The per-round ambient accent that used to tint it in amber, coral, teal, cobalt, or lime is gone, along with its state, prop, and effect, so the only colour the board ever takes on is the BS flash.
 - `board-bs-flash` is keyed on `G.bsResolution.id`, so a new call restarts its animation and the element unmounts when the resolution clears. That needs no state and no timeout.
 - There is no announcement banner. Neither procedure narrates itself in prose: the focused block, the flipped cards, and the BS verdict label carry the whole story, which is also what keeps the middle of the felt clear for the focused Seat Block to travel into. The transient fail message is rendered at board level and floats over the felt rather than sitting in the hub's column, so appearing and clearing never reflows the trump badge or the direction control.
@@ -244,15 +320,30 @@ main.app-shell.table-mode
 - `turn.activePlayers` is set to `{ all: Stage.NULL }`, which makes every seat permanently active in boardgame.io's eyes. Without it `IsPlayerActive` falls back to `ctx.currentPlayer === playerID`, the framework silently discards every move from anybody else, and `BoardProps.isActive` goes false on their client — which would make every out-of-turn power impossible. The cost is that this game is now the sole authority on turn order: `performPlay`, `resolveDrunkardRandomPlay`, `pass`, `callBS`, `callReset` and `catHideCard` each check `ctx.currentPlayer` explicitly, and any new turn-bound move must carry its own guard. `sneakPlay` carries the inverse guard, refusing when the mover *is* on the clock. It also means a client can dispatch the `endTurn` event out of turn, which the framework used to prevent.
 - There is no `En Passant` button. The Pawn's en-passant target is one of the seats the server already accepts, so the Pawn hovers that Seat Block and presses `Call BS`.
 - When the viewing player is The Grandmaster and it is their turn, any seat with a hidden play can be challenged once. Spending the override is reported through the fail message on later attempts.
-- When the viewing player is The Cat and it is their turn, any face-up `front-card` in any Seat Block becomes a click target that flips back face down for everyone without changing gameplay legality.
-- Every action button pairs an icon with its label: `play_icon.png` for `Play` and `Select Trump + Play`; `play_random_icon.png` for `Play Random`; `sneak_play_icon.png` for `Sneak Play`; `pass_icon.png` for `Pass`; `reset_icon.png` for `Call Reset`. The sprites are white glyphs, so they are filtered to black on the light enabled button and left white but dimmed on the dark disabled one. `Seek Character` is the one action with no icon, there being no sprite for it.
+- When the viewing player is The Cat and it is their turn, any face-up `front-card` in any Seat Block becomes a click target that flips back face down for everyone without changing gameplay legality. The flip writes no history event and no telemetry: the card visibly turns over on every client already, so a log line would only repeat what the table just watched happen. The archive still records it.
+- The Privileged do not open the round after taking the table. `wasPunishedThisRound` is set by both punishment routes, `beginNextRound` rolls it into `wasPunishedLastRound` before it picks a starting player, and `getPrivilegedStartingPlayerID` skips a Privileged carrying that flag — so the seat that won the BS call or the accusation against them keeps the start it earned, for exactly one round. The flag is public like the punishment itself, and the Seat Block reads no differently for it.
+- Every action button pairs an icon with its label: `play_icon.png` for `Play` and `Select Trump + Play`; `play_random_icon.png` for `Play Random`; `sneak_play_icon.png` for `Sneak Play`; `pass_icon.png` for `Pass`; `reset_icon.png` for `Call Reset`; `defy_icon.png` for `Defy`; `conspire_icon.png` for `Conspire`. The sprites are white glyphs, so they are filtered to black on the light enabled button and left white but dimmed on the dark disabled one. `Seek Character` and `Break Rule` are the two actions with no icon, there being no sprite for either.
 - When the viewing player is The Drunkard, the action row can show a `Play Random` combo with a card-count selector and, before trump is live, the same trump selector used by the normal opening play.
+- A random play is never announced. It writes no history event and no telemetry of its own, and the ordinary play event that follows reads exactly as a manual one does, so nothing on any other client separates the two — the table cannot tell whether The Drunkard chose those cards or drew them, which is the whole ability. Only the archive keeps `playMode`, and `hideSecretState` empties the archive.
 - When the viewing player is The Foreigner, the `Pass` action can expose an inline selector for choosing an outside card, a Joker, or `None` before sending the pass move.
+- `Defy` is the one action in this row that does not end the turn, so the row stays live and the player still owes the table a real action afterwards. Its tooltip says so, because every other button here ends the turn and nothing else on screen would suggest this one is different. It reuses the ordinary hand selection rather than opening a picker — one selected card is the whole input — and clears that selection on the way out, the same as `Play`. The rule it destroys is drawn, not chosen, which is what separates it from The Broken; both draw from the same pool of removable rules still standing, so `Defy` disappears once that pool is empty rather than becoming a free way to discard. The history line names the rule but not the card: which rule died changes the game everyone is playing, while the card came out of a hidden hand and naming it would show the table cards nobody paid to see. Only the archive keeps the card, and `hideSecretState` empties the archive.
+- `Conspire` is the one action in this row that neither ends the turn nor leaves it alone: it takes the turn hostage. The moment it lands, the hand strip is showing somebody else's cards, `Pass`, `Call Reset`, `Call BS` and `Accuse` all refuse, and the only move left is a play out of the hand it opened. There is no cancel, which is the point — the peek and the obligation arrive together, so the ability can never be spent as a free look. Its own tooltip and every refusal message say so rather than leaving the player to discover it.
+- The borrowed hand is the only time `hand-scroll-row` shows cards the viewer does not own, and three things say so at once: the Conspiracy Banner above it, the tinted dashed frame on the row, and the play buttons' tooltips naming whose cards are about to be spent. The selection state, the Play buttons, and the callout text are all reused unchanged — only the seat the strip reads from moves, which is `handSourceSeatID`. That same value drives the hand add/remove animation refs, so swapping into a conspiracy reads as a seat change rather than as every card being dealt and discarded at once.
+- Only The Mastermind's own client sees those faces. `hideSecretState` unmasks exactly one extra hand, for exactly the seat named by `G.conspiracy.playerID`, and closes it again the moment the play clears the conspiracy. The conspiracy record itself is public, so every other client can see that a hand was opened and whose — just not what was in it.
 - The action row is otherwise entirely turn-bound, so `Sneak Play` and `Seek Character` are the two exceptions that make the row live while it is headed with somebody else's name. Showing them to The Dreamer and The Seeker alone gives nothing away, because characters are public anyway: `hideSecretState` does not mask `character`, and every Seat Block already shows its own character badge. Its tooltip explains the window; there is no fail message, because unlike `Call BS` and `Accuse` the button is genuinely disabled when the move would be refused.
 - `turn-direction-indicator` becomes a hover-highlighted button that flips the current direction for The Contrarian on their own turn, and for The Dreamer on any player's turn. Its mirrored counterclockwise glyph keeps a positive CSS rotation because mirroring reverses the perceived spin. For The Dreamer it is a cheat, measured against the direction the *current* turn opened on: flipping back within the same turn erases the tamper along with the advantage, and once that turn ends the tamper is uncatchable.
 - `front-card-row` keeps cards in their natural table order; face-up cards are not regrouped ahead of face-down cards. Cards overlap so a full row fits the block, but each card stays about half visible. Cards are never removed from the row, because their elements anchor the punishment and reset travel sequences.
 - A seat with no cards in front renders no front-card markup at all. `seat-front-cards` keeps its reserved height, so every Seat Block stays the same size and the ring radii, which assume a fixed block height, do not shift.
 - Character descriptions are not repeated in separate text because they already exist inside the character card sprites.
+- Rule cards are the deliberate exception to that. Their illustrations are pure art and carry no text, so the title and description are rendered as real text beside the sprite. A rule with no sprite yet falls back to a placeholder tile rather than a broken image, so the panel is readable before the art lands.
+- The Rules panel and the History panel are mutually exclusive: opening either closes the other, so two `board-overlay` panels never stack on the board.
+- Rule card statuses come from `G.rules`, which `hideSecretState` leaves untouched — every seat reads the same statuses, and there is nothing hidden to protect. The panel falls back to an all-active default when the field is absent, because a match staged before rule cards existed restores from `data/matches/` without it.
+- The Rules panel is paged rather than scrolled, four cards at a time. A fixed page size keeps every cell the same size and the panel a stable height, which a single scroll box does not. It also carries no header copy at all, only a Close button, because the cards are the content and the vertical space is better spent on them.
+- The page size is four because that is one row. `board-overlay-panel` is `max-height: 100%; overflow: auto`, so a second row of cards this size overflows the viewport and the panel grows a scrollbar. Twelve rules over three single-row pages is what keeps it from doing that — raising the page size brings the scrollbar back.
+- The panel is animated on three levels: it rises and fades as it opens, its cards deal themselves out left to right on a per-card delay, and paging replays that entrance with a horizontal slide whose direction follows the button pressed. The grid is keyed on the page index so a page turn remounts the cards and the entrance runs again. Cards lift and their art zooms slightly on hover; a removed card's art partly recovers its colour on hover so you can still see what was taken away. All of it is registered in the `prefers-reduced-motion` block.
+- Rule illustrations are cropped from the top edge (`object-position: center top`), not the centre, because the art puts its subject in the upper half.
+- A `removed` card is enforced: each removable rule has a matching branch at its enforcement site in `src/game/blowCowGame.ts`, all reached through `isRuleRemoved`. An `upgraded` card is not — the `+` title and upgraded description are shown, but the rule still plays as written in `RULES.md`. The lobby's House Rules overlay is where that distinction is stated, since this panel carries no header copy.
+- The deck itself is `src/ui/RuleCardDeck.tsx`, shared by three surfaces: this read-only panel, the lobby's House Rules editor, and The Broken's picker. Each passes a different `renderCardFooter`, which is what lets one set of cards carry no controls, status buttons, or a Select button.
 - Avatars come from `avatar_sprites/` and are picked from a seeded shuffle of `matchID` plus `playerID`, so they are unique within a match and identical in every client without entering game state.
 - `front-card-entry-layer` briefly animates new front cards from the owning seat's Hand Count Value into its Front Card Row.
 - Reset runs the same caller-driven reveal as BS before its own animation chain: after a short pause, each player with face-down cards is pulled to the centre in turn, the caller flips their cards and presses `Continue`, and only once every card is face up does the table gather into a pile at the Table Center Hub, flip and shuffle face down, and deal back out across the active seats. There is no Punish step; the gather follows the last `Continue` directly.
@@ -261,13 +352,19 @@ main.app-shell.table-mode
 - Punishment cards always animate toward `data-punishment-target-name` on the Seat Block name.
 - The seat callout is driven by the latest qualifying player action and fades out automatically after a short moment.
 - `endgame-chart-panel` is populated from authoritative game telemetry stored in `G.telemetry.events`, not from ad hoc client-side reconstruction.
-- `board-error-toast`, `punishment-move-layer`, `board-overlay`, `character-card-overlay`, `seeker-picker-overlay`, `win-screen-overlay`, and `endgame-overlay` are board-level overlays. `Escape` closes the topmost one, then falls through to clearing the seat selection.
+- `board-error-toast`, `punishment-move-layer`, `board-overlay` (the History, Rules, and Break Rule panels), `character-card-overlay`, `seeker-picker-overlay`, `win-screen-overlay`, and `endgame-overlay` are board-level overlays. `Escape` closes the topmost one, then falls through to clearing the seat selection.
 - The Seeker trades their card in for any other one still going spare, and the picker opens by itself at the start of the match. Choosing overwrites `character` outright, which is also what spends the ability: the server's whole permission check is `character === 'The Seeker'`, so it closes the moment the move lands and there is no separate used-flag anywhere.
 - Nothing about that choice freezes the table. `seekCharacter` is not turn-bound, so it can be made while anybody is acting, and no other client renders any part of the picker or waits on it. The picker's open state and the highlighted card are local React state for the same reason. It is still refused while a BS resolution, a Reset, or an accusation is running, like every other move, so a character cannot change underneath a procedure that has already been decided.
 - There is no deadline on the choice. One that expired would take the ability away from an unlucky player rather than from a slow one. The cost is that a Seeker can hold the card and pick reactively, which is a real strategic upgrade over choosing blind.
 - The picker offers `getSeekerCharacterChoices`: the room's own `characterPool`, minus every character already sitting at the table, minus The Seeker itself. Scoping it to the room pool rather than to every implemented character keeps the host's staging settings meaningful and inherits the rule keeping The Confused out of a Jack-less deck for free. A player who has already left still holds their card, so their character stays claimed.
 - Seeker Picker Option shows the card sprite and nothing else, and the footer names the choice rather than describing it. The sprite is the character sheet — it already carries the ability text, which is why this panel is wide and the cards are large instead of being a list of names with descriptions beside them.
+- The enlarged character card never scrolls. Character sprites are tall portraits, so on a short viewport the panel had nowhere to put the art and grew a scrollbar down its side. The kicker is gone, the heading, subtitle, and Close button are all sized down, and the art is capped by height rather than only by width, so it is the card that shrinks when the panel runs out of room. The panel uses `overflow: clip` with a clip margin rather than `hidden`, so the tilted card's near corner and its drop shadow can leave the box without a scrollbar coming back to reach them. The Seeker's picker is excluded from all of this: it reuses the same shell but scrolls its own card grid.
+- The tilt frame carries the sprite's aspect ratio itself — character cards are a uniform 816x1110, or `136 / 185` — rather than letting the image size it. The glare and the foil are painted on the frame, so a frame wider than the picture lights up empty panel beside the card. It also has to be the frame that the height cap lands on: an image sized inside a flex frame takes its width from `max-width` and never gives it back when `max-height` clamps the height, which left the box at its full width while the picture shrank inside it. With `aspect-ratio` on the frame the cap transfers back through the ratio and both axes shrink together. A sprite that ever ships at a different ratio letterboxes rather than stretching, and that ratio is what would need updating.
+- That card tilts toward the pointer, with a specular glare that follows it and a hard-edged foil band whose angle tracks the tilt, so the colours slide across the face as it turns. The handler writes four custom properties straight onto the node — pointer position, both tilt axes, and a lift factor — and never touches React state: it fires on every pointer move, and re-rendering a board this size at that rate would stutter. `prefers-reduced-motion` pins the tilt flat and keeps the lighting, which is not motion once nothing moves.
 - A taken card is public the instant it lands, like every character: the seat's badge simply changes. `seekerPickedCharacter` is the only surviving trace that the seat started as The Seeker, since `character` has been overwritten by then, and it surfaces as a `Taken with The Seeker` line in that seat's Character Card Overlay.
+- The Broken's picker follows The Seeker's shape exactly: opens by itself, dismissible, not turn-bound, refused while a resolution is running, and with no deadline. What differs is the spent flag. Breaking a rule leaves `character` alone, so `brokenRemovedRuleID` is what closes the picker and what `canBreakRule` reads.
+- The Broken's effect is public and immediate, unlike The Seeker's private-until-taken choice. `G.rules` changes for everyone the moment the move lands, so a rule can vanish mid-turn. Every enforcement site reads `G.rules` when it runs rather than caching a decision, which is what makes that safe.
+- The picker offers `getBreakableRuleIDs`: every rule that defines a removed variant and is still active. A rule the host already removed in the lobby is not a second target. Rules with no removed variant still render, dimmed, with a disabled `Cannot Be Removed` button — knowing what is safe is information worth showing.
 - `table-shell` keeps a persistent ambient tint and noise layer that changes to a different random palette at the start of each new round.
 - When the viewing player is punished, the red flash is shown on `hand-stage`.
 - The room code lives behind the info icon beside `Live match`, and the adjacent button copies it.

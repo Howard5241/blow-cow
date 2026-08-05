@@ -1,22 +1,46 @@
 import assert from 'node:assert/strict'
 import { BLOW_COW_IMPLEMENTED_CHARACTER_NAMES, type BlowCowCharacterName } from '../src/game/blowCowCharacters.ts'
 import {
+  BLOW_COW_RULE_DEFINITIONS,
+  BLOW_COW_RULE_IDS,
+  canRuleTakeStatus,
+  createDefaultRulesState,
+  formatRuleTitle,
+  getRuleDescription,
+  getRuleStatusOptions,
+  isDefaultRulesSelection,
+  normalizeRulesSelection,
+  type BlowCowRuleID,
+  type BlowCowRulesState,
+} from '../src/game/blowCowRules.ts'
+import {
   type BlowCowAccuseDreamerArgs,
   type BlowCowAdvanceBSRevealArgs,
   type BlowCowAdvanceResetRevealArgs,
   type BlowCowBeginAccusationPunishmentArgs,
   type BlowCowBeginBSPunishmentArgs,
   BlowCowGame,
+  CARD_BACK_SPRITE,
   type BlowCowCallBSArgs,
   type BlowCowFinalizeAccusationArgs,
   type BlowCowCatHideCardArgs,
+  type BlowCowBreakRuleArgs,
+  type BlowCowConspireArgs,
+  type BlowCowDefyArgs,
+  canBreakRule,
+  canConspire,
+  canUseDefy,
+  getConspiracyTargetPlayerIDs,
   createDeck,
   createInitialBlowCowState,
   DEFAULT_BLOW_COW_SPEED_MULTIPLIER,
+  DEFY_HISTORY_OMEN,
   formatLeaveEffectLabel,
   type BlowCowFinalizeResetResolutionArgs,
+  getBreakableRuleIDs,
   getDefaultStandardRankCount,
   getSeekerCharacterChoices,
+  getTableCardCount,
   isCardFaceUpOnTable,
   isSeeker,
   type BlowCowSeekCharacterArgs,
@@ -79,6 +103,18 @@ const catHideCardMove = BlowCowGame.moves.catHideCard as (
 const seekCharacterMove = BlowCowGame.moves.seekCharacter as (
   context: TestContext,
   args: BlowCowSeekCharacterArgs,
+) => unknown
+const breakRuleMove = BlowCowGame.moves.breakRule as (
+  context: TestContext,
+  args: BlowCowBreakRuleArgs,
+) => unknown
+const defyMove = BlowCowGame.moves.defy as (
+  context: TestContext,
+  args: BlowCowDefyArgs,
+) => unknown
+const conspireMove = BlowCowGame.moves.conspire.move as (
+  context: TestContext,
+  args: BlowCowConspireArgs,
 ) => unknown
 const finalizeBSResolutionMove = BlowCowGame.moves.finalizeBSResolution as (
   context: TestContext,
@@ -182,6 +218,10 @@ function createScenarioState(numPlayers = 2): BlowCowState {
     state.players[playerID].hasUsedManualPlay = false
     state.players[playerID].hasUsedGrandmasterBSOverride = false
     state.players[playerID].hasUsedAccusationThisRound = false
+    state.players[playerID].hasUsedDefyThisRound = false
+    state.players[playerID].hasUsedConspireThisRound = false
+    state.players[playerID].wasPunishedThisRound = false
+    state.players[playerID].wasPunishedLastRound = false
     state.players[playerID].hasLeft = false
     state.players[playerID].leaveOrder = null
   }
@@ -1527,10 +1567,27 @@ function runDrunkardRulesCheck() {
     assert.equal(state.players['0'].matchStats.playCount, 1)
     assert.equal(state.players['0'].matchStats.cardsPlayed, 2)
     assertCardSet(state.table.plays[0]?.cards ?? [], ['spades_king.png', 'hearts_queen.png'])
-    assert.match(
-      state.history.find((entry) => entry.title.includes('used The Drunkard'))?.detail ?? '',
-      /randomly selected 2 card\(s\) from hand/i,
+    // A random play must be indistinguishable from a manual one in the log: the whole point of the
+    // ability is that nobody can tell. The archive, which never reaches a client, still records it.
+    assert.ok(!state.history.some((entry) => entry.title.includes('The Drunkard')))
+    assert.equal(
+      state.archive.turns
+        .filter((archivedTurn) => archivedTurn.turnNumber === 1 && archivedTurn.playerID === '0')
+        .flatMap((archivedTurn) => archivedTurn.actions)
+        .find((action) => action.kind === 'play')?.playMode,
+      'random',
     )
+
+    // Nor may the wire answer it. Player 1 has played manually and player 0 randomly; to each other
+    // the two seats must be indistinguishable, while each still sees the truth about their own.
+    state.players['1'].hasUsedManualPlay = true
+    const drunkardPlayerView = BlowCowGame.playerView as (
+      args: { G: BlowCowState; playerID: string | null },
+    ) => BlowCowState
+
+    assert.equal(drunkardPlayerView({ G: state, playerID: '0' }).players['1'].hasUsedManualPlay, false)
+    assert.equal(drunkardPlayerView({ G: state, playerID: '1' }).players['0'].hasUsedManualPlay, false)
+    assert.equal(drunkardPlayerView({ G: state, playerID: '1' }).players['1'].hasUsedManualPlay, true)
   }
 
   {
@@ -1682,8 +1739,13 @@ function runCatRulesCheck() {
 
     assert.equal(hideResult, undefined)
     assert.deepEqual(state.table.plays[0]?.rehiddenCardIDs, [revealedCard.id])
+    // The flip is public on the table, so it is left out of the log entirely. The archive keeps it.
+    assert.ok(!state.history.some((entry) => entry.title.includes('The Cat')))
     assert.match(
-      state.history.find((entry) => entry.title.includes('used The Cat'))?.detail ?? '',
+      state.archive.turns
+        .filter((archivedTurn) => archivedTurn.turnNumber === 4 && archivedTurn.playerID === '0')
+        .flatMap((archivedTurn) => archivedTurn.actions)
+        .find((action) => action.kind === 'hideTableCard')?.detail ?? '',
       /flipped Q of Hearts face down on the table/i,
     )
 
@@ -1887,6 +1949,129 @@ function runPrivilegedRulesCheck() {
       state.history.find((entry) => entry.title.includes('triggered The Privileged'))?.detail ?? '',
       /1 point was added/i,
     )
+  }
+
+  {
+    /*
+     * Taking the table costs The Privileged the next round's start, so the seat that won the BS call
+     * against them actually keeps what it earned. The claim lapses for exactly one round.
+     */
+    const state = createScenarioState()
+    const { events, record } = createEventRecorder()
+
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].character = 'The Privileged'
+    state.players['1'].hand = [card('spades_king.png')]
+    state.round.trumpRank = 'Q'
+    state.round.lastNonPassingPlayerID = '1'
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards: [card('clubs_03.png')],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 2,
+        revealedAtTurn: 3,
+        wasTrumpSelection: false,
+      },
+      {
+        id: 'play-1',
+        playerID: '1',
+        cards: [card('spades_07.png')],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 4,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['1'].pendingRevealPlayID = 'play-1'
+
+    const callResult = callBSMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 5,
+      },
+      events,
+      playerID: '0',
+    })
+
+    assert.equal(callResult, undefined)
+    completeBSReveal(state, events, 5)
+    assert.ok(state.bsResolution)
+
+    const finalizeBSResult = finalizeBSResolutionMove({
+      G: state,
+      ctx: {
+        currentPlayer: '0',
+        turn: 5,
+      },
+      events,
+      playerID: '0',
+    }, {
+      resolutionID: state.bsResolution.id,
+    })
+
+    assert.equal(finalizeBSResult, undefined)
+    assert.equal(state.players['1'].matchStats.punishmentCount, 1)
+    assert.equal(state.players['1'].wasPunishedLastRound, true)
+    assert.equal(state.round.roundNumber, 2)
+    assert.equal(state.round.startingPlayerID, '0')
+    assert.equal(record.nextPlayerID, '0')
+
+    // One round later, with nobody punished, the claim comes straight back.
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].hand = [card('diamonds_king.png')]
+    state.round.status = 'inProgress'
+    state.round.trumpRank = 'K'
+    state.round.passStreak = 1
+    state.round.lastNonPassingPlayerID = '0'
+    state.table.plays = [
+      {
+        id: 'play-2',
+        playerID: '0',
+        cards: [card('hearts_king.png')],
+        claimedRank: 'K',
+        playedAtRound: 2,
+        playedAtTurn: 6,
+        revealedAtTurn: 6,
+        wasTrumpSelection: false,
+      },
+    ]
+
+    const passResult = passMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 7,
+      },
+      events,
+      playerID: '1',
+    })
+
+    assert.equal(passResult, undefined)
+    completeResetReveal(state, events, 7)
+    assert.ok(state.resetResolution)
+
+    const finalizeReturnResult = finalizeResetResolutionMove({
+      G: state,
+      ctx: {
+        currentPlayer: '1',
+        turn: 7,
+      },
+      events,
+      playerID: '1',
+    }, {
+      resolutionID: state.resetResolution.id,
+    })
+
+    assert.equal(finalizeReturnResult, undefined)
+    assert.equal(state.round.roundNumber, 3)
+    assert.equal(state.players['1'].wasPunishedLastRound, false)
+    assert.equal(state.round.startingPlayerID, '1')
+    assert.equal(record.nextPlayerID, '1')
   }
 }
 
@@ -3449,6 +3634,813 @@ function runSetupValidationCheck() {
   )
 }
 
+function runRuleCardsCheck() {
+  // Every ID has exactly one definition, and no definition exists for an ID that was never declared.
+  assert.equal(BLOW_COW_RULE_DEFINITIONS.length, BLOW_COW_RULE_IDS.length)
+  assert.deepEqual(BLOW_COW_RULE_DEFINITIONS.map((definition) => definition.id), [...BLOW_COW_RULE_IDS])
+
+  /*
+   * Removability and upgradability are derived from the copy, so a rule offering a variant it has no
+   * description for would silently show the active text under a changed title.
+   */
+  for (const definition of BLOW_COW_RULE_DEFINITIONS) {
+    assert.equal(canRuleTakeStatus(definition.id, 'active'), true)
+    assert.equal(canRuleTakeStatus(definition.id, 'removed'), definition.removedDescription !== undefined)
+    assert.equal(canRuleTakeStatus(definition.id, 'upgraded'), definition.upgradedDescription !== undefined)
+
+    for (const status of getRuleStatusOptions(definition.id)) {
+      assert.notEqual(getRuleDescription(definition, status), '')
+    }
+  }
+
+  // The four rules the design fixes in place must never offer a Removed option.
+  for (const ruleID of ['maxCardsPerPlay', 'leaveGame', 'finalRanking', 'callReset'] as const) {
+    assert.equal(canRuleTakeStatus(ruleID, 'removed'), false)
+    assert.deepEqual(getRuleStatusOptions(ruleID), ['active', 'upgraded'])
+  }
+
+  const defaultRules = createDefaultRulesState()
+  assert.equal(isDefaultRulesSelection(defaultRules), true)
+  assert.equal(Object.keys(defaultRules).length, BLOW_COW_RULE_IDS.length)
+  assert.ok(BLOW_COW_RULE_IDS.every((ruleID) => defaultRules[ruleID] === 'active'))
+
+  // Only upgraded rules carry the plus, so a removed card never reads as an improvement.
+  const reverseDefinition = BLOW_COW_RULE_DEFINITIONS[0]
+  assert.equal(formatRuleTitle(reverseDefinition, 'active'), 'Reverse Rule')
+  assert.equal(formatRuleTitle(reverseDefinition, 'removed'), 'Reverse Rule')
+  assert.equal(
+    formatRuleTitle(BLOW_COW_RULE_DEFINITIONS.find((definition) => definition.id === 'passEnding')!, 'upgraded'),
+    'Pass Ending Rule+',
+  )
+
+  // The sanitiser is the only thing standing between a hand-built selection and `G`.
+  const normalized = normalizeRulesSelection({
+    joker: 'removed',
+    maxCardsPerPlay: 'removed',
+    passEnding: 'upgraded',
+    notARule: 'removed',
+    reveal: 'sideways',
+  })
+  assert.equal(normalized.joker, 'removed')
+  assert.equal(normalized.maxCardsPerPlay, 'active')
+  assert.equal(normalized.passEnding, 'upgraded')
+  assert.equal(normalized.reveal, 'active')
+  assert.equal(Object.keys(normalized).length, BLOW_COW_RULE_IDS.length)
+  assert.ok(!('notARule' in normalized))
+  assert.deepEqual(normalizeRulesSelection(undefined), defaultRules)
+  assert.deepEqual(normalizeRulesSelection([]), defaultRules)
+
+  assert.equal(
+    BlowCowGame.validateSetupData?.({ rules: { joker: 'removed', callReset: 'upgraded' } }),
+    undefined,
+  )
+  assert.equal(
+    BlowCowGame.validateSetupData?.({ rules: { notARule: 'removed' } } as unknown as BlowCowSetupData),
+    'Rule selection contains an unknown rule.',
+  )
+  assert.equal(
+    BlowCowGame.validateSetupData?.({ rules: { joker: 'sideways' } } as unknown as BlowCowSetupData),
+    'Rule selection contains an unknown rule status.',
+  )
+  assert.equal(
+    BlowCowGame.validateSetupData?.({ rules: { leaveGame: 'removed' } }),
+    'leaveGame does not support the removed status.',
+  )
+  assert.equal(
+    BlowCowGame.validateSetupData?.({ rules: [] } as unknown as BlowCowSetupData),
+    'Choose a valid rule selection.',
+  )
+
+  // A default match leaves every card active, and a configured one survives the deal untouched.
+  assert.deepEqual(createInitialBlowCowState(2, undefined, { rankSelectionMode: 'default' }).rules, defaultRules)
+
+  const configuredState = createInitialBlowCowState(2, undefined, {
+    rankSelectionMode: 'default',
+    rules: { reverse: 'removed', maxCardsOnTable: 'upgraded' },
+  })
+  assert.equal(configuredState.rules.reverse, 'removed')
+  assert.equal(configuredState.rules.maxCardsOnTable, 'upgraded')
+  assert.equal(configuredState.rules.pass, 'active')
+  assert.equal(configuredState.archive.initial?.rules.reverse, 'removed')
+
+  /*
+   * Rule cards are reference material every seat reads, so unlike hands and the archive they have to
+   * survive `playerView` intact.
+   */
+  const rulesPlayerView = BlowCowGame.playerView as (
+    args: { G: BlowCowState; playerID: string | null },
+  ) => BlowCowState
+  assert.deepEqual(rulesPlayerView({ G: configuredState, playerID: '1' }).rules, configuredState.rules)
+
+  /*
+   * Upgrades are still display-only, so an upgraded cap leaves the real capacity alone. Removals are
+   * enforced, and `runRemovedRuleEnforcementCheck` below covers each one.
+   */
+  const cappedState = createInitialBlowCowState(2, undefined, {
+    rankSelectionMode: 'default',
+    rules: { maxCardsOnTable: 'upgraded', pass: 'removed' },
+  })
+  assert.equal(cappedState.round.maxCardsOnTable, 10)
+
+  const unchangedRules: BlowCowRulesState = { ...cappedState.rules }
+  assert.equal(isDefaultRulesSelection(unchangedRules), false)
+}
+
+/** Every removable rule, removed, checked at the site that used to enforce it. */
+function runRemovedRuleEnforcementCheck() {
+  // Pass Rule: the action is gone outright.
+  const passRemovedState = createScenarioState()
+  passRemovedState.rules.pass = 'removed'
+  passRemovedState.players['0'].hand = [card('clubs_ace.png')]
+  passRemovedState.players['1'].hand = [card('spades_king.png')]
+  passRemovedState.round.trumpRank = 'J'
+
+  const passRemovedRecorder = createEventRecorder()
+  assert.equal(
+    passMove({
+      G: passRemovedState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: passRemovedRecorder.events,
+      playerID: '0',
+    }),
+    'INVALID_MOVE',
+  )
+  assert.equal(passRemovedState.round.passStreak, 0)
+  assert.equal(passRemovedState.players['0'].matchStats.passCount, 0)
+
+  /*
+   * Pass Ending Rule: passing still works and still counts, but a full circle of passes no longer
+   * ends the round. The same scenario with the rule active is `runAllPassResetCheck`.
+   */
+  const passEndingState = createScenarioState()
+  passEndingState.rules.passEnding = 'removed'
+  passEndingState.players['0'].hand = [card('clubs_ace.png')]
+  passEndingState.players['1'].hand = [card('spades_king.png')]
+  passEndingState.round.trumpRank = 'J'
+  passEndingState.round.passStreak = 1
+  passEndingState.round.lastNonPassingPlayerID = '1'
+
+  const passEndingRecorder = createEventRecorder()
+  assert.equal(
+    passMove({
+      G: passEndingState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: passEndingRecorder.events,
+      playerID: '0',
+    }),
+    undefined,
+  )
+  assert.equal(passEndingState.resetResolution, null)
+  assert.equal(passEndingState.round.passStreak, 2)
+  assert.equal(passEndingState.round.roundNumber, 1)
+  assert.equal(passEndingRecorder.record.nextPlayerID, '1')
+
+  // Rank Change Rule: the previous round's trump becomes selectable again.
+  const rankChangeState = createScenarioState()
+  rankChangeState.rules.rankChange = 'removed'
+  rankChangeState.round.status = 'awaitingTrumpSelection'
+  rankChangeState.round.trumpRank = null
+  rankChangeState.round.previousTrumpRank = 'Q'
+  rankChangeState.players['0'].hand = [card('hearts_queen.png')]
+  rankChangeState.players['1'].hand = [card('spades_king.png')]
+
+  const rankChangeRecorder = createEventRecorder()
+  assert.equal(
+    selectTrumpAndPlayMove({
+      G: rankChangeState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events: rankChangeRecorder.events,
+      playerID: '0',
+    }, {
+      trumpRank: 'Q',
+      cardIDs: [rankChangeState.players['0'].hand[0].id],
+    }),
+    undefined,
+  )
+  assert.equal(rankChangeState.round.trumpRank, 'Q')
+  // Repeating the rank is legal now, so it is not a lie either.
+  assert.equal(rankChangeState.players['0'].matchStats.lieCount, 0)
+
+  // Max Cards On Table Rule: a play may push the table past the cap, which still gates Call Reset.
+  const tableLimitState = createScenarioState()
+  tableLimitState.rules.maxCardsOnTable = 'removed'
+  tableLimitState.round.trumpRank = 'Q'
+  tableLimitState.round.maxCardsOnTable = 2
+  tableLimitState.players['0'].hand = [card('hearts_queen.png'), card('clubs_queen.png')]
+  tableLimitState.players['1'].hand = [card('spades_king.png')]
+  tableLimitState.table.plays = [
+    {
+      id: 'play-0',
+      playerID: '1',
+      cards: [card('diamonds_09.png'), card('clubs_03.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: 1,
+      wasTrumpSelection: false,
+    },
+  ]
+
+  const tableLimitRecorder = createEventRecorder()
+  assert.equal(
+    playMove({
+      G: tableLimitState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events: tableLimitRecorder.events,
+      playerID: '0',
+    }, {
+      cardIDs: tableLimitState.players['0'].hand.map((handCard) => handCard.id),
+    }),
+    undefined,
+  )
+  assert.equal(getTableCardCount(tableLimitState.table), 4)
+  assert.equal(tableLimitState.round.maxCardsOnTable, 2)
+
+  // Joker Rule: a Joker has no rank, so claiming it as trump is a lie.
+  const jokerState = createScenarioState()
+  jokerState.rules.joker = 'removed'
+  jokerState.round.trumpRank = 'Q'
+  jokerState.players['0'].hand = [card('Joker1.png')]
+  jokerState.players['1'].hand = [card('spades_king.png')]
+
+  const jokerRecorder = createEventRecorder()
+  assert.equal(
+    playMove({
+      G: jokerState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events: jokerRecorder.events,
+      playerID: '0',
+    }, {
+      cardIDs: [jokerState.players['0'].hand[0].id],
+    }),
+    undefined,
+  )
+  assert.equal(jokerState.players['0'].matchStats.lieCount, 1)
+
+  // The same Joker with the rule in play is wild, and so honest.
+  const wildJokerState = createScenarioState()
+  wildJokerState.round.trumpRank = 'Q'
+  wildJokerState.players['0'].hand = [card('Joker1.png')]
+  wildJokerState.players['1'].hand = [card('spades_king.png')]
+
+  const wildJokerRecorder = createEventRecorder()
+  playMove({
+    G: wildJokerState,
+    ctx: { currentPlayer: '0', turn: 2 },
+    events: wildJokerRecorder.events,
+    playerID: '0',
+  }, {
+    cardIDs: [wildJokerState.players['0'].hand[0].id],
+  })
+  assert.equal(wildJokerState.players['0'].matchStats.lieCount, 0)
+
+  // Reveal Rule: the previous play stays face down and the pending pointer is simply dropped.
+  const revealState = createScenarioState()
+  revealState.rules.reveal = 'removed'
+  revealState.round.trumpRank = 'Q'
+  revealState.players['0'].hand = [card('clubs_ace.png')]
+  revealState.players['1'].hand = [card('spades_king.png')]
+  revealState.table.plays = [
+    {
+      id: 'play-0',
+      playerID: '0',
+      cards: [card('hearts_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+  ]
+  revealState.players['0'].pendingRevealPlayID = 'play-0'
+
+  const revealRecorder = createEventRecorder()
+  beginTurn({
+    G: revealState,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events: revealRecorder.events,
+  })
+
+  assert.equal(revealState.table.plays[0].revealedAtTurn, null)
+  assert.equal(revealState.players['0'].pendingRevealPlayID, null)
+  assert.equal(isCardFaceUpOnTable(revealState.table.plays[0], revealState.table.plays[0].cards[0].id), false)
+  assert.equal(revealState.history.length, 0)
+
+  /*
+   * Reverse Rule: four trump cards are on the table and the accused was honest, so the caller is
+   * punished either way — with the rule active the punishment flips to the accused instead.
+   */
+  const buildReverseScenario = (isReverseRemoved: boolean) => {
+    const state = createScenarioState()
+    if (isReverseRemoved) {
+      state.rules.reverse = 'removed'
+    }
+    state.round.trumpRank = 'Q'
+    state.round.lastNonPassingPlayerID = '1'
+    state.players['0'].hand = [card('clubs_ace.png')]
+    state.players['1'].hand = [card('spades_king.png')]
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards: [card('clubs_queen.png'), card('diamonds_queen.png')],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 2,
+        revealedAtTurn: 2,
+        wasTrumpSelection: false,
+      },
+      {
+        id: 'play-1',
+        playerID: '1',
+        cards: [card('hearts_queen.png'), card('spades_queen.png')],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 3,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['1'].pendingRevealPlayID = 'play-1'
+
+    const recorder = createEventRecorder()
+    callBSMove({
+      G: state,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: recorder.events,
+      playerID: '0',
+    })
+
+    return state
+  }
+
+  const reverseActiveResolution = buildReverseScenario(false).bsResolution
+  assert.ok(reverseActiveResolution)
+  assert.equal(reverseActiveResolution.targetVerdict?.targetWasHonest, true)
+  assert.equal(reverseActiveResolution.punishment?.reverseRuleTriggered, true)
+  assert.equal(reverseActiveResolution.punishment?.punishedPlayerID, '1')
+
+  const reverseRemovedResolution = buildReverseScenario(true).bsResolution
+  assert.ok(reverseRemovedResolution)
+  assert.equal(reverseRemovedResolution.targetVerdict?.targetWasHonest, true)
+  assert.equal(reverseRemovedResolution.punishment?.reverseRuleTriggered, false)
+  // The honest accused is spared and the caller takes the table, as the default verdict says.
+  assert.equal(reverseRemovedResolution.punishment?.punishedPlayerID, '0')
+
+  // Direction Change Rule: the new round keeps the direction the last one ended on.
+  const directionState = createScenarioState()
+  directionState.rules.directionChange = 'removed'
+  directionState.round.direction = 'clockwise'
+  directionState.round.trumpRank = 'J'
+  directionState.round.passStreak = 1
+  directionState.round.lastNonPassingPlayerID = '1'
+  directionState.players['0'].hand = [card('clubs_ace.png')]
+  directionState.players['1'].hand = [card('spades_king.png')]
+  directionState.table.plays = [
+    {
+      id: 'play-0',
+      playerID: '0',
+      cards: [card('hearts_05.png')],
+      claimedRank: 'J',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: 2,
+      wasTrumpSelection: false,
+    },
+  ]
+
+  const directionRecorder = createEventRecorder()
+  passMove({
+    G: directionState,
+    ctx: { currentPlayer: '0', turn: 4 },
+    events: directionRecorder.events,
+    playerID: '0',
+  })
+
+  assert.ok(directionState.resetResolution)
+  completeResetReveal(directionState, directionRecorder.events, 4)
+  finalizeResetResolutionMove({
+    G: directionState,
+    ctx: { currentPlayer: '0', turn: 4 },
+    events: directionRecorder.events,
+    playerID: '0',
+  }, {
+    resolutionID: directionState.resetResolution.id,
+  })
+
+  assert.equal(directionState.round.roundNumber, 2)
+  assert.equal(directionState.round.direction, 'clockwise')
+}
+
+/** The Broken: one rule card, torn out once, and only ever one that defines a removed variant. */
+function runBrokenCharacterCheck() {
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Broken'))
+
+  const state = createScenarioState()
+  state.players['0'].character = 'The Broken'
+  state.players['0'].hand = [card('clubs_ace.png')]
+  state.players['1'].hand = [card('spades_king.png')]
+
+  // Only rules that define a removed variant are on the menu, and only ones still standing.
+  const choices = getBreakableRuleIDs(state)
+  assert.deepEqual(choices, ['reverse', 'pass', 'joker', 'maxCardsOnTable', 'directionChange', 'passEnding', 'reveal', 'rankChange'])
+  assert.equal(canBreakRule(state, '0'), true)
+  assert.equal(canBreakRule(state, '1'), false)
+
+  const { events } = createEventRecorder()
+  const context = { G: state, ctx: { currentPlayer: '1', turn: 3 }, events, playerID: '0' }
+
+  // A rule with no removed variant is refused even though it exists.
+  assert.equal(breakRuleMove(context, { ruleID: 'leaveGame' }), 'INVALID_MOVE')
+  assert.equal(breakRuleMove(context, { ruleID: 'notARule' as BlowCowRuleID }), 'INVALID_MOVE')
+  // Another seat cannot spend an ability it does not hold.
+  assert.equal(
+    breakRuleMove({ ...context, playerID: '1' }, { ruleID: 'pass' }),
+    'INVALID_MOVE',
+  )
+  assert.equal(state.rules.pass, 'active')
+
+  /*
+   * Deliberately taken on someone else's turn: the ability belongs to the start of the match, not to
+   * a turn, so making the table wait on one player's screen would be the bug.
+   */
+  assert.equal(breakRuleMove(context, { ruleID: 'pass' }), undefined)
+  assert.equal(state.rules.pass, 'removed')
+  assert.equal(state.players['0'].brokenRemovedRuleID, 'pass')
+  assert.equal(state.players['0'].character, 'The Broken')
+  assert.equal(state.history.length, 1)
+  assert.match(state.history[0]?.title ?? '', /used The Broken/)
+
+  // Spent once and for all, and the rule it took is off the menu for anyone else.
+  assert.equal(canBreakRule(state, '0'), false)
+  assert.equal(breakRuleMove(context, { ruleID: 'joker' }), 'INVALID_MOVE')
+  assert.equal(state.rules.joker, 'active')
+  assert.ok(!getBreakableRuleIDs(state).includes('pass'))
+
+  // The removal is live immediately: Pass stops working the moment the card is torn up.
+  assert.equal(
+    passMove({ G: state, ctx: { currentPlayer: '0', turn: 4 }, events, playerID: '0' }),
+    'INVALID_MOVE',
+  )
+
+  const archiveAction = state.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'breakRule')
+  assert.ok(archiveAction)
+  assert.equal(archiveAction?.characterUsed, 'The Broken')
+
+  // A resolution already under way keeps its own rules until it finishes.
+  const midResolutionState = createScenarioState()
+  midResolutionState.players['0'].character = 'The Broken'
+  midResolutionState.resetResolution = {
+    id: 'reset-1',
+    callerPlayerID: '1',
+    kind: 'reset',
+    revealOrder: [],
+    revealStepIndex: 0,
+  }
+  assert.equal(
+    breakRuleMove({
+      G: midResolutionState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events,
+      playerID: '0',
+    }, {
+      ruleID: 'reveal',
+    }),
+    'INVALID_MOVE',
+  )
+  assert.equal(midResolutionState.rules.reveal, 'active')
+}
+
+function runPrototypeCharacterCheck() {
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Prototype'))
+
+  const state = createScenarioState()
+  const doomedCard = card('clubs_ace.png')
+  const keptCard = card('hearts_queen.png')
+  state.players['0'].character = 'The Prototype'
+  state.players['0'].hand = [doomedCard, keptCard]
+  state.players['1'].hand = [card('spades_king.png')]
+
+  assert.equal(canUseDefy(state, '0'), true)
+  assert.equal(canUseDefy(state, '1'), false)
+
+  const { events, record } = createEventRecorder()
+  const context = {
+    G: state,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+    random: { Shuffle: identityShuffle },
+  }
+
+  // Turn-bound, unlike The Broken's start-of-game removal.
+  assert.equal(
+    defyMove({ ...context, ctx: { currentPlayer: '1', turn: 3 } }, { cardID: doomedCard.id }),
+    'INVALID_MOVE',
+  )
+  // A card that is not in hand is not a card this player may destroy.
+  assert.equal(defyMove(context, { cardID: 'not-a-card' }), 'INVALID_MOVE')
+  assert.equal(state.players['0'].hand.length, 2)
+
+  const destroyedRuleID = getBreakableRuleIDs(state)[0]
+  assert.equal(defyMove(context, { cardID: doomedCard.id }), undefined)
+
+  // Both halves land: the hand card is gone from the game and the drawn rule is removed.
+  assert.deepEqual(state.players['0'].hand.map((handCard) => handCard.id), [keptCard.id])
+  assert.equal(state.rules[destroyedRuleID], 'removed')
+  assert.equal(state.players['0'].hasUsedDefyThisRound, true)
+  // The whole point of the action: the turn is still this player's to spend.
+  assert.equal(record.nextPlayerID, null)
+
+  assert.equal(state.history.length, 1)
+  assert.match(state.history[0]?.title ?? '', /used The Prototype/)
+  // The rule is public, the card is not: naming it would show the table a card out of a hidden hand.
+  assert.doesNotMatch(state.history[0]?.detail ?? '', /A of Clubs/)
+  // The log's closing line, which only this ability writes.
+  assert.equal(state.history[0]?.omen, DEFY_HISTORY_OMEN)
+  assert.ok(state.telemetry.events.every((event) => !('omen' in event)))
+
+  const archiveAction = state.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'defy')
+  assert.ok(archiveAction)
+  assert.equal(archiveAction?.characterUsed, 'The Prototype')
+  assert.deepEqual(archiveAction?.cards.map((archivedCard) => archivedCard.id), [doomedCard.id])
+  assert.match(archiveAction?.detail ?? '', /A of Clubs/)
+
+  // One use per round, so the second attempt is refused with the hand untouched.
+  assert.equal(canUseDefy(state, '0'), false)
+  assert.equal(defyMove(context, { cardID: keptCard.id }), 'INVALID_MOVE')
+  assert.equal(state.players['0'].hand.length, 1)
+
+  // Per round, not per match: everyone passing rolls the round over and hands the use back.
+  assert.equal(passMove({ ...context, ctx: { currentPlayer: '0', turn: 3 } }), undefined)
+  assert.equal(passMove({ ...context, ctx: { currentPlayer: '1', turn: 4 }, playerID: '1' }), undefined)
+  assert.ok(state.resetResolution)
+  completeResetReveal(state, events, 4)
+  assert.equal(
+    finalizeResetResolutionMove({
+      G: state,
+      ctx: { currentPlayer: '1', turn: 4 },
+      events,
+      playerID: '1',
+    }, {
+      resolutionID: state.resetResolution.id,
+    }),
+    undefined,
+  )
+  assert.equal(state.round.roundNumber, 2)
+  assert.equal(state.players['0'].hasUsedDefyThisRound, false)
+  assert.equal(canUseDefy(state, '0'), true)
+
+  // A resolution already under way keeps its own rules until it finishes.
+  const midResolutionState = createScenarioState()
+  const midResolutionCard = card('clubs_ace.png')
+  midResolutionState.players['0'].character = 'The Prototype'
+  midResolutionState.players['0'].hand = [midResolutionCard]
+  midResolutionState.resetResolution = {
+    id: 'reset-1',
+    callerPlayerID: '0',
+    kind: 'reset',
+    revealOrder: [],
+    revealStepIndex: 0,
+  }
+  assert.equal(
+    defyMove({
+      G: midResolutionState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events,
+      playerID: '0',
+    }, {
+      cardID: midResolutionCard.id,
+    }),
+    'INVALID_MOVE',
+  )
+
+  /*
+   * With every removable rule but one already gone the draw is forced, which is what makes the
+   * removal testable: Pass has to stop working the moment Defy tears the card up.
+   */
+  const lastRuleState = createScenarioState()
+  const lastRuleCard = card('clubs_ace.png')
+  lastRuleState.players['0'].character = 'The Prototype'
+  lastRuleState.players['0'].hand = [lastRuleCard]
+  lastRuleState.players['1'].hand = [card('spades_king.png')]
+  for (const ruleID of getBreakableRuleIDs(lastRuleState)) {
+    if (ruleID !== 'pass') {
+      lastRuleState.rules[ruleID] = 'removed'
+    }
+  }
+
+  const lastRuleContext = {
+    G: lastRuleState,
+    ctx: { currentPlayer: '0', turn: 4 },
+    events,
+    playerID: '0',
+  }
+  assert.equal(defyMove(lastRuleContext, { cardID: lastRuleCard.id }), undefined)
+  assert.equal(lastRuleState.rules.pass, 'removed')
+  assert.equal(passMove(lastRuleContext), 'INVALID_MOVE')
+
+  // Nothing left to destroy, and an empty hand, are each enough to take the action away.
+  assert.equal(getBreakableRuleIDs(lastRuleState).length, 0)
+  lastRuleState.players['0'].hasUsedDefyThisRound = false
+  assert.equal(canUseDefy(lastRuleState, '0'), false)
+
+  const emptyHandState = createScenarioState()
+  emptyHandState.players['0'].character = 'The Prototype'
+  emptyHandState.players['0'].hand = []
+  assert.equal(canUseDefy(emptyHandState, '0'), false)
+}
+
+function runMastermindCharacterCheck() {
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Mastermind'))
+
+  const state = createScenarioState(3)
+  const ownCard = card('clubs_ace.png')
+  const targetTrumpCard = card('hearts_queen.png')
+  const targetOtherCard = card('spades_king.png')
+  const bystanderCard = card('diamonds_king.png')
+  state.players['0'].character = 'The Mastermind'
+  // A live Dreamer next door, so the accusation refused below is one that would otherwise be legal.
+  state.players['2'].character = 'The Dreamer'
+  state.players['0'].hand = [ownCard]
+  state.players['1'].hand = [targetTrumpCard, targetOtherCard]
+  state.players['2'].hand = [bystanderCard]
+
+  assert.deepEqual(getConspiracyTargetPlayerIDs(state, '0'), ['1', '2'])
+  assert.equal(canConspire(state, '0'), true)
+  assert.equal(canConspire(state, '1'), false)
+
+  const { events, record } = createEventRecorder()
+  const context = {
+    G: state,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+  }
+
+  // Turn-bound, and never against yourself.
+  assert.equal(
+    conspireMove({ ...context, ctx: { currentPlayer: '1', turn: 3 } }, { targetPlayerID: '1' }),
+    'INVALID_MOVE',
+  )
+  assert.equal(conspireMove(context, { targetPlayerID: '0' }), 'INVALID_MOVE')
+
+  assert.equal(conspireMove(context, { targetPlayerID: '1' }), undefined)
+  assert.deepEqual(state.conspiracy, { playerID: '0', targetPlayerID: '1', turnNumber: 3 })
+  assert.equal(state.players['0'].hasUsedConspireThisRound, true)
+  // Public the moment it lands: the victim's hand is about to shrink for no other visible reason.
+  assert.match(state.history[0]?.title ?? '', /used The Mastermind/)
+
+  const conspireArchiveAction = state.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'conspire')
+  assert.ok(conspireArchiveAction)
+  assert.equal(conspireArchiveAction?.characterUsed, 'The Mastermind')
+  assert.equal(conspireArchiveAction?.targetPlayerID, '1')
+  // The archive is the only record of what The Mastermind actually got to look at.
+  assert.deepEqual(
+    conspireArchiveAction?.cards.map((archivedCard) => archivedCard.id),
+    [targetTrumpCard.id, targetOtherCard.id],
+  )
+
+  // The commitment: every other way out of the turn is shut until the play lands.
+  assert.equal(passMove(context), 'INVALID_MOVE')
+  assert.equal(callResetMove(context), 'INVALID_MOVE')
+  assert.equal(callBSMove(context, { targetPlayerID: '2' }), 'INVALID_MOVE')
+  // Accuse would otherwise be legal here, and it ends the round — which would clear the conspiracy.
+  assert.equal(accuseDreamerMove(context, { targetPlayerID: '2' }), 'INVALID_MOVE')
+  assert.equal(state.accusation, null)
+
+  // The cards come out of the opened hand, and only out of it.
+  assert.equal(
+    selectTrumpAndPlayMove(context, { trumpRank: 'Q', cardIDs: [ownCard.id] }),
+    'INVALID_MOVE',
+  )
+  assert.equal(
+    selectTrumpAndPlayMove(context, { trumpRank: 'Q', cardIDs: [targetTrumpCard.id] }),
+    undefined,
+  )
+
+  assert.equal(state.conspiracy, null)
+  assert.deepEqual(state.players['0'].hand.map((handCard) => handCard.id), [ownCard.id])
+  assert.deepEqual(state.players['1'].hand.map((handCard) => handCard.id), [targetOtherCard.id])
+
+  // In every respect other than where the cards came from, this is The Mastermind's own play.
+  const conspiredPlay = state.table.plays.at(-1)
+  assert.equal(conspiredPlay?.playerID, '0')
+  assert.equal(state.round.lastNonPassingPlayerID, '0')
+  assert.equal(state.players['0'].matchStats.playCount, 1)
+  assert.equal(state.players['0'].matchStats.cardsPlayed, 1)
+  assert.equal(state.players['1'].matchStats.playCount, 0)
+  assert.ok(record.nextPlayerID)
+
+  const playArchiveAction = state.archive.turns
+    .filter((archiveTurn) => archiveTurn.turnNumber === 3 && archiveTurn.playerID === '0')
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'play')
+  assert.equal(playArchiveAction?.characterUsed, 'The Mastermind')
+  assert.equal(playArchiveAction?.targetPlayerID, '1')
+
+  // One use per round, spent whether or not the play went well.
+  assert.equal(canConspire(state, '0'), false)
+  assert.equal(
+    conspireMove({ ...context, ctx: { currentPlayer: '0', turn: 6 } }, { targetPlayerID: '1' }),
+    'INVALID_MOVE',
+  )
+
+  // Only The Mastermind's own view opens the hand. Everyone else, including the table at large, sees
+  // the same card backs they always did.
+  const viewState = createScenarioState(3)
+  viewState.players['0'].character = 'The Mastermind'
+  viewState.players['1'].hand = [card('hearts_queen.png')]
+  viewState.conspiracy = { playerID: '0', targetPlayerID: '1', turnNumber: 2 }
+
+  const playerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+  assert.equal(playerView({ G: viewState, playerID: '0' }).players['1'].hand[0].sprite, 'hearts_queen.png')
+  assert.equal(playerView({ G: viewState, playerID: '2' }).players['1'].hand[0].sprite, CARD_BACK_SPRITE)
+  assert.equal(playerView({ G: viewState, playerID: null }).players['1'].hand[0].sprite, CARD_BACK_SPRITE)
+  // And it closes with the conspiracy rather than lingering for the rest of the turn.
+  viewState.conspiracy = null
+  assert.equal(playerView({ G: viewState, playerID: '0' }).players['1'].hand[0].sprite, CARD_BACK_SPRITE)
+
+  // An empty hand is not a hand to conspire with, because the play it commits to could never happen.
+  const emptyTargetState = createScenarioState()
+  emptyTargetState.players['0'].character = 'The Mastermind'
+  emptyTargetState.players['0'].hand = [card('clubs_ace.png')]
+  emptyTargetState.players['1'].hand = []
+  assert.deepEqual(getConspiracyTargetPlayerIDs(emptyTargetState, '0'), [])
+  assert.equal(canConspire(emptyTargetState, '0'), false)
+
+  // Neither is a full table, for the same reason: there would be no room to play what was opened.
+  const fullTableState = createScenarioState()
+  fullTableState.players['0'].character = 'The Mastermind'
+  fullTableState.players['0'].hand = [card('clubs_ace.png')]
+  fullTableState.players['1'].hand = [card('hearts_queen.png'), card('spades_queen.png')]
+  fullTableState.round.trumpRank = 'Q'
+  fullTableState.round.maxCardsOnTable = 1
+  fullTableState.table.plays = [{
+    id: 'play-full',
+    playerID: '1',
+    cards: [card('diamonds_king.png')],
+    declaredCardCount: 1,
+    revealedCardIDs: [],
+    rehiddenCardIDs: [],
+    claimedRank: 'Q',
+    playedAtRound: 1,
+    playedAtTurn: 1,
+    revealedAtTurn: null,
+    wasTrumpSelection: false,
+  }]
+  assert.equal(canConspire(fullTableState, '0'), true)
+  assert.equal(
+    conspireMove({
+      G: fullTableState,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events,
+      playerID: '0',
+    }, {
+      targetPlayerID: '1',
+    }),
+    'INVALID_MOVE',
+  )
+
+  // Per round, not per match: everyone passing rolls the round over and hands the use back.
+  const roundRolloverState = createScenarioState()
+  roundRolloverState.players['0'].character = 'The Mastermind'
+  roundRolloverState.players['0'].hand = [card('clubs_ace.png')]
+  roundRolloverState.players['1'].hand = [card('hearts_queen.png')]
+  roundRolloverState.players['0'].hasUsedConspireThisRound = true
+
+  const rolloverContext = {
+    G: roundRolloverState,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+  }
+  assert.equal(passMove(rolloverContext), undefined)
+  assert.equal(passMove({ ...rolloverContext, ctx: { currentPlayer: '1', turn: 4 }, playerID: '1' }), undefined)
+  assert.ok(roundRolloverState.resetResolution)
+  completeResetReveal(roundRolloverState, events, 4)
+  assert.equal(
+    finalizeResetResolutionMove({
+      G: roundRolloverState,
+      ctx: { currentPlayer: '1', turn: 4 },
+      events,
+      playerID: '1',
+    }, {
+      resolutionID: roundRolloverState.resetResolution.id,
+    }),
+    undefined,
+  )
+  assert.equal(roundRolloverState.round.roundNumber, 2)
+  assert.equal(roundRolloverState.players['0'].hasUsedConspireThisRound, false)
+  assert.equal(canConspire(roundRolloverState, '0'), true)
+}
+
 function runMatchStatsTrackingCheck() {
   const state = createScenarioState()
   const lyingCard = card('clubs_ace.png')
@@ -4070,6 +5062,11 @@ const checks = [
   ['staged start', runStagedStartCheck],
   ['manual rank selection', runManualRankSelectionCheck],
   ['setup validation', runSetupValidationCheck],
+  ['rule cards', runRuleCardsCheck],
+  ['removed rule enforcement', runRemovedRuleEnforcementCheck],
+  ['broken character', runBrokenCharacterCheck],
+  ['prototype character', runPrototypeCharacterCheck],
+  ['mastermind character', runMastermindCharacterCheck],
 ] as const
 
 for (const [label, runCheck] of checks) {

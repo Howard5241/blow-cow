@@ -2,11 +2,17 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from
 import type { BoardProps } from 'boardgame.io/react'
 import {
   BLOW_COW_RANKS,
+  canBreakRule,
+  canConspire,
+  canUseDefy,
   countsTowardReverseRule,
   formatLeaveEffectLabel,
   getActivePlayerIDs,
+  getBreakableRuleIDs,
+  getConspiracyTargetPlayerIDs,
   getSeekerCharacterChoices,
   getTableCardCount,
+  isRuleRemoved,
   sortCards,
   type BlowCowAccusation,
   type BlowCowAccuseDreamerArgs,
@@ -29,10 +35,14 @@ import {
   type BlowCowSneakPlayArgs,
   type BlowCowRank,
   type BlowCowResetResolution,
+  type BlowCowBreakRuleArgs,
+  type BlowCowConspireArgs,
+  type BlowCowDefyArgs,
   type BlowCowSeekCharacterArgs,
   type BlowCowSelectTrumpAndPlayArgs,
   type BlowCowState,
 } from '../game/blowCowGame.ts'
+import type { BlowCowRuleID } from '../game/blowCowRules.ts'
 import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.ts'
 import { getCharacterCardSprite } from './characterCardSprites.ts'
 import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
@@ -40,6 +50,8 @@ import { getAvatarSprite } from './avatarSprites.ts'
 import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
 import { PlayerRing } from './PlayerRing.tsx'
 import {
+  CONSPIRE_ICON_SPRITE,
+  DEFY_ICON_SPRITE,
   PASS_ICON_SPRITE,
   PLAY_ICON_SPRITE,
   PLAY_RANDOM_ICON_SPRITE,
@@ -48,7 +60,7 @@ import {
   X_ICON_SPRITE,
 } from './iconSprites.ts'
 import { TableCenterHub } from './TableCenterHub.tsx'
-import { HistoryOverlay } from './BoardOverlays.tsx'
+import { BreakRuleOverlay, HistoryOverlay, RulesOverlay } from './BoardOverlays.tsx'
 import { useTransientMessage } from './useTransientMessage.ts'
 import {
   getCatHiddenCardIDSet,
@@ -379,6 +391,9 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     play: (args: BlowCowPlayArgs) => void
     playRandom: (args: BlowCowPlayRandomArgs) => void
     seekCharacter: (args: BlowCowSeekCharacterArgs) => void
+    breakRule: (args: BlowCowBreakRuleArgs) => void
+    defy: (args: BlowCowDefyArgs) => void
+    conspire: (args: BlowCowConspireArgs) => void
     sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
@@ -703,10 +718,20 @@ export function BlowCowBoard({
   serverStatusLabel,
 }: BlowCowBoardProps) {
   const currentSeatID = playerID
+  /*
+   * The conspiracy this viewer owes a play on, or null. Only ever non-null on The Mastermind's own
+   * client while they are on the clock, and it is the one thing that lets the hand strip show cards
+   * that are not the viewer's: the server has already unmasked that one hand for this seat alone.
+   * Read this early — the hand effects below key off the seat the strip is currently showing.
+   */
+  const openConspiracy = currentSeatID && G.conspiracy?.playerID === currentSeatID ? G.conspiracy : null
+  const handSourceSeatID = openConspiracy?.targetPlayerID ?? currentSeatID
   const tableBoardRef = useRef<HTMLElement | null>(null)
   const frontCardRefs = useRef(new Map<string, HTMLDivElement>())
   const handCountPillRefs = useRef(new Map<string, HTMLSpanElement>())
   const handScrollRowRef = useRef<HTMLDivElement | null>(null)
+  /** The enlarged character card, written to directly on every pointer move. */
+  const characterCardRef = useRef<HTMLDivElement | null>(null)
   const handCardButtonRefs = useRef(new Map<string, HTMLButtonElement>())
   const handCardMetricsRef = useRef(new Map<string, HandCardMetric>())
   const previousHandCardsRef = useRef<HandCard[]>([])
@@ -714,7 +739,12 @@ export function BlowCowBoard({
   const previousScoredSetIDsRef = useRef(new Set<string>())
   const previousRevealedOverlayCardIDSetRef = useRef(new Set<string>())
   const previousCatHiddenOverlayCardIDSetRef = useRef(new Set<string>())
-  const previousSeatIDRef = useRef<string | null>(currentSeatID)
+  /**
+   * The seat whose hand the strip was showing last frame. Normally the viewer's own, but a
+   * conspiracy points it at somebody else, and that swap has to read as a seat change rather than as
+   * every card being dealt and discarded at once.
+   */
+  const previousHandSourceSeatIDRef = useRef<string | null>(handSourceSeatID)
   const lastFrontCardIDsKeyRef = useRef('')
   const handAnimationTimeoutIDsRef = useRef<number[]>([])
   const frontCardEntryTimeoutIDsRef = useRef<number[]>([])
@@ -764,9 +794,13 @@ export function BlowCowBoard({
   }
   const [selectedTrumpRank, setSelectedTrumpRank] = useState<BlowCowRank>('Q')
   const [selectedDrunkardRandomPlayCardCount, setSelectedDrunkardRandomPlayCardCount] = useState(1)
+  /** Whose hand The Mastermind means to open. Null falls back to the first eligible seat. */
+  const [selectedConspireTargetSeatID, setSelectedConspireTargetSeatID] = useState<string | null>(null)
   const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  // Kept mutually exclusive with the history overlay so the two panels never stack on the board.
+  const [isRulesOpen, setIsRulesOpen] = useState(false)
   /**
    * Local, and deliberately not in `G`: the win screen exists so each player can look at the final
    * table — the last leave-effect labels land on it — before the results panel covers everything.
@@ -805,6 +839,12 @@ export function BlowCowBoard({
    */
   const [hasDismissedSeekerPicker, setHasDismissedSeekerPicker] = useState(false)
   const [selectedSeekerCharacter, setSelectedSeekerCharacter] = useState<BlowCowImplementedCharacterName | null>(null)
+  /**
+   * The Broken's picker, on the same terms as The Seeker's. Breaking a rule leaves `character`
+   * alone, so what closes this for good is `brokenRemovedRuleID` landing on the seat rather than the
+   * character badge changing.
+   */
+  const [hasDismissedBreakRulePicker, setHasDismissedBreakRulePicker] = useState(false)
   const [copyRoomCodeStatus, setCopyRoomCodeStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   const {
     message: failMessage,
@@ -962,9 +1002,22 @@ export function BlowCowBoard({
       && !G.players[currentSeatID].hasLeft,
   )
   const isSeekerPickerOpen = isSeeker && !hasDismissedSeekerPicker
+  // Same shape as The Seeker above, and up here for the same reason.
+  const isBroken = Boolean(
+    currentSeatID
+      && G.gameStatus === 'active'
+      && canBreakRule(G, currentSeatID)
+      && !G.players[currentSeatID].hasLeft,
+  )
+  const isBreakRulePickerOpen = isBroken && !hasDismissedBreakRulePicker
 
   const hasEscapableLayer = Boolean(
-    selectedCharacterCard || isSeekerPickerOpen || isHistoryOpen || selectedTargetSeatID,
+    selectedCharacterCard
+      || isSeekerPickerOpen
+      || isBreakRulePickerOpen
+      || isHistoryOpen
+      || isRulesOpen
+      || selectedTargetSeatID,
   )
 
   // Escape closes one layer at a time, innermost first.
@@ -988,8 +1041,18 @@ export function BlowCowBoard({
         return
       }
 
+      if (isBreakRulePickerOpen) {
+        setHasDismissedBreakRulePicker(true)
+        return
+      }
+
       if (isHistoryOpen) {
         setIsHistoryOpen(false)
+        return
+      }
+
+      if (isRulesOpen) {
+        setIsRulesOpen(false)
         return
       }
 
@@ -1002,7 +1065,15 @@ export function BlowCowBoard({
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [hasEscapableLayer, selectedCharacterCard, isSeekerPickerOpen, isHistoryOpen, clearFailMessage])
+  }, [
+    hasEscapableLayer,
+    selectedCharacterCard,
+    isSeekerPickerOpen,
+    isBreakRulePickerOpen,
+    isHistoryOpen,
+    isRulesOpen,
+    clearFailMessage,
+  ])
 
   useEffect(() => {
     if (G.gameStatus === 'staging' || !G.useCharacters || G.gameStatus === 'finished') {
@@ -1018,18 +1089,20 @@ export function BlowCowBoard({
     setSelectedForeignerCardCode('none')
   }, [G.gameStatus, G.players, currentSeatID])
 
+  // Keyed on the hand the strip is showing, not on the viewer's own: opening a conspiracy swaps the
+  // strip to somebody else's cards, and a selection made against the old hand has to go with it.
   useEffect(() => {
-    if (!currentSeatID) {
+    if (!handSourceSeatID) {
       setSelectedCardIDs([])
       return
     }
 
-    const availableCardIDs = new Set(G.players[currentSeatID]?.hand.map((card) => card.id) ?? [])
+    const availableCardIDs = new Set(G.players[handSourceSeatID]?.hand.map((card) => card.id) ?? [])
     setSelectedCardIDs((previousIDs) => {
       const nextIDs = previousIDs.filter((cardID) => availableCardIDs.has(cardID))
       return nextIDs.length === previousIDs.length ? previousIDs : nextIDs
     })
-  }, [G.players, currentSeatID])
+  }, [G.players, handSourceSeatID])
 
   useEffect(() => {
     if (G.bsResolution || G.resetResolution || G.accusation) {
@@ -1618,7 +1691,8 @@ export function BlowCowBoard({
   const resolutionSequenceLabel = isBSSequenceActive ? 'BS' : isAccusationActive ? 'accusation' : 'Reset'
   const actingPlayerID = ctx.currentPlayer
   const currentPlayerState = currentSeatID ? (G.players[currentSeatID] ?? null) : null
-  const handCards = currentPlayerState ? sortCards(currentPlayerState.hand).map(toHandCard) : []
+  const handSourcePlayerState = handSourceSeatID ? (G.players[handSourceSeatID] ?? null) : null
+  const handCards = handSourcePlayerState ? sortCards(handSourcePlayerState.hand).map(toHandCard) : []
   const handCardIDsKey = handCards.map((card) => card.id).join('|')
   const scoredSetIDsKey = currentPlayerState?.scoredSets.map((scoredSet) => scoredSet.id).join('|') ?? ''
   const seatPointsKey = G.seatOrder.map((seatID) => `${seatID}:${G.players[seatID].points}`).join('|')
@@ -1673,7 +1747,47 @@ export function BlowCowBoard({
   const isForeigner = currentPlayerState?.character === 'The Foreigner'
   const seekerCharacterChoices = isSeeker && currentSeatID ? getSeekerCharacterChoices(G, currentSeatID) : []
   const canSeekCharacter = isSeeker && !isResolutionSequenceActive && seekerCharacterChoices.length > 0
-  const isRepeatingPreviousTrump = selectedTrumpRank === G.round.previousTrumpRank
+  // Every rule still standing that defines a removed variant. The Broken picks one of these and The
+  // Prototype destroys a random one, so both read the same list.
+  const destroyableRuleIDs = getBreakableRuleIDs(G)
+  const breakableRuleIDs = isBroken ? destroyableRuleIDs : []
+  const canBreakAnyRule = isBroken && !isResolutionSequenceActive && breakableRuleIDs.length > 0
+  const isPrototype = currentPlayerState?.character === 'The Prototype'
+  const hasUsedDefyThisRound = Boolean(currentPlayerState?.hasUsedDefyThisRound)
+  const isMastermind = currentPlayerState?.character === 'The Mastermind'
+  const hasUsedConspireThisRound = Boolean(currentPlayerState?.hasUsedConspireThisRound)
+  const conspiracyTargetSeatIDs = isMastermind && currentSeatID
+    ? getConspiracyTargetPlayerIDs(G, currentSeatID)
+    : []
+  // Resolved rather than corrected by an effect: a seat that empties its hand or leaves simply drops
+  // out of the list, and the selector falls back to the first one still standing.
+  const resolvedConspireTargetSeatID = selectedConspireTargetSeatID
+    && conspiracyTargetSeatIDs.includes(selectedConspireTargetSeatID)
+    ? selectedConspireTargetSeatID
+    : (conspiracyTargetSeatIDs[0] ?? null)
+  // Only the once-a-round guard and the surviving rule pool; the card to destroy is checked below,
+  // so the tooltip can tell the two refusals apart.
+  const hasDefyAvailable = Boolean(isPrototype && currentSeatID && canUseDefy(G, currentSeatID))
+  const canDefy = isInteractiveTurn && hasDefyAvailable && selectedCards.length === 1
+  /*
+   * Mirrors of the server's rule checks. The server is still the authority — these only decide
+   * whether a button is offered and what its tooltip says.
+   */
+  const isTableLimitRemoved = isRuleRemoved(G, 'maxCardsOnTable')
+  const isPassRemoved = isRuleRemoved(G, 'pass')
+  /*
+   * Mirrors `resolveConspire`. The table-room half is checked here rather than left to the play that
+   * follows, because Conspire commits the turn: opening a hand with no room to play it out would
+   * leave the turn with nothing legal left at all.
+   */
+  const canConspireNow = isInteractiveTurn
+    && Boolean(currentSeatID && canConspire(G, currentSeatID))
+    && !isFinalTwoResolutionTurn
+    && (isTableLimitRemoved || totalCardsOnTable < maxCardsOnTable)
+  const hasTableRoomForSelection = isTableLimitRemoved
+    || totalCardsOnTable + selectedCards.length <= maxCardsOnTable
+  const isRepeatingPreviousTrump = !isRuleRemoved(G, 'rankChange')
+    && selectedTrumpRank === G.round.previousTrumpRank
   const canDreamerRepeatPreviousTrump = isDreamer && isRepeatingPreviousTrump
   const canSelectTrumpAndPlay = isInteractiveTurn
     && !isFinalTwoResolutionTurn
@@ -1681,17 +1795,17 @@ export function BlowCowBoard({
     && selectedCards.length > 0
     && (isDreamer || selectedCards.length <= 2)
     && (!isRepeatingPreviousTrump || canDreamerRepeatPreviousTrump)
-    && (isDreamer || totalCardsOnTable + selectedCards.length <= maxCardsOnTable)
+    && (isDreamer || hasTableRoomForSelection)
   const canPlayCards = isInteractiveTurn
     && !isFinalTwoResolutionTurn
     && currentTrump !== null
     && selectedCards.length > 0
     && (isDreamer || selectedCards.length <= 2)
-    && (isDreamer || totalCardsOnTable + selectedCards.length <= maxCardsOnTable)
+    && (isDreamer || hasTableRoomForSelection)
   const maxRandomPlayCardCount = Math.min(
     2,
     handCards.length,
-    Math.max(0, maxCardsOnTable - totalCardsOnTable),
+    isTableLimitRemoved ? 2 : Math.max(0, maxCardsOnTable - totalCardsOnTable),
   )
   const drunkardRandomPlayCardCountOptions = Array.from(
     { length: maxRandomPlayCardCount },
@@ -1723,24 +1837,37 @@ export function BlowCowBoard({
     && currentTrump !== null
     && !hasSneakedThisTurn
   const canSneakPlay = isSneakWindowOpen && selectedCards.length === 1
-  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn
+  // An open conspiracy owes the table a play, so every other way out of the turn is closed. The
+  // borrowed hand still feeds the two play buttons, which is why only these three are gated.
+  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !openConspiracy
   const selectedPlayCallout = currentTrump && selectedCards.length > 0
     ? buildPlayCalloutText(currentTrump, selectedCards.length)
     : null
   const selectedTrumpPlayCallout = selectedCards.length > 0
     ? buildPlayCalloutText(selectedTrumpRank, selectedCards.length)
     : null
-  const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable
+  const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable && !openConspiracy
   const canUseCat = isInteractiveTurn && currentPlayerState?.character === 'The Cat' && !isResolutionSequenceActive
   const selectedForeignerCardLabel = FOREIGNER_CARD_OPTIONS.find((option) => option.value === selectedForeignerCardCode)?.label ?? 'the selected card'
   const displayedTrumpRank = currentTrump ?? selectedTrumpRank
   const displayedTrumpLabel = currentTrump ? 'Live trump' : 'Selected rank'
   const currentPlayerLabel = playerName.trim() || (isSpectator ? 'Spectator' : getSeatLabel(currentPlayerState?.seatIndex))
   const actingSeatLabel = getSeatDisplayName(actingPlayerID, currentSeatID, playerName, playersFromRoom)
+  // The live conspiracy wins over the selector: once a hand is open, every line about Conspire is
+  // about that hand rather than about whoever the dropdown happens to be resting on.
+  const conspireTargetSeatID = openConspiracy?.targetPlayerID ?? resolvedConspireTargetSeatID
+  const conspireTargetLabel = conspireTargetSeatID
+    ? getSeatDisplayName(conspireTargetSeatID, currentSeatID, playerName, playersFromRoom)
+    : 'nobody'
   const tableStatusTooltip = `${G.tableStatus}\n\nYou are ${currentPlayerLabel}. The current player is ${actingSeatLabel}.`
-  const frontCardsColumnTooltip = canUseCat
-    ? `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}. Because you are The Cat, you may click any face-up front card to flip it face down.`
+  // With the cap removed the number still gates Call Reset, so it is labelled as the reset threshold
+  // rather than a maximum it no longer is.
+  const tableCapacityLabel = isTableLimitRemoved
+    ? `current cards: ${totalCardsOnTable}, no maximum (reset unlocks at ${maxCardsOnTable})`
     : `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}`
+  const frontCardsColumnTooltip = canUseCat
+    ? `${tableCapacityLabel}. Because you are The Cat, you may click any face-up front card to flip it face down.`
+    : tableCapacityLabel
   const roomCodeTooltip = `Room Code:\n${matchID}`
   const copyRoomCodeLabel = copyRoomCodeStatus === 'copied'
     ? 'Room code copied'
@@ -2167,13 +2294,13 @@ export function BlowCowBoard({
     if (!currentSeatID || !currentPlayerState || !handScrollRowElement) {
       previousHandCardsRef.current = []
       previousScoredSetIDsRef.current = new Set<string>()
-      previousSeatIDRef.current = currentSeatID
+      previousHandSourceSeatIDRef.current = handSourceSeatID
       setEnteringHandCardIDs([])
       setRemovingHandCards([])
       return
     }
 
-    const seatChanged = previousSeatIDRef.current !== currentSeatID
+    const seatChanged = previousHandSourceSeatIDRef.current !== handSourceSeatID
     const previousHandCards = seatChanged ? [] : previousHandCardsRef.current
     const previousHandIDSet = new Set(previousHandCards.map((card) => card.id))
     const currentHandIDSet = new Set(handCards.map((card) => card.id))
@@ -2239,8 +2366,8 @@ export function BlowCowBoard({
 
     previousHandCardsRef.current = handCards
     previousScoredSetIDsRef.current = new Set(currentPlayerState.scoredSets.map((scoredSet) => scoredSet.id))
-    previousSeatIDRef.current = currentSeatID
-  }, [currentSeatID, handCardIDsKey, scoredSetIDsKey])
+    previousHandSourceSeatIDRef.current = handSourceSeatID
+  }, [handSourceSeatID, handCardIDsKey, scoredSetIDsKey])
 
   useLayoutEffect(() => {
     if (!currentSeatID) {
@@ -2423,6 +2550,7 @@ export function BlowCowBoard({
     kind: event.kind,
     title: event.title,
     detail: event.detail,
+    omen: event.omen,
   }))
   const winnerID = G.placements[0] ?? null
   const winnerLabel = winnerID
@@ -2595,6 +2723,78 @@ export function BlowCowBoard({
     setSelectedSeekerCharacter(null)
   }
 
+  const handleBreakRule = (ruleID: BlowCowRuleID) => {
+    if (!canBreakAnyRule || !breakableRuleIDs.includes(ruleID)) {
+      return
+    }
+
+    moves.breakRule({ ruleID })
+  }
+
+  const handleDefy = () => {
+    if (!canDefy) {
+      return
+    }
+
+    moves.defy({ cardID: selectedCards[0].id })
+    setSelectedCardIDs([])
+  }
+
+  // Clears the selection on the way in as well as on the way out: whatever was picked belonged to
+  // the hand this is about to replace.
+  const handleConspire = () => {
+    if (!canConspireNow || !resolvedConspireTargetSeatID) {
+      return
+    }
+
+    moves.conspire({ targetPlayerID: resolvedConspireTargetSeatID })
+    setSelectedCardIDs([])
+  }
+
+  /*
+   * How far the card leans, in degrees, at the very edge of its own box. Large enough that the
+   * parallax is unmistakable, small enough that the printed ability text never skews out of reading.
+   */
+  const CHARACTER_CARD_MAX_TILT_DEG = 15
+
+  const handleCharacterCardPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const element = characterCardRef.current
+    if (!element) {
+      return
+    }
+
+    const bounds = element.getBoundingClientRect()
+    if (bounds.width === 0 || bounds.height === 0) {
+      return
+    }
+
+    // 0..1 across the card, then recentred to -0.5..0.5 so the middle is the resting position.
+    const pointerX = (event.clientX - bounds.left) / bounds.width
+    const pointerY = (event.clientY - bounds.top) / bounds.height
+
+    element.style.setProperty('--card-pointer-x', `${(pointerX * 100).toFixed(2)}%`)
+    element.style.setProperty('--card-pointer-y', `${(pointerY * 100).toFixed(2)}%`)
+    // Y drives rotateX and X drives rotateY: leaning toward the pointer means tipping about the
+    // other axis, and the X sign is flipped so the top edge falls away as the pointer rises.
+    element.style.setProperty('--card-tilt-x', `${((0.5 - pointerY) * CHARACTER_CARD_MAX_TILT_DEG * 2).toFixed(2)}deg`)
+    element.style.setProperty('--card-tilt-y', `${((pointerX - 0.5) * CHARACTER_CARD_MAX_TILT_DEG * 2).toFixed(2)}deg`)
+    element.style.setProperty('--card-glare-opacity', '1')
+    element.style.setProperty('--card-lift', '1')
+  }
+
+  const handleCharacterCardPointerLeave = () => {
+    const element = characterCardRef.current
+    if (!element) {
+      return
+    }
+
+    // Back to flat. The transition on the card is what makes this a settle rather than a snap.
+    element.style.setProperty('--card-tilt-x', '0deg')
+    element.style.setProperty('--card-tilt-y', '0deg')
+    element.style.setProperty('--card-glare-opacity', '0')
+    element.style.setProperty('--card-lift', '0')
+  }
+
   const handleSeatSelect = (seatID: string) => {
     if (!selectableTargetSeatIDSet.has(seatID)) {
       return
@@ -2621,6 +2821,10 @@ export function BlowCowBoard({
 
     if (!isCurrentPlayersTurn) {
       return 'You can only call BS on your own turn.'
+    }
+
+    if (openConspiracy) {
+      return `You opened ${conspireTargetLabel}'s hand, so the only thing left this turn is a play out of it.`
     }
 
     if (!currentTrump) {
@@ -2677,6 +2881,12 @@ export function BlowCowBoard({
 
     if (seatID === currentSeatID) {
       return 'You cannot accuse yourself.'
+    }
+
+    // An accusation ends the round, which would clear the conspiracy along with it. Closing that
+    // route is what keeps Conspire a commitment rather than a free look at a hand.
+    if (openConspiracy) {
+      return `You opened ${conspireTargetLabel}'s hand, so the only thing left this turn is a play out of it.`
     }
 
     if (G.players[seatID]?.hasLeft) {
@@ -2989,6 +3199,8 @@ export function BlowCowBoard({
   const selectTrumpAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : openConspiracy
+      ? `Choose ${selectedTrumpRank} as trump and play up to 2 cards out of ${conspireTargetLabel}'s hand. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump === null
       ? isRepeatingPreviousTrump && isDreamer
         ? `Use The Dreamer to pick ${selectedTrumpRank} again. The Dreamer may also send more than 2 cards or overfill the table. Accuse catches any of those, but only during the next player's turn.`
@@ -3012,6 +3224,8 @@ export function BlowCowBoard({
   const playAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : openConspiracy
+      ? `Play the selected cards out of ${conspireTargetLabel}'s hand and claim they are ${currentTrump}. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump
       ? isDreamer
         ? `Play the selected cards and claim they are ${currentTrump}. The Dreamer may send more than 2 cards or overfill the table, but Accuse catches an illegal count during the next player's turn.`
@@ -3087,6 +3301,73 @@ export function BlowCowBoard({
     },
   }
 
+  /* The third off-clock action, and like Seek Character it opens a panel rather than sending a move. */
+  const breakRuleAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : breakableRuleIDs.length === 0
+      ? 'Every rule that could be removed is already gone, so there is nothing left to break.'
+      : 'Use The Broken to remove one rule card from this match for everyone. The choice is permanent.',
+    disabled: !canBreakAnyRule,
+    icon: '',
+    key: 'break-rule',
+    label: 'Break Rule',
+    onClick: () => {
+      setHasDismissedBreakRulePicker(false)
+    },
+  }
+
+  /*
+   * The only action in this row that leaves the turn running, so its description says so outright —
+   * everything else here is a way to end the turn and a player has no other reason to expect this
+   * one is not.
+   */
+  const defyAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : hasUsedDefyThisRound
+      ? 'You already used Defy this round. It comes back at the start of the next one.'
+      : destroyableRuleIDs.length === 0
+      ? 'Every rule that could be removed is already gone, so there is nothing left to destroy.'
+      : handCards.length === 0
+      ? 'Defy destroys a card from your hand, and your hand is empty.'
+      : selectedCards.length === 0
+      ? 'Select the one card to destroy.'
+      : selectedCards.length > 1
+      ? 'Defy destroys exactly one card. Deselect the rest.'
+      : `Use The Prototype to destroy ${getCardLabel(selectedCards[0].sprite)} and one random rule card. Your turn keeps going.`,
+    disabled: !canDefy,
+    icon: DEFY_ICON_SPRITE,
+    key: 'defy',
+    label: 'Defy',
+    onClick: handleDefy,
+  }
+
+  /*
+   * The only action here that commits the turn to a different one. Nothing about it is reversible:
+   * the moment it lands the hand strip is somebody else's, Pass and Call Reset are shut, and the
+   * only way out of the turn is a play out of the hand it opened. The tooltip says so, because a row
+   * of buttons that all end a turn gives no reason to expect one that takes the turn hostage.
+   */
+  const conspireAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : openConspiracy
+      ? `You are already inside ${conspireTargetLabel}'s hand. Play out of it to end the turn.`
+      : hasUsedConspireThisRound
+      ? 'You already used Conspire this round. It comes back at the start of the next one.'
+      : conspiracyTargetSeatIDs.length === 0
+      ? 'Nobody else is holding a card to conspire with.'
+      : totalCardsOnTable >= maxCardsOnTable && !isTableLimitRemoved
+      ? 'The table is full, so there would be no room to play the cards you opened.'
+      : `Use The Mastermind to open ${conspireTargetLabel}'s hand. You must then play out of it, and no other action is left this turn.`,
+    disabled: !canConspireNow,
+    icon: CONSPIRE_ICON_SPRITE,
+    key: 'conspire',
+    label: 'Conspire',
+    onClick: handleConspire,
+  }
+
   // Call BS and Accuse are not here: they live on the player blocks, because both need a
   // clicked target. See `renderSeatTargetActions`.
   // Labels the action row for whoever is on the clock. Spectators and waiting players see the
@@ -3099,10 +3380,15 @@ export function BlowCowBoard({
     currentTrump === null ? selectTrumpAction : playAction,
     ...(isDreamer && !isCurrentPlayersTurn && !isSpectator ? [sneakPlayAction] : []),
     ...(isSeeker ? [seekCharacterAction] : []),
+    ...(isBroken ? [breakRuleAction] : []),
+    ...(isPrototype && !isSpectator ? [defyAction] : []),
+    ...(isMastermind && !isSpectator ? [conspireAction] : []),
     ...(isDrunkard ? [playRandomAction] : []),
     {
       description: isResolutionSequenceActive
         ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+        : isPassRemoved
+        ? 'The Pass Rule was removed from this match, so Pass is not an available action.'
         : isFinalTwoResolutionTurn
         ? 'With two players left, you cannot pass after the other player emptied their hand with a hidden play.'
         : isForeigner && selectedForeignerCardCode !== 'none'
@@ -3369,9 +3655,13 @@ export function BlowCowBoard({
               event.stopPropagation()
             }}
           >
+            {/*
+              * No kicker here. The card below is unmistakably a character card, so the line only
+              * cost the panel height it does not have — the sprite is tall, and anything above it
+              * comes straight out of the space the art gets to occupy.
+              */}
             <div className="character-card-overlay-header">
               <div className="character-card-overlay-copy">
-                <p className="panel-kicker">Character Card</p>
                 <h2 id="character-card-overlay-title">{selectedCharacterCard.characterName}</h2>
                 <p className="room-note">
                   {selectedCharacterCard.playerName} · {selectedCharacterCard.seatLabel}
@@ -3391,11 +3681,24 @@ export function BlowCowBoard({
             </div>
 
             <div className="character-card-overlay-body">
-              <img
-                alt={`${selectedCharacterCard.playerName}: ${selectedCharacterCard.characterName}`}
-                className="character-card-overlay-image"
-                src={selectedCharacterCard.sprite}
-              />
+              {/*
+                * The card tilts toward the pointer and carries a glare that tracks it, the way a
+                * foiled card catches the light when you turn it over in your hand. Written straight
+                * onto the node as custom properties rather than through state: this fires on every
+                * pointer move, and re-rendering a board this size at that rate would stutter.
+                */}
+              <div
+                className="character-card-overlay-card"
+                onPointerLeave={handleCharacterCardPointerLeave}
+                onPointerMove={handleCharacterCardPointerMove}
+                ref={characterCardRef}
+              >
+                <img
+                  alt={`${selectedCharacterCard.playerName}: ${selectedCharacterCard.characterName}`}
+                  className="character-card-overlay-image"
+                  src={selectedCharacterCard.sprite}
+                />
+              </div>
             </div>
           </section>
         </div>
@@ -3475,12 +3778,41 @@ export function BlowCowBoard({
         </div>
       ) : null}
 
+      {/*
+        * Mounted only on The Broken's own client, like The Seeker's picker above. The choice hits
+        * everyone at the table the moment it lands, which is why the panel says so rather than
+        * treating it as a private decision.
+        */}
+      {isBreakRulePickerOpen ? (
+        <BreakRuleOverlay
+          blockedReason={isResolutionSequenceActive
+            ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+            : 'There is no removable rule left to break.'}
+          choices={breakableRuleIDs}
+          isBlocked={!canBreakAnyRule}
+          onBreakRule={handleBreakRule}
+          onClose={() => {
+            setHasDismissedBreakRulePicker(true)
+          }}
+          rules={G.rules}
+        />
+      ) : null}
+
       {!isStaging && isHistoryOpen ? (
         <HistoryOverlay
           historyEvents={historyEvents}
           onClose={() => {
             setIsHistoryOpen(false)
           }}
+        />
+      ) : null}
+
+      {!isStaging && isRulesOpen ? (
+        <RulesOverlay
+          onClose={() => {
+            setIsRulesOpen(false)
+          }}
+          rules={G.rules}
         />
       ) : null}
 
@@ -3587,58 +3919,48 @@ export function BlowCowBoard({
         </div>
       ) : null}
 
-      <div className="board-hero">
-        <div className="board-hero-copy-wrap">
-          <div className="header-title-with-info">
-            <h2>{isStaging ? 'Room staging' : 'Live match'}</h2>
-            <InlineInfoTooltip tooltip={roomCodeTooltip} />
+      {/*
+        * Staging keeps its header. The live match does not: everything below moved into the two
+        * pockets of dead space the hand stage already reserved -- under the hand cards, and beside
+        * the turn heading -- because a full-width header of its own was what pushed the table past
+        * the viewport and put a scrollbar on the page.
+        */}
+      {isStaging ? (
+        <div className="board-hero">
+          <div className="board-hero-copy-wrap">
+            <div className="header-title-with-info">
+              <h2>Room staging</h2>
+              <InlineInfoTooltip tooltip={roomCodeTooltip} />
+              <button
+                aria-label={copyRoomCodeLabel}
+                className={`inline-icon-button copy-room-button ${copyRoomCodeStatus}`}
+                onClick={handleCopyRoomCode}
+                title={copyRoomCodeLabel}
+                type="button"
+              >
+                <span aria-hidden="true" className="copy-icon">
+                  <span className="copy-icon-sheet copy-icon-sheet-back" />
+                  <span className="copy-icon-sheet copy-icon-sheet-front" />
+                </span>
+              </button>
+            </div>
+          </div>
+          <div className="board-hero-actions">
+            <span className={`status-pill ${isConnected ? 'online' : 'offline'}`}>
+              {isConnected ? 'Socket Connected' : 'Socket Reconnecting'}
+            </span>
+            <span className={`status-pill ${serverState}`}>{serverStatusLabel}</span>
             <button
-              aria-label={copyRoomCodeLabel}
-              className={`inline-icon-button copy-room-button ${copyRoomCodeStatus}`}
-              onClick={handleCopyRoomCode}
-              title={copyRoomCodeLabel}
+              className="secondary-button"
+              disabled={isLeaving}
+              onClick={onLeaveRoom}
               type="button"
             >
-              <span aria-hidden="true" className="copy-icon">
-                <span className="copy-icon-sheet copy-icon-sheet-back" />
-                <span className="copy-icon-sheet copy-icon-sheet-front" />
-              </span>
+              {isLeaving ? 'Leaving Room...' : 'Leave Room'}
             </button>
           </div>
         </div>
-        <div className="board-hero-actions">
-          {!isStaging ? (
-            <>
-              <button
-                aria-expanded={isHistoryOpen}
-                aria-haspopup="dialog"
-                className={`subtle-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
-                onClick={() => {
-                  setIsHistoryOpen((previousValue) => !previousValue)
-                }}
-                type="button"
-              >
-                History
-                <span className="history-count-pill">{historyEvents.length}</span>
-              </button>
-
-            </>
-          ) : null}
-
-          <span className={`status-pill ${isConnected ? 'online' : 'offline'}`}>
-            {isConnected ? 'Socket Connected' : 'Socket Reconnecting'}
-          </span>
-          <span className={`status-pill ${serverState}`}>{serverStatusLabel}</span>
-          <button
-            className="secondary-button"
-            disabled={isLeaving}
-            onClick={onLeaveRoom}
-            type="button"
-          >
-            {isLeaving ? 'Leaving Room...' : 'Leave Room'}
-          </button>
-        </div>
-      </div>
+      ) : null}
 
       {isStaging ? (
         <section className="room-staging-shell">
@@ -3788,7 +4110,19 @@ export function BlowCowBoard({
               </div>
             ) : null}
 
-            <div className="hand-scroll-row" ref={handScrollRowRef}>
+            {/*
+              * The one time the strip is not the viewer's own hand, so it says whose it is. Sitting
+              * inside the viewport rather than over the cards, because it has to stay readable while
+              * the row scrolls and nothing about a borrowed hand should be hidden by its own label.
+              */}
+            {openConspiracy ? (
+              <p className="conspiracy-banner">
+                <span className="conspiracy-banner-mark">Conspiring</span>
+                {`${conspireTargetLabel}'s hand. Play out of it to end your turn.`}
+              </p>
+            ) : null}
+
+            <div className={`hand-scroll-row${openConspiracy ? ' conspired' : ''}`} ref={handScrollRowRef}>
               {handCards.length === 0 && isSpectator ? (
                 <p className="room-note">Spectators do not have a hand. Join a seat to make moves.</p>
               ) : null}
@@ -3825,17 +4159,88 @@ export function BlowCowBoard({
                 )
               })}
             </div>
+
+            {/*
+              * The old board hero's identity half, in the strip the hand cards leave empty beneath
+              * them. Room title, room code, and the two connection pills are all glanceable state
+              * that nobody acts on mid-turn, so they belong under the cards rather than beside the
+              * buttons.
+              */}
+            <div className="hand-meta-row">
+              <div className="header-title-with-info hand-meta-title">
+                <h2>Live match</h2>
+                <InlineInfoTooltip tooltip={roomCodeTooltip} />
+                <button
+                  aria-label={copyRoomCodeLabel}
+                  className={`inline-icon-button copy-room-button ${copyRoomCodeStatus}`}
+                  onClick={handleCopyRoomCode}
+                  title={copyRoomCodeLabel}
+                  type="button"
+                >
+                  <span aria-hidden="true" className="copy-icon">
+                    <span className="copy-icon-sheet copy-icon-sheet-back" />
+                    <span className="copy-icon-sheet copy-icon-sheet-front" />
+                  </span>
+                </button>
+              </div>
+
+              <span className={`status-pill ${isConnected ? 'online' : 'offline'}`}>
+                {isConnected ? 'Socket Connected' : 'Socket Reconnecting'}
+              </span>
+              <span className={`status-pill ${serverState}`}>{serverStatusLabel}</span>
+            </div>
           </div>
 
           <div className="hand-action-row">
             {/*
-              * Sits in the action row itself rather than in a header of its own, filling the space
-              * the bottom-aligned buttons leave above them.
+              * The heading shares its line with the panel toggles and Leave Room, which is what
+              * the line was already tall enough for. Rules comes first: reference material a player
+              * reaches for at any time, unlike the match-specific log beside it.
               */}
-            <p className="hand-action-heading">{handActionHeading}</p>
+            <div className="hand-action-top">
+              <div className="hand-action-toolbar">
+                <button
+                  aria-expanded={isRulesOpen}
+                  aria-haspopup="dialog"
+                  className={`subtle-button rules-toggle ${isRulesOpen ? 'active' : ''}`}
+                  onClick={() => {
+                    setIsRulesOpen((previousValue) => !previousValue)
+                    setIsHistoryOpen(false)
+                  }}
+                  type="button"
+                >
+                  Rules
+                </button>
+
+                <button
+                  aria-expanded={isHistoryOpen}
+                  aria-haspopup="dialog"
+                  className={`subtle-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
+                  onClick={() => {
+                    setIsHistoryOpen((previousValue) => !previousValue)
+                    setIsRulesOpen(false)
+                  }}
+                  type="button"
+                >
+                  History
+                  <span className="history-count-pill">{historyEvents.length}</span>
+                </button>
+
+                <button
+                  className="secondary-button"
+                  disabled={isLeaving}
+                  onClick={onLeaveRoom}
+                  type="button"
+                >
+                  {isLeaving ? 'Leaving Room...' : 'Leave Room'}
+                </button>
+              </div>
+
+              <p className="hand-action-heading">{handActionHeading}</p>
+            </div>
 
             {actionButtons.map((action) => (
-              <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
+              <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'conspire' ? ' mastermind-conspire-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
                 {action.key === 'select-trump' ? (
                   <div className="trump-action-combo">
                     <select
@@ -3894,6 +4299,36 @@ export function BlowCowBoard({
                       {drunkardRandomPlayCardCountOptions.map((countOption) => (
                         <option key={countOption} value={countOption}>
                           {countOption} card{countOption === 1 ? '' : 's'}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className={`action-button ${action.disabled ? 'disabled' : ''}`}
+                      disabled={action.disabled}
+                      onClick={action.onClick}
+                      title={action.description}
+                      type="button"
+                    >
+                      <ActionButtonContent icon={action.icon} label={action.label} />
+                    </button>
+                  </div>
+                ) : action.key === 'conspire' ? (
+                  <div className="trump-action-combo mastermind-conspire-combo">
+                    <select
+                      aria-label="Conspiracy target"
+                      className="trump-select mastermind-conspire-select"
+                      disabled={!canConspireNow}
+                      onChange={(event) => {
+                        setSelectedConspireTargetSeatID(event.target.value)
+                      }}
+                      value={conspireTargetSeatID ?? ''}
+                    >
+                      {conspiracyTargetSeatIDs.length === 0 ? (
+                        <option value="">No target</option>
+                      ) : null}
+                      {conspiracyTargetSeatIDs.map((seatID) => (
+                        <option key={seatID} value={seatID}>
+                          {getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)}
                         </option>
                       ))}
                     </select>

@@ -27,8 +27,18 @@ import {
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   type BlowCowImplementedCharacterName,
 } from './game/blowCowCharacters.ts'
+import {
+  BLOW_COW_RULE_DEFINITIONS,
+  createDefaultRulesState,
+  getRuleStatusOptions,
+  isDefaultRulesSelection,
+  type BlowCowRuleID,
+  type BlowCowRuleStatus,
+  type BlowCowRulesState,
+} from './game/blowCowRules.ts'
 import { getRoomClearBlockReason, hasRoomGameEnded } from './lobbyRooms.ts'
 import { BlowCowBoard } from './ui/BlowCowBoard.tsx'
+import { RuleCardDeck } from './ui/RuleCardDeck.tsx'
 import './App.css'
 
 type LobbyPlayer = {
@@ -244,6 +254,12 @@ function sortSelectedRanks(selectedRanks: BlowCowRank[]) {
   )
 }
 
+const RULE_STATUS_LABELS: Record<BlowCowRuleStatus, string> = {
+  active: 'Active',
+  removed: 'Removed',
+  upgraded: 'Upgraded',
+}
+
 function sortSelectedCharacterPool(selectedCharacterPool: BlowCowImplementedCharacterName[]) {
   return BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.filter((characterName) => selectedCharacterPool.includes(characterName))
 }
@@ -261,6 +277,10 @@ function App() {
   const [selectedCharacterPool, setSelectedCharacterPool] = useState<BlowCowImplementedCharacterName[]>(
     () => [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES],
   )
+  const [selectedRuleStatuses, setSelectedRuleStatuses] = useState<BlowCowRulesState>(createDefaultRulesState)
+  // The rule cards are twelve illustrated tiles. Inline they made the left column several screens
+  // tall, so they live behind a button in a centred overlay, the same one the match uses.
+  const [isHouseRulesOpen, setIsHouseRulesOpen] = useState(false)
   const [matches, setMatches] = useState<LobbyMatch[]>([])
   const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(readStoredActiveRoom)
   // A room that came from storage has to be proven to still exist; one this session just joined does
@@ -292,7 +312,16 @@ function App() {
     speedMultiplier,
     useCharacters,
     ...(useCharacters && !isUsingDefaultCharacterPool ? { characterPool: effectiveCharacterPool } : {}),
+    // Omitted while every rule is active, the same way the full character pool is.
+    ...(isDefaultRulesSelection(selectedRuleStatuses) ? {} : { rules: selectedRuleStatuses }),
   }
+  const changedRuleDefinitions = BLOW_COW_RULE_DEFINITIONS
+    .filter((definition) => selectedRuleStatuses[definition.id] !== 'active')
+  const changedRuleCount = changedRuleDefinitions.length
+  // Names the changes rather than counting them, so the collapsed panel still says what was done.
+  const changedRuleSummary = changedRuleDefinitions
+    .map((definition) => `${definition.title} ${selectedRuleStatuses[definition.id]}`)
+    .join(', ')
   const createRoomSetupError = validateBlowCowSetupData(createRoomSetupData)
   const isManualRankSelectionInvalid = rankSelectionMode === 'manual' && manualSelectedRanks.length < 2
   const isCharacterPoolInvalid = useCharacters && effectiveCharacterPool.length < 1
@@ -638,6 +667,10 @@ function App() {
     })
   }
 
+  const setRuleStatus = (ruleID: BlowCowRuleID, status: BlowCowRuleStatus) => {
+    setSelectedRuleStatuses((previousRuleStatuses) => ({ ...previousRuleStatuses, [ruleID]: status }))
+  }
+
   const handleLeaveRoom = async () => {
     if (!activeRoom) {
       return
@@ -889,6 +922,40 @@ function App() {
               </div>
             ) : null}
 
+            <div className="manual-rank-panel">
+              <div className="manual-rank-header">
+                <div>
+                  <p className="panel-kicker">House Rules</p>
+                  <h3>Choose Which Rule Cards Apply</h3>
+                  <p className="character-pool-copy">
+                    Every rule starts active. A rule only offers the variants it defines, so some cannot be
+                    removed and most cannot be upgraded.
+                  </p>
+                </div>
+                <span className="rank-selection-count">{changedRuleCount} changed</span>
+              </div>
+
+              <div className="house-rules-summary">
+                <p className="rule-status-hint">
+                  {changedRuleCount === 0
+                    ? 'Every rule card is active.'
+                    : changedRuleSummary}
+                </p>
+
+                <button
+                  aria-haspopup="dialog"
+                  className="secondary-button"
+                  disabled={isBusy}
+                  onClick={() => {
+                    setIsHouseRulesOpen(true)
+                  }}
+                  type="button"
+                >
+                  Open Rule Cards
+                </button>
+              </div>
+            </div>
+
             <fieldset className="deck-mode-group">
               <legend>Standard Ranks</legend>
 
@@ -1076,7 +1143,99 @@ function App() {
           </div>
         </article>
       </section>
+
+      {isHouseRulesOpen ? (
+        <HouseRulesOverlay
+          onClose={() => {
+            setIsHouseRulesOpen(false)
+          }}
+          onSetRuleStatus={setRuleStatus}
+          rules={selectedRuleStatuses}
+        />
+      ) : null}
     </main>
+  )
+}
+
+/**
+ * The lobby's rule-card editor. Shows the same deck the match shows, with each card carrying the
+ * status buttons that rule actually defines — a rule with no removed variant simply has no Removed
+ * button, which is what makes "some rules cannot be removed" legible without saying it.
+ */
+function HouseRulesOverlay({
+  onClose,
+  onSetRuleStatus,
+  rules,
+}: {
+  onClose: () => void
+  onSetRuleStatus: (ruleID: BlowCowRuleID, status: BlowCowRuleStatus) => void
+  rules: BlowCowRulesState
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [onClose])
+
+  return (
+    <div
+      aria-labelledby="house-rules-title"
+      aria-modal="true"
+      className="board-overlay lobby-overlay"
+      onClick={onClose}
+      role="dialog"
+    >
+      <section
+        className="board-overlay-panel rules-overlay-panel"
+        onClick={(event) => {
+          event.stopPropagation()
+        }}
+      >
+        <div className="board-overlay-header">
+          <div className="board-overlay-copy">
+            <p className="panel-kicker">House Rules</p>
+            <h2 id="house-rules-title">Choose Which Rule Cards Apply</h2>
+            <p className="room-note">
+              Every rule starts active. Removing a rule takes it out of play for the whole match.
+              Upgraded variants are shown to players but are not enforced yet.
+            </p>
+          </div>
+
+          <button className="secondary-button" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <RuleCardDeck
+          renderCardFooter={(definition, status) => (
+            <div className="rule-status-options" role="group">
+              {getRuleStatusOptions(definition.id).map((statusOption) => (
+                <button
+                  aria-pressed={status === statusOption}
+                  className={`rule-status-option ${statusOption} ${status === statusOption ? 'selected' : ''}`}
+                  key={statusOption}
+                  onClick={() => {
+                    onSetRuleStatus(definition.id, statusOption)
+                  }}
+                  type="button"
+                >
+                  {RULE_STATUS_LABELS[statusOption]}
+                </button>
+              ))}
+            </div>
+          )}
+          rules={rules}
+        />
+      </section>
+    </div>
   )
 }
 
