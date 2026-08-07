@@ -18,6 +18,7 @@ import {
   type BlowCowRuleID,
   type BlowCowRulesState,
 } from './blowCowRules.ts'
+import { comparePokerHands, evaluatePokerHand } from './blowCowPoker.ts'
 
 export const BLOW_COW_GAME_NAME = 'blow-cow'
 export const BLOW_COW_MIN_PLAYERS = 2
@@ -78,7 +79,12 @@ export type BlowCowTablePlay = {
   declaredCardCount?: number
   revealedCardIDs?: string[]
   rehiddenCardIDs?: string[]
-  claimedRank: BlowCowRank
+  /**
+   * Null only for a card sneaked onto the table before the round had a trump rank. There was nothing
+   * to claim yet, so the play claims nothing until one is chosen and `settleUnclaimedPlays` fills it
+   * in. Every other route to the table names a rank at the moment the cards land.
+   */
+  claimedRank: BlowCowRank | null
   playedAtRound: number
   playedAtTurn: number
   revealedAtTurn: number | null
@@ -177,6 +183,15 @@ export type BlowCowRoundState = {
   previousTrumpRank: BlowCowRank | null
   passStreak: number
   lastNonPassingPlayerID: string | null
+  /**
+   * The player The Invisible Hand handed the round to, who owes the table a play on the one turn
+   * that follows. Only `Pass` is actually taken off them, because on the first turn of a round there
+   * is nothing to challenge and nothing to reset, so that is already the whole action space.
+   *
+   * Optional in the type as well as in practice: a match staged before The Invisible Hand existed
+   * restores from `data/matches/` without the field, and nobody in it was ever forced to play.
+   */
+  forcedPlayPlayerID?: string | null
   maxCardsOnTable: number
 }
 
@@ -203,6 +218,8 @@ export type BlowCowBSTargetVerdict = {
 /** Withheld from clients by `hideSecretState` until every reveal step is confirmed. */
 export type BlowCowBSPunishment = {
   reverseRuleTriggered: boolean
+  /** The Contrarian called this one, so the punishment was flipped a second time. */
+  contrarianTriggered: boolean
   punishedPlayerID: string
   unpunishedPlayerID: string
 }
@@ -219,13 +236,30 @@ export type BlowCowDreamerCheatKind = (typeof BLOW_COW_DREAMER_CHEAT_KINDS)[numb
 
 /**
  * A Dreamer direction change waiting to be caught. Secret state: `hideSecretState` strips it, so no
- * client can tell whether the flip everyone just watched was The Contrarian acting legally on their
+ * client can tell whether the flip everyone just watched was The Cat acting legally on their
  * own turn or The Dreamer reaching into someone else's.
  */
 export type BlowCowDirectionTamper = {
   playerID: string
   /** The accusation window. A tamper is only catchable while `ctx.turn` still matches. */
   turnNumber: number
+}
+
+/**
+ * The last flip of the direction sign, published so every client can nudge the block of whoever made
+ * it. The deliberate opposite of `directionTamper`, and the reason both exist: this says who touched
+ * the sign, never whether they were entitled to. Working that out from their character and whose
+ * turn it was is the whole tell, and the answer itself still never leaves the server.
+ *
+ * Every flip is published, the legal ones included. Nudging only the cheats would announce the
+ * verdict along with the culprit, and nudging only the illegitimate flippers would say the same
+ * thing in reverse — an unnudged flip could then only be The Cat's.
+ *
+ * `id` changes on every flip, so a client can tell a fresh one from the one it has already played.
+ */
+export type BlowCowDirectionFlip = {
+  id: string
+  playerID: string
 }
 
 /**
@@ -301,10 +335,44 @@ export type BlowCowRevealWalk = {
   revealStepIndex: number
 }
 
+/** One seat's reading in a Gambler showdown. Card faces stay on the table; only the verdict is here. */
+export type BlowCowResetShowdownStanding = {
+  playerID: string
+  /** Player-facing, and the only description of the hand that reaches a client. */
+  handLabel: string
+  cardCount: number
+}
+
+/**
+ * The Gambler's Reset showdown. Withheld by `hideSecretState` until the reveal is complete, exactly
+ * like a BS punishment and for the same reason: until the caller has turned the table over, the
+ * hands this ranks are still face down, and the standings would name the loser before anyone could
+ * see why.
+ */
+export type BlowCowResetShowdown = {
+  /** Every active player, strongest hand first. Seats with nothing in front are listed too, at the bottom. */
+  standings: BlowCowResetShowdownStanding[]
+  /**
+   * Everyone tied for weakest. Usually one seat; more than one is a genuine tie, and the caller
+   * picks between them by pressing one of the Punish buttons.
+   */
+  weakestPlayerIDs: string[]
+  punishmentCardCount: number
+  /** Set by `beginResetPunishment` along with the choice; drives the punishment travel on every client. */
+  isPunishing: boolean
+  /** Null until the caller commits to one of `weakestPlayerIDs`. */
+  punishedPlayerID: string | null
+}
+
 export type BlowCowResetResolution = BlowCowRevealWalk & {
   id: string
   callerPlayerID: string
   kind: BlowCowTableReturnResolutionKind
+  /**
+   * Non-null only for a `reset` while a Gambler is seated. Optional in the type as well as in
+   * practice, because a match staged before The Gambler existed restores without the field.
+   */
+  showdown?: BlowCowResetShowdown | null
 }
 
 export type BlowCowHistoryEvent = {
@@ -366,6 +434,7 @@ export type BlowCowArchiveTurnActionKind =
   | 'breakRule'
   | 'defy'
   | 'conspire'
+  | 'manipulate'
   | 'hideTableCard'
   | 'gainOutsideCard'
   | 'play'
@@ -463,6 +532,11 @@ export type BlowCowState = {
   accusation: BlowCowAccusation | null
   directionTamper: BlowCowDirectionTamper | null
   /*
+   * Optional for the same restore reason as `conspiracy`: a match staged before the tell existed
+   * comes back without the field, and nobody is mid-nudge in a match that never had one.
+   */
+  directionFlip?: BlowCowDirectionFlip | null
+  /*
    * Optional in the type as well as in practice: a match staged before The Mastermind existed
    * restores from `data/matches/` without the field, and every read of it optional-chains for that
    * reason. Nobody is mid-conspiracy in a match that never had one.
@@ -520,6 +594,12 @@ export type BlowCowConspireArgs = {
   targetPlayerID: string
 }
 
+export type BlowCowManipulateArgs = {
+  targetPlayerID: string
+  trumpRank: BlowCowRank
+  direction: BlowCowDirection
+}
+
 export type BlowCowAccuseDreamerArgs = {
   targetPlayerID: string
 }
@@ -560,6 +640,15 @@ export type BlowCowAdvanceResetRevealArgs = {
 
 export type BlowCowFinalizeResetResolutionArgs = {
   resolutionID: string
+}
+
+/**
+ * The caller's choice of who takes the table in a Gambler showdown. It carries a player because a
+ * tie leaves more than one weakest hand, and breaking that tie is the caller's to make.
+ */
+export type BlowCowBeginResetPunishmentArgs = {
+  resolutionID: string
+  punishedPlayerID: string
 }
 
 export type BlowCowGameOver = {
@@ -659,6 +748,10 @@ function isBlowCowRank(value: unknown): value is BlowCowRank {
 
 function isBlowCowSuit(value: unknown): value is BlowCowSuit {
   return typeof value === 'string' && (BLOW_COW_SUITS as readonly string[]).includes(value)
+}
+
+function isBlowCowDirection(value: unknown): value is BlowCowDirection {
+  return BLOW_COW_DIRECTIONS.some((direction) => direction === value)
 }
 
 function isBlowCowSpeedMultiplier(value: unknown): value is BlowCowSpeedMultiplier {
@@ -1085,6 +1178,17 @@ function getFaceDownTableCardsForPlayer(state: BlowCowState, playerID: string) {
   return state.table.plays
     .filter((play) => play.playerID === playerID)
     .flatMap((play) => getFaceDownCardsForPlay(play))
+}
+
+/**
+ * Everything sitting in front of one player, face up or not. This is the "cards in front" a Gambler
+ * showdown reads as a poker hand, so it spans every play that player made this round rather than
+ * just their latest one.
+ */
+function getTableCardsForPlayer(state: BlowCowState, playerID: string) {
+  return state.table.plays
+    .filter((play) => play.playerID === playerID)
+    .flatMap((play) => play.cards)
 }
 
 /**
@@ -1661,7 +1765,7 @@ function createPlay(
   playerID: string,
   cards: BlowCowCard[],
   declaredCardCount: number,
-  claimedRank: BlowCowRank,
+  claimedRank: BlowCowRank | null,
   turnNumber: number,
   wasTrumpSelection: boolean,
   options: { skipPendingReveal?: boolean } = {},
@@ -1694,12 +1798,53 @@ function isDreamer(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Dreamer'
 }
 
+/**
+ * Who is allowed to break the rules. The Dreamer alone while the No Cheating Rule stands, and
+ * everybody once it falls — the one removal that widens the game instead of narrowing it.
+ *
+ * Every cheat below routes through here, permission and detection alike, so the licence to cheat and
+ * the window to be accused of it can never disagree about who is answerable. `isDreamer` survives
+ * only where the question really is "is this player The Dreamer" — archive labelling, and nothing
+ * else.
+ */
+function canCheat(state: BlowCowState, playerID: string) {
+  return isDreamer(state, playerID) || isRuleRemoved(state, 'noCheating')
+}
+
+/**
+ * Hands the round's trump rank to every play still waiting for one. Only a card sneaked onto the
+ * table before the rank was chosen can be waiting, and from here on it is an ordinary face-down play
+ * that BS judges like any other — the claim it inherits is the same one everybody else is under.
+ *
+ * The lie is counted here rather than at the sneak, because there was nothing to be a lie about yet.
+ * Called wherever `round.trumpRank` goes from null to a rank, which is the trump-selecting play and
+ * The Invisible Hand's Manipulate.
+ */
+function settleUnclaimedPlays(state: BlowCowState, trumpRank: BlowCowRank) {
+  for (const play of state.table.plays) {
+    if (play.claimedRank !== null) {
+      continue
+    }
+
+    play.claimedRank = trumpRank
+    const character = state.players[play.playerID]?.character ?? null
+    const wasHonest = play.cards.every((card) => isTrumpCardInMatch(state, card, trumpRank, character))
+    if (!wasHonest) {
+      state.players[play.playerID].matchStats.lieCount += 1
+    }
+  }
+}
+
 function isDrunkard(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Drunkard'
 }
 
 function isGrandmaster(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Grandmaster'
+}
+
+function isCat(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Cat'
 }
 
 function isContrarian(state: BlowCowState, playerID: string) {
@@ -1773,9 +1918,18 @@ export function isPrototype(state: BlowCowState, playerID: string) {
 }
 
 /**
- * Defy needs a rule left to destroy, not just an unspent use. Both halves of the action are written
- * on the card, so the ability is offered only when it can do all of what it says — which also keeps
- * it from becoming a free way to dump a card once every removable rule is gone.
+ * The card Defy is allowed to burn. Hearts and nothing else, so the ability costs a specific card
+ * rather than whichever one the hand values least, and a joker can never pay for it.
+ */
+export function isDefyDestroyableCard(card: BlowCowCard) {
+  return card.suit === 'hearts'
+}
+
+/**
+ * Defy needs a rule left to destroy and a heart to spend, not just an unspent use. Both halves of
+ * the action are written on the card, so the ability is offered only when it can do all of what it
+ * says — which also keeps it from becoming a free way to dump a card once every removable rule is
+ * gone.
  */
 export function canUseDefy(state: BlowCowState, playerID: string) {
   const player = state.players[playerID]
@@ -1783,7 +1937,7 @@ export function canUseDefy(state: BlowCowState, playerID: string) {
   return isPrototype(state, playerID)
     && !player?.hasUsedDefyThisRound
     && !player?.hasLeft
-    && (player?.hand.length ?? 0) > 0
+    && Boolean(player?.hand.some(isDefyDestroyableCard))
     && getBreakableRuleIDs(state).length > 0
 }
 
@@ -1830,20 +1984,65 @@ export function getOpenConspiracy(state: BlowCowState, playerID: string, turnNum
   return conspiracy
 }
 
+export function isInvisibleHand(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Invisible Hand'
+}
+
+/** Whom the round may be handed to: anyone still in the game except the player handing it over. */
+export function getManipulationTargetPlayerIDs(state: BlowCowState, playerID: string) {
+  return getActivePlayerIDs(state).filter((targetPlayerID) => targetPlayerID !== playerID)
+}
+
+/**
+ * The ranks Manipulate may install as trump. Deciding the rank outright is still deciding it, so the
+ * Rank Change Rule applies exactly as it does to an ordinary trump selection — and lifts with the
+ * card, the same way. Not narrowed to the deck's own ranks, because an ordinary trump selection is
+ * not either: claiming a rank nobody holds is a legal, and very loud, way to make everything a lie.
+ */
+export function getManipulableTrumpRanks(state: BlowCowState) {
+  const forbiddenRank = isRuleRemoved(state, 'rankChange') ? null : state.round.previousTrumpRank
+
+  return BLOW_COW_RANKS.filter((rank) => rank !== forbiddenRank)
+}
+
+/**
+ * Manipulate's window, which is narrow by design: the starting player, on the first turn of the
+ * round, before anything at all has happened in it. A pass or a play breaks every one of the three
+ * conditions below, so a round that has begun can never be re-opened.
+ *
+ * Unlimited use needs no spent flag because the ability spends its own precondition — handing the
+ * round to somebody else is what stops being the starting player, and The Invisible Hand may not
+ * name themselves. It comes back the next time they legitimately open a round.
+ */
+export function canManipulate(state: BlowCowState, playerID: string) {
+  return isInvisibleHand(state, playerID)
+    && !state.players[playerID]?.hasLeft
+    && state.round.startingPlayerID === playerID
+    && state.round.trumpRank === null
+    && state.round.passStreak === 0
+    && state.round.lastNonPassingPlayerID === null
+    && getManipulationTargetPlayerIDs(state, playerID).length > 0
+}
+
 function canUseGrandmasterBSOverride(state: BlowCowState, playerID: string) {
   return isGrandmaster(state, playerID) && !state.players[playerID]?.hasUsedGrandmasterBSOverride
 }
 
-function getDreamerDeclaredCardCount(state: BlowCowState, playerID: string, actualCardCount: number) {
-  return isDreamer(state, playerID) && actualCardCount > 2 ? 2 : actualCardCount
+/**
+ * What the table is told a play contains. A player licensed to cheat never declares more than 2, so
+ * any card past the second is one nobody was told about — which is the whole `extraCardCount` cheat.
+ */
+function getDeclaredCardCount(state: BlowCowState, playerID: string, actualCardCount: number) {
+  return canCheat(state, playerID) && actualCardCount > 2 ? 2 : actualCardCount
 }
 
 /*
- * All four Dreamer cheat tests are gated on the rule they break still being in play. A cheat is only
- * a cheat against a live rule: once the Rank Change or Max Cards On Table card is gone, everyone may
- * do the thing, so the play is honest and there is nothing for an accusation to catch.
+ * All four card-and-trump cheat tests are gated twice: on the rule they break still being in play,
+ * and on the player holding a licence to break it. A cheat is only a cheat against a live rule —
+ * once the Rank Change or Max Cards On Table card is gone, everyone may do the thing openly, so the
+ * play is honest and there is nothing for an accusation to catch.
  */
-function canDreamerRepeatPreviousTrump(
+function canRepeatPreviousTrump(
   state: BlowCowState,
   playerID: string,
   nextTrumpRank: BlowCowRank | null,
@@ -1853,23 +2052,23 @@ function canDreamerRepeatPreviousTrump(
     && state.round.trumpRank === null
     && state.round.previousTrumpRank !== null
     && state.round.previousTrumpRank === nextTrumpRank
-    && isDreamer(state, playerID)
+    && canCheat(state, playerID)
 }
 
-function didDreamerRepeatPreviousTrump(state: BlowCowState, play: BlowCowTablePlay) {
+function didRepeatPreviousTrump(state: BlowCowState, play: BlowCowTablePlay) {
   return play.wasTrumpSelection
     && !isRuleRemoved(state, 'rankChange')
     && state.round.previousTrumpRank !== null
     && play.claimedRank === state.round.previousTrumpRank
-    && isDreamer(state, play.playerID)
+    && canCheat(state, play.playerID)
 }
 
-function didDreamerPlayExtraCards(state: BlowCowState, play: BlowCowTablePlay) {
-  return isDreamer(state, play.playerID) && play.cards.length > (play.declaredCardCount ?? play.cards.length)
+function didPlayExtraCards(state: BlowCowState, play: BlowCowTablePlay) {
+  return canCheat(state, play.playerID) && play.cards.length > (play.declaredCardCount ?? play.cards.length)
 }
 
-function didDreamerExceedTableLimit(state: BlowCowState, play: BlowCowTablePlay) {
-  return isDreamer(state, play.playerID)
+function didExceedTableLimit(state: BlowCowState, play: BlowCowTablePlay) {
+  return canCheat(state, play.playerID)
     && !isRuleRemoved(state, 'maxCardsOnTable')
     && getTableCardCount(state.table) > state.round.maxCardsOnTable
 }
@@ -1899,21 +2098,21 @@ function getLatestPlayForPlayer(state: BlowCowState, playerID: string) {
 }
 
 /**
- * The one Dreamer rule `targetPlayerID` is currently answerable for, or null when the accusation
- * would miss. Only `accuseDreamer` calls this — a BS call no longer looks at any of it.
+ * The one cheat `targetPlayerID` is currently answerable for, or null when the accusation would
+ * miss. Only `accuseDreamer` calls this — a BS call no longer looks at any of it.
  *
  * The windows differ because the cheats do. Tampering with the direction and reaching into someone
  * else's turn to play are properties of the turn they happened in, so they close when that turn
  * ends. The other three are properties of a play, and follow the play's own hidden lifetime:
  * catchable during the turn immediately after it was made, and gone once that turn is over.
  */
-function getAccusableDreamerCheat(
+function getAccusableCheat(
   state: BlowCowState,
   targetPlayerID: string,
   currentPlayerID: string,
   turnNumber: number,
 ): BlowCowDreamerCheatKind | null {
-  if (!isDreamer(state, targetPlayerID)) {
+  if (!canCheat(state, targetPlayerID)) {
     return null
   }
 
@@ -1930,15 +2129,15 @@ function getAccusableDreamerCheat(
     return null
   }
 
-  if (didDreamerPlayExtraCards(state, latestPlay)) {
+  if (didPlayExtraCards(state, latestPlay)) {
     return 'extraCardCount'
   }
 
-  if (didDreamerExceedTableLimit(state, latestPlay)) {
+  if (didExceedTableLimit(state, latestPlay)) {
     return 'exceededTableLimit'
   }
 
-  if (didDreamerRepeatPreviousTrump(state, latestPlay)) {
+  if (didRepeatPreviousTrump(state, latestPlay)) {
     return 'repeatTrump'
   }
 
@@ -2149,8 +2348,13 @@ function createBSResolution(
       const playCharacter = state.players[play.playerID]?.character ?? null
       return play.cards.filter((card) => countsTowardReverseRule(card, trumpRank, playCharacter))
     }).length >= 4
+  // The Contrarian's own layer of reverse, and it is a layer rather than an override: it stacks with
+  // the Reverse Rule, so a call that trips both flips twice and lands back on the default. Bound to
+  // the caller's seat only — being called on by a Contrarian does nothing.
+  const contrarianTriggered = isContrarian(state, callerPlayerID)
   const defaultPunishedPlayerID = targetWasHonest ? callerPlayerID : targetPlayerID
-  const punishedPlayerID = reverseRuleTriggered
+  const isPunishmentFlipped = reverseRuleTriggered !== contrarianTriggered
+  const punishedPlayerID = isPunishmentFlipped
     ? (defaultPunishedPlayerID === callerPlayerID ? targetPlayerID : callerPlayerID)
     : defaultPunishedPlayerID
   const unpunishedPlayerID = punishedPlayerID === callerPlayerID ? targetPlayerID : callerPlayerID
@@ -2171,10 +2375,56 @@ function createBSResolution(
     },
     punishment: {
       reverseRuleTriggered,
+      contrarianTriggered,
       punishedPlayerID,
       unpunishedPlayerID,
     },
   } satisfies BlowCowBSResolution
+}
+
+/**
+ * The Gambler turns every Reset into a showdown, whoever calls it — the ability is a rule they
+ * impose on the table rather than an action they spend, so it is read off the seating and not off
+ * the caller. A Gambler who has left the game takes it with them.
+ */
+function isGamblerShowdownActive(state: BlowCowState) {
+  return getActivePlayerIDs(state).some((playerID) => state.players[playerID]?.character === 'The Gambler')
+}
+
+/**
+ * Reads the cards in front of every active player as a poker hand and ranks them. Built at call time
+ * like a BS punishment, and hidden the same way until the reveal is complete.
+ *
+ * Everyone still in the game is ranked, including players who passed all round and have nothing in
+ * front of them — an empty hand is the weakest thing there is, and leaving those seats out would
+ * quietly protect the most passive player at the table from the one procedure that punishes passivity.
+ */
+function createResetShowdown(state: BlowCowState, callerPlayerID: string) {
+  const rankedPlayers = getActivePlayerIDs(state)
+    .map((playerID) => ({
+      playerID,
+      hand: evaluatePokerHand(getTableCardsForPlayer(state, playerID)),
+    }))
+    .sort((left, right) => comparePokerHands(right.hand, left.hand))
+
+  const weakestHand = rankedPlayers[rankedPlayers.length - 1]?.hand ?? null
+
+  return {
+    standings: rankedPlayers.map(({ playerID, hand }) => ({
+      playerID,
+      handLabel: hand.label,
+      cardCount: hand.cardCount,
+    })),
+    // A tie leaves more than one seat here, and every one of them is offered to the caller.
+    weakestPlayerIDs: weakestHand
+      ? rankedPlayers
+          .filter(({ hand }) => comparePokerHands(hand, weakestHand) === 0)
+          .map(({ playerID }) => playerID)
+      : [callerPlayerID],
+    punishmentCardCount: getTableCardCount(state.table),
+    isPunishing: false,
+    punishedPlayerID: null,
+  } satisfies BlowCowResetShowdown
 }
 
 function createResetResolution(
@@ -2190,6 +2440,11 @@ function createResetResolution(
     // they have nothing face down, so an all-pass return can begin at someone else entirely.
     revealOrder: getTableRevealOrder(state, callerPlayerID),
     revealStepIndex: 0,
+    // An all-pass return is not a Reset, so it is never a showdown: nobody called anything, and the
+    // cards are going back to the players who put them down rather than being won or lost.
+    showdown: kind === 'reset' && isGamblerShowdownActive(state)
+      ? createResetShowdown(state, callerPlayerID)
+      : null,
   } satisfies BlowCowResetResolution
 }
 
@@ -2200,7 +2455,7 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
 
   if (state.accusation) {
     const { accuserPlayerID, targetPlayerID, wasSuccessful, caughtCheat, punishedPlayerID } = state.accusation
-    const callLabel = `${formatPlayerLabel(state, accuserPlayerID)} accused ${formatPlayerLabel(state, targetPlayerID)} of cheating as The Dreamer.`
+    const callLabel = `${formatPlayerLabel(state, accuserPlayerID)} accused ${formatPlayerLabel(state, targetPlayerID)} of cheating.`
     const outcomeLabel = wasSuccessful && caughtCheat
       ? `They ${getDreamerCheatDescription(caughtCheat)}.`
       : 'The accusation missed.'
@@ -2220,8 +2475,12 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
 
   if (state.resetResolution) {
     const focusedPlayerID = getRevealFocusedPlayerID(state.resetResolution)
+    // Broadcast prose, so it may say a showdown is coming — The Gambler's seat is public — but never
+    // who is losing it. That is the reveal's to tell.
     const callLabel = state.resetResolution.kind === 'roundReturn'
       ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} passed. Everyone passed, so the table cards are returning to their owners.`
+      : state.resetResolution.showdown
+      ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} called Reset. The Gambler makes it a showdown, so the weakest hand takes the table.`
       : `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} called Reset. Returning the table cards before redistributing them.`
 
     return focusedPlayerID
@@ -2235,13 +2494,13 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
   const hasBSTarget = Boolean(getDefaultBSTargetPlayerID(state, currentPlayerID))
   const hasPawnEnPassantTarget = Boolean(getPawnEnPassantTargetSelection(state, currentPlayerID))
   const canReset = tableCardCount >= state.round.maxCardsOnTable
-  const directionActionDetail = isContrarian(state, currentPlayerID)
+  const directionActionDetail = isCat(state, currentPlayerID)
     ? ' Change Direction is also available.'
-    : isDreamer(state, currentPlayerID)
+    : canCheat(state, currentPlayerID)
     ? ' Change Direction is also available, but Accuse can catch it before the turn ends.'
     : ''
 
-  const canPass = !isRuleRemoved(state, 'pass')
+  const canPass = !isRuleRemoved(state, 'pass') && state.round.forcedPlayPlayerID !== currentPlayerID
   // With the table cap gone, a full table no longer closes Play, so the two stop being exclusive.
   const canPlayMore = isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable
 
@@ -2259,6 +2518,12 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     return canPass
       ? `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play, or pass.${directionActionDetail}`
       : `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play.${directionActionDetail}`
+  }
+
+  // The round was opened for them, rank and all, so there is one action left and the status says it
+  // rather than reciting an action space they do not have.
+  if (state.round.forcedPlayPlayerID === currentPlayerID) {
+    return `Trump is ${trumpRank}. The Invisible Hand opened the round for ${playerLabel}, who must play and may not pass.${directionActionDetail}`
   }
 
   const tableSummary = `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}.`
@@ -2380,6 +2645,7 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.round.trumpRank = null
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
+  state.round.forcedPlayPlayerID = null
   state.round.status = 'awaitingTrumpSelection'
   state.table.plays = []
   state.bsResolution = null
@@ -2388,6 +2654,7 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   // All round-scoped: nothing from the old round stays accusable, and everyone gets their one
   // accusation back, The Prototype their one Defy, and The Mastermind their one Conspire.
   state.directionTamper = null
+  state.directionFlip = null
   state.conspiracy = null
   for (const player of Object.values(state.players)) {
     player.hasUsedAccusationThisRound = false
@@ -2698,11 +2965,22 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
 
   const currentPlayerID = ctx.currentPlayer
   G.players[currentPlayerID].turnStartingDirection = G.round.direction
-  // The window on a direction tamper is the turn it happened in, so a new turn closes it.
+  // The window on a direction tamper is the turn it happened in, so a new turn closes it. The tell
+  // goes with it: every connected client has played the nudge by now, and a player who reconnects
+  // later is not owed a replay of something they were meant to catch live.
   G.directionTamper = null
+  G.directionFlip = null
   // A conspiracy is paid off by the play it commits to, so one still standing here belongs to a turn
   // that ended some other way — an accusation resolving mid-turn, or a match restored mid-flight.
   G.conspiracy = null
+  /*
+   * Manipulate's lock covers exactly one turn: the one it forced. Any turn that is not the forced
+   * player's is proof that theirs has been and gone. Two turns in a row is not a case to worry
+   * about — it would take every other player leaving, and the game ends before that.
+   */
+  if (G.round.forcedPlayPlayerID !== currentPlayerID) {
+    G.round.forcedPlayPlayerID = null
+  }
   G.players[currentPlayerID].matchStats.turnsInGame += 1
   ensureArchiveTurn(G, currentPlayerID, ctx.turn)
   revealPendingPlayAtTurnStart(G, currentPlayerID, ctx.turn, random?.Shuffle)
@@ -2785,7 +3063,7 @@ function validateCommonPlay(
     nextTrumpRank !== null
     && !isRuleRemoved(state, 'rankChange')
     && state.round.previousTrumpRank === nextTrumpRank
-    && !canDreamerRepeatPreviousTrump(state, playerID, nextTrumpRank)
+    && !canRepeatPreviousTrump(state, playerID, nextTrumpRank)
   ) {
     return false
   }
@@ -2794,11 +3072,11 @@ function validateCommonPlay(
     return false
   }
 
-  if (!isDreamer(state, playerID) && cardIDs.length > 2) {
+  if (!canCheat(state, playerID) && cardIDs.length > 2) {
     return false
   }
 
-  return isDreamer(state, playerID)
+  return canCheat(state, playerID)
     || isRuleRemoved(state, 'maxCardsOnTable')
     || getTableCardCount(state.table) + cardIDs.length <= state.round.maxCardsOnTable
 }
@@ -2837,21 +3115,21 @@ function performPlay(
     return INVALID_MOVE
   }
 
-  const declaredCardCount = getDreamerDeclaredCardCount(G, playerID, selectedCards.length)
-  const usedDreamerRepeatTrump = canDreamerRepeatPreviousTrump(G, playerID, nextTrumpRank)
+  const declaredCardCount = getDeclaredCardCount(G, playerID, selectedCards.length)
+  const usedRepeatTrump = canRepeatPreviousTrump(G, playerID, nextTrumpRank)
   // Only for labelling the archive action. The direction cheat itself is tracked on `directionTamper`
   // now that it is scoped to a turn rather than to a play, and can happen on a turn with no play.
-  const usedDreamerDirectionChange = isDreamer(G, playerID) && G.directionTamper?.playerID === playerID
-  const usedDreamerExtraCardCount = isDreamer(G, playerID) && selectedCards.length > declaredCardCount
-  const usedDreamerExceededTableLimit = isDreamer(G, playerID)
+  const usedDirectionChange = canCheat(G, playerID) && G.directionTamper?.playerID === playerID
+  const usedExtraCardCount = canCheat(G, playerID) && selectedCards.length > declaredCardCount
+  const usedExceededTableLimit = canCheat(G, playerID)
     && !isRuleRemoved(G, 'maxCardsOnTable')
     && getTableCardCount(G.table) + selectedCards.length > G.round.maxCardsOnTable
   const playerCharacter = G.players[playerID].character
   const playerMatchStats = G.players[playerID].matchStats
   const wasHonest = selectedCards.every((card) => isTrumpCardInMatch(G, card, claimedRank, playerCharacter))
-    && !usedDreamerRepeatTrump
-    && !usedDreamerExtraCardCount
-    && !usedDreamerExceededTableLimit
+    && !usedRepeatTrump
+    && !usedExtraCardCount
+    && !usedExceededTableLimit
   playerMatchStats.playCount += 1
   playerMatchStats.cardsPlayed += selectedCards.length
   if (playMode === 'manual') {
@@ -2869,6 +3147,11 @@ function performPlay(
    */
   createPlay(G, playerID, selectedCards, declaredCardCount, claimedRank, ctx.turn, nextTrumpRank !== null)
   G.round.trumpRank = nextTrumpRank ?? G.round.trumpRank
+  // After `createPlay`, so a card sneaked in before the rank existed and the play that names it are
+  // both settled against the same rank, in the order they reached the table.
+  if (nextTrumpRank !== null) {
+    settleUnclaimedPlays(G, nextTrumpRank)
+  }
   G.round.status = 'inProgress'
   G.round.passStreak = 0
   G.round.lastNonPassingPlayerID = playerID
@@ -2900,7 +3183,10 @@ function performPlay(
       ? 'The Mastermind'
       : playMode === 'random'
       ? 'The Drunkard'
-      : usedDreamerRepeatTrump || usedDreamerDirectionChange || usedDreamerExtraCardCount || usedDreamerExceededTableLimit
+      // Still `isDreamer`, not `canCheat`: the field names the character behind the play, and once
+      // the No Cheating Rule is gone the licence is nobody's character in particular.
+      : isDreamer(G, playerID)
+        && (usedRepeatTrump || usedDirectionChange || usedExtraCardCount || usedExceededTableLimit)
       ? 'The Dreamer'
       : null,
     // Whose hand the cards left, which for an ordinary play is nobody's business but the player's own.
@@ -2948,7 +3234,8 @@ function resolveDrunkardRandomPlay(
 }
 
 /**
- * The Dreamer reaching into someone else's turn to put cards on the table.
+ * Reaching into someone else's turn to put cards on the table. The Dreamer's alone while the No
+ * Cheating Rule stands; anyone's once it falls.
  *
  * Deliberately not routed through `performPlay`: almost everything that move does is wrong here.
  * A sneaked play ends nobody's turn, claims no new trump, breaks no pass streak, does not become
@@ -2959,7 +3246,7 @@ function resolveDrunkardRandomPlay(
  * see, and their hand count drops to match; the cheat lives or dies on whether anyone was watching
  * a player who was not supposed to be acting. That is why nothing here is secret state.
  */
-function resolveDreamerSneakPlay(
+function resolveSneakPlay(
   context: BlowCowMoveContext,
   args?: BlowCowSneakPlayArgs,
 ) {
@@ -2970,19 +3257,18 @@ function resolveDreamerSneakPlay(
     return INVALID_MOVE
   }
 
-  if (!isDreamer(G, playerID) || G.players[playerID].hasLeft) {
+  if (!canCheat(G, playerID) || G.players[playerID].hasLeft) {
     return INVALID_MOVE
   }
 
-  // Reaching into another turn is the whole cheat. On their own turn the Dreamer just plays.
+  // Reaching into another turn is the whole cheat. On their own turn the player just plays.
   if (ctx.currentPlayer === playerID) {
     return INVALID_MOVE
   }
 
-  // A sneaked play never selects trump, so before the round has one there is nothing to claim.
-  // Exactly one card: a handful appearing at once is the opposite of sleight of hand, and the
-  // whole cheat rests on the table not noticing.
-  if (G.round.trumpRank === null || cardIDs.length !== 1) {
+  // Exactly one card: a handful appearing at once is the opposite of sleight of hand, and the whole
+  // cheat rests on the table not noticing. A missing trump rank is no obstacle — see below.
+  if (cardIDs.length !== 1) {
     return INVALID_MOVE
   }
 
@@ -2997,13 +3283,23 @@ function resolveDreamerSneakPlay(
     return INVALID_MOVE
   }
 
+  /*
+   * The one route to the table that does not need a trump rank. A sneak claims nothing of its own —
+   * it inherits whatever the round settles on — so before the rank is chosen there is simply nothing
+   * to inherit yet, and `settleUnclaimedPlays` fills it in the moment somebody names one. Slipping a
+   * card in before the round has a shape is the best moment for it, and refusing that was an
+   * accident of the claim being written at play time rather than a rule anyone wanted.
+   */
   const claimedRank = G.round.trumpRank
   const playerMatchStats = G.players[playerID].matchStats
-  const wasHonest = selectedCards.every((card) => isTrumpCardInMatch(G, card, claimedRank, G.players[playerID].character))
+  // Honesty needs a rank to be measured against. With none yet, the judgement waits for the settle.
+  const wasHonest = claimedRank === null
+    ? null
+    : selectedCards.every((card) => isTrumpCardInMatch(G, card, claimedRank, G.players[playerID].character))
 
   playerMatchStats.playCount += 1
   playerMatchStats.cardsPlayed += selectedCards.length
-  if (!wasHonest) {
+  if (wasHonest === false) {
     playerMatchStats.lieCount += 1
   }
 
@@ -3011,16 +3307,19 @@ function resolveDreamerSneakPlay(
     skipPendingReveal: true,
   })
 
+  const claimDetail = claimedRank === null
+    ? 'claiming nothing yet, since the round has no trump rank'
+    : `claiming ${claimedRank}`
   // Archive only. `hideSecretState` empties the archive before it reaches a client, so this is the
-  // one record that can name the Dreamer without handing the accusation to everyone at the table.
+  // one record that can name the cheat without handing the accusation to everyone at the table.
   appendArchiveTurnAction(G, playerID, ctx.turn, {
     kind: 'play',
-    detail: `Slipped ${formatCardLabel(selectedCards[0])} onto the table during ${formatPlayerLabel(G, ctx.currentPlayer)}'s turn, claiming ${claimedRank}. Accuse can catch this until that turn ends.`,
-    characterUsed: 'The Dreamer',
+    detail: `Slipped ${formatCardLabel(selectedCards[0])} onto the table during ${formatPlayerLabel(G, ctx.currentPlayer)}'s turn, ${claimDetail}. Accuse can catch this until that turn ends.`,
+    characterUsed: isDreamer(G, playerID) ? 'The Dreamer' : null,
     cards: selectedCards,
     declaredCardCount: selectedCards.length,
     claimedRank,
-    wasHonest,
+    wasHonest: wasHonest ?? undefined,
     playMode: 'manual',
     directionBefore: G.round.direction,
     directionAfter: G.round.direction,
@@ -3036,7 +3335,7 @@ function resolveCatHideCard(
     return INVALID_MOVE
   }
 
-  if (G.players[playerID].character !== 'The Cat') {
+  if (!isCat(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -3170,7 +3469,7 @@ function resolveBrokenRuleRemoval(
 export const DEFY_HISTORY_OMEN = 'Your defiance has corrupted the game!'
 
 /**
- * The Prototype destroys a card out of their own hand and a rule card off the table of rules.
+ * The Prototype destroys a heart out of their own hand and a rule card off the table of rules.
  *
  * Turn-bound and explicitly free: it costs the turn nothing, so the player still acts afterwards.
  * That is why this never touches `pendingRevealPlayID`, the pass streak, or the turn — the only
@@ -3195,6 +3494,13 @@ function resolveDefy(
 
   const targetCardID = args?.cardID
   if (typeof targetCardID !== 'string') {
+    return INVALID_MOVE
+  }
+
+  // Checked before anything is removed, so a card of the wrong suit refuses the whole action rather
+  // than leaving the hand short of a card the rule card never asked for.
+  const targetCard = G.players[playerID].hand.find((card) => card.id === targetCardID)
+  if (!targetCard || !isDefyDestroyableCard(targetCard)) {
     return INVALID_MOVE
   }
 
@@ -3299,14 +3605,91 @@ function resolveConspire(
 }
 
 /**
- * The Contrarian's legal flip and the Dreamer's illegal one share this move, and deliberately share
- * an announcement that names nobody. The Dreamer may reach into any player's turn, so the flip on
- * its own has to stay ambiguous: if the log named the player, everyone would know exactly who to
- * accuse and the cheat would be worth nothing. Anonymising only the Dreamer would be the same
- * giveaway in reverse, since an unattributed flip could then only be theirs. The archive, which
- * `hideSecretState` strips before any client sees it, still records who really did it.
+ * The Invisible Hand setting a round up and then handing it to somebody else to open.
+ *
+ * All three of the round's opening decisions in one move: the trump rank, the direction, and who
+ * takes the first turn. It ends the mover's turn without a play, which is why nothing here touches
+ * `lastNonPassingPlayerID` — there are no cards on the table to challenge, and leaving that pointer
+ * null is what keeps `Call BS` unavailable to the player being handed the turn.
+ *
+ * The chosen player is left with a single legal action. Only `Pass` is explicitly taken from them,
+ * because on the first turn of a round nothing has been played and nothing is on the table, so
+ * `Call BS` and `Call Reset` are already unavailable on their own terms.
  */
-function resolveContrarianToggleDirection(
+function resolveManipulate(
+  context: BlowCowMoveContext,
+  args?: BlowCowManipulateArgs,
+) {
+  const { G, ctx, events, playerID } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+    return INVALID_MOVE
+  }
+
+  if (!canManipulate(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  const targetPlayerID = args?.targetPlayerID
+  if (typeof targetPlayerID !== 'string' || !getManipulationTargetPlayerIDs(G, playerID).includes(targetPlayerID)) {
+    return INVALID_MOVE
+  }
+
+  const trumpRank = args?.trumpRank
+  if (!isBlowCowRank(trumpRank) || !getManipulableTrumpRanks(G).includes(trumpRank)) {
+    return INVALID_MOVE
+  }
+
+  const direction = args?.direction
+  if (!isBlowCowDirection(direction)) {
+    return INVALID_MOVE
+  }
+
+  const directionBefore = G.round.direction
+  G.round.trumpRank = trumpRank
+  // Manipulate puts nothing on the table, but it is still the moment the round gets a rank, so any
+  // card sneaked in before it settles against the rank this player just chose.
+  settleUnclaimedPlays(G, trumpRank)
+  G.round.direction = direction
+  G.round.status = 'inProgress'
+  G.round.startingPlayerID = targetPlayerID
+  G.round.forcedPlayPlayerID = targetPlayerID
+
+  const detail = `Set the trump rank to ${trumpRank}, the direction to ${direction}, and handed the round to ${formatPlayerLabel(G, targetPlayerID)}, who must play.`
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, playerID)} used The Invisible Hand`,
+    detail,
+    playerID,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'manipulate',
+    detail,
+    characterUsed: 'The Invisible Hand',
+    targetPlayerID,
+    claimedRank: trumpRank,
+    directionBefore,
+    directionAfter: direction,
+  })
+
+  events.endTurn({ next: targetPlayerID })
+}
+
+/**
+ * The Cat's legal flip and the illegal one share this move, and deliberately share the same
+ * silence: no history event at all. A cheat may reach into any player's turn, so a log line naming
+ * the player would tell everyone exactly who to accuse and the cheat would be worth nothing — and a
+ * line naming only the cheats would be the same giveaway in reverse, since an unattributed flip
+ * could then only be The Cat's. The archive, which `hideSecretState` strips before any client
+ * sees it, still records who really did it.
+ *
+ * What the log does not carry, `G.directionFlip` gives back as a body movement rather than a
+ * sentence: every flip nudges its author's block toward the hub, so a player watching the table sees
+ * who reached for the sign. That is the tell, and it stops there — it names the hand, never the
+ * verdict, and it leaves nothing behind for anyone who was looking elsewhere to read afterwards.
+ */
+function resolveToggleDirection(
   context: BlowCowMoveContext,
 ) {
   const { G, ctx, playerID } = context
@@ -3314,14 +3697,14 @@ function resolveContrarianToggleDirection(
     return INVALID_MOVE
   }
 
-  const usedContrarian = isContrarian(G, playerID)
-  const usedDreamer = isDreamer(G, playerID)
-  if (!usedContrarian && !usedDreamer) {
+  const usedCat = isCat(G, playerID)
+  const mayCheat = canCheat(G, playerID)
+  if (!usedCat && !mayCheat) {
     return INVALID_MOVE
   }
 
-  // The Contrarian is still bound to their own turn. The Dreamer is not, which is the whole power.
-  if (!usedDreamer && ctx.currentPlayer !== playerID) {
+  // The Cat is still bound to their own turn. A cheat is not, which is the whole power.
+  if (!mayCheat && ctx.currentPlayer !== playerID) {
     return INVALID_MOVE
   }
 
@@ -3332,24 +3715,45 @@ function resolveContrarianToggleDirection(
   const directionBefore = G.round.direction
   G.round.direction = toggleDirection(G.round.direction)
 
-  if (usedDreamer) {
-    // Measured against the direction the *current* turn opened on, not the Dreamer's own last turn,
-    // because the accusation window is that turn. Flipping back within the same turn erases the
-    // tamper along with the advantage, exactly as it did when this was scoped to a play.
+  /*
+   * The Cat's own turn is the only flip the rules allow, so everything else is a tamper —
+   * including The Cat reaching into somebody else's turn once the No Cheating Rule is gone.
+   *
+   * Measured against the direction the *current* turn opened on, not the flipper's own last turn,
+   * because the accusation window is that turn. Flipping back within the same turn erases the tamper
+   * along with the advantage, exactly as it did when this was scoped to a play.
+   */
+  const isLegalFlip = usedCat && ctx.currentPlayer === playerID
+  if (!isLegalFlip) {
     const turnStartingDirection = G.players[ctx.currentPlayer]?.turnStartingDirection ?? null
     G.directionTamper = turnStartingDirection !== null && G.round.direction !== turnStartingDirection
       ? { playerID, turnNumber: ctx.turn }
       : null
   }
 
-  const anonymousDetail = `The turn direction is now ${G.round.direction}.`
-  appendHistoryEvent(G, 'action', 'The turn direction changed', anonymousDetail, null, ctx.turn)
+  /*
+   * Telemetry only. A flip writes no history event at all, so nothing about it reaches the in-game
+   * log — the arrow in the hub and the nudge on the flipper's block are the whole announcement, and
+   * a player who was not looking at the table missed it. The telemetry line stays anonymous anyway,
+   * because telemetry is not stripped by `hideSecretState` and a named one would be readable.
+   */
+  appendTelemetryEvent(
+    G,
+    'action',
+    'The turn direction changed',
+    `The turn direction is now ${G.round.direction}.`,
+    null,
+    ctx.turn,
+  )
+  // After the telemetry event, so the length it reads from is one nobody has used before. Every flip
+  // needs its own id — flipping back and forth within a turn is a legitimate thing to do.
+  G.directionFlip = { id: `flip-${G.round.roundNumber}-${ctx.turn}-${G.telemetry.events.length}`, playerID }
   appendArchiveTurnAction(G, playerID, ctx.turn, {
     kind: 'toggleDirection',
-    detail: usedContrarian
+    detail: isLegalFlip
       ? `Changed the direction to ${G.round.direction}.`
       : `Changed the direction to ${G.round.direction} during ${formatPlayerLabel(G, ctx.currentPlayer)}'s turn. Accuse can catch this until that turn ends.`,
-    characterUsed: usedContrarian ? 'The Contrarian' : 'The Dreamer',
+    characterUsed: usedCat ? 'The Cat' : isDreamer(G, playerID) ? 'The Dreamer' : null,
     directionBefore,
     directionAfter: G.round.direction,
   })
@@ -3511,10 +3915,11 @@ function resolveBS(context: BlowCowMoveContext, args?: BlowCowCallBSArgs) {
 }
 
 /**
- * Accusing The Dreamer of breaking one of their own rules. Unlike `callBS` this is not bound to the
- * accuser's turn — anyone may raise it at any time, which is the point: the cheats it catches happen
- * on other people's turns. What bounds it instead is the per-round budget and the narrow window each
- * cheat stays catchable for, both checked here.
+ * Accusing a player of cheating. Unlike `callBS` this is not bound to the accuser's turn — anyone may
+ * raise it at any time, which is the point: the cheats it catches happen on other people's turns.
+ * What bounds it instead is the per-round budget and the narrow window each cheat stays catchable
+ * for, both checked here. One accusation per round each, whether the table holds one licensed cheat
+ * or every player at it.
  *
  * The accusation resolves immediately and publicly. A hit freezes the table until the accuser presses
  * Punish; a miss freezes it only for as long as the client takes to play the denial, then hands the
@@ -3533,10 +3938,11 @@ function resolveAccuseDreamer(context: BlowCowMoveContext, args?: BlowCowAccuseD
   }
 
   // Characters are public — every seat shows its own character card, and `hideSecretState` does not
-  // mask `character` — so naming somebody who is not The Dreamer was never a gamble, only a wasted
+  // mask `character` — so naming somebody with no licence to cheat was never a gamble, only a wasted
   // accusation. Refused outright rather than resolved as a miss, so it costs nothing. What stays a
-  // gamble is the part that is genuinely hidden: whether The Dreamer has actually cheated yet.
-  if (!isDreamer(G, targetPlayerID)) {
+  // gamble is the part that is genuinely hidden: whether they have actually cheated yet. Once the No
+  // Cheating Rule is gone this refuses nobody, and every seat at the table is worth naming.
+  if (!canCheat(G, targetPlayerID)) {
     return INVALID_MOVE
   }
 
@@ -3553,7 +3959,7 @@ function resolveAccuseDreamer(context: BlowCowMoveContext, args?: BlowCowAccuseD
     return INVALID_MOVE
   }
 
-  const caughtCheat = getAccusableDreamerCheat(G, targetPlayerID, ctx.currentPlayer, ctx.turn)
+  const caughtCheat = getAccusableCheat(G, targetPlayerID, ctx.currentPlayer, ctx.turn)
   const wasSuccessful = caughtCheat !== null
 
   G.players[playerID].hasUsedAccusationThisRound = true
@@ -3579,8 +3985,8 @@ function resolveAccuseDreamer(context: BlowCowMoveContext, args?: BlowCowAccuseD
   appendArchiveTurnAction(G, playerID, ctx.turn, {
     kind: 'accuse',
     detail: wasSuccessful
-      ? `Accused ${formatPlayerLabel(G, targetPlayerID)} of cheating as The Dreamer and caught them: they ${getDreamerCheatDescription(caughtCheat)}.`
-      : `Accused ${formatPlayerLabel(G, targetPlayerID)} of cheating as The Dreamer and missed.`,
+      ? `Accused ${formatPlayerLabel(G, targetPlayerID)} of cheating and caught them: they ${getDreamerCheatDescription(caughtCheat)}.`
+      : `Accused ${formatPlayerLabel(G, targetPlayerID)} of cheating and missed.`,
     targetPlayerID,
     wasHonest: !wasSuccessful,
   })
@@ -3633,13 +4039,13 @@ function finalizeAccusation(context: BlowCowMoveContext, args?: BlowCowFinalizeA
   }
 
   const { accuserPlayerID, targetPlayerID, caughtCheat, punishedPlayerID, unpunishedPlayerID } = accusation
-  // Both endings take the whole table and end the round; only who takes it differs. A caught Dreamer
+  // Both endings take the whole table and end the round; only who takes it differs. A caught cheat
   // keeps the direction they forced — being punished is the whole consequence.
   const punishmentCards = getAllTableCards(G)
   const punishmentLabels = punishmentCards.map((card) => formatCardLabel(card))
   const verdictDetail = caughtCheat
-    ? `${formatPlayerLabel(G, targetPlayerID)} ${getDreamerCheatDescription(caughtCheat)} as The Dreamer.`
-    : `${formatPlayerLabel(G, targetPlayerID)} broke no Dreamer rule, so the false accusation cost ${formatPlayerLabel(G, accuserPlayerID)} the table.`
+    ? `${formatPlayerLabel(G, targetPlayerID)} ${getDreamerCheatDescription(caughtCheat)}.`
+    : `${formatPlayerLabel(G, targetPlayerID)} broke no rule, so the false accusation cost ${formatPlayerLabel(G, accuserPlayerID)} the table.`
   const punishmentScoredSets = addCardsToPlayerHand(
     G,
     punishedPlayerID,
@@ -3818,6 +4224,36 @@ function beginBSPunishment(context: BlowCowMoveContext, args?: BlowCowBeginBSPun
   G.tableStatus = buildTurnStatus(G, resolution.callerPlayerID)
 }
 
+/**
+ * The Gambler's counterpart to `beginBSPunishment`, and it splits from `finalizeResetResolution` for
+ * the same reason: the travel animation measures front-card elements that the finalize deletes.
+ *
+ * Unlike the BS one it carries a choice. A tie leaves several equally weak hands, and rather than
+ * picking for the caller the server offers all of them and takes whichever Punish button was pressed
+ * — so the target is validated against `weakestPlayerIDs` here, and nowhere else.
+ */
+function beginResetPunishment(context: BlowCowMoveContext, args?: BlowCowBeginResetPunishmentArgs) {
+  const { G } = context
+  const resolution = args ? getDrivableResolution(context, G.resetResolution, args.resolutionID) : null
+  const showdown = resolution?.showdown ?? null
+
+  if (!resolution || !showdown || showdown.isPunishing || !isRevealComplete(resolution)) {
+    return INVALID_MOVE
+  }
+
+  if (G.table.plays.some((play) => getFaceDownCardsForPlay(play).length > 0)) {
+    return INVALID_MOVE
+  }
+
+  if (!args || !showdown.weakestPlayerIDs.includes(args.punishedPlayerID)) {
+    return INVALID_MOVE
+  }
+
+  showdown.isPunishing = true
+  showdown.punishedPlayerID = args.punishedPlayerID
+  G.tableStatus = buildTurnStatus(G, resolution.callerPlayerID)
+}
+
 function finalizeBSResolution(
   context: BlowCowMoveContext,
   args?: BlowCowFinalizeBSResolutionArgs,
@@ -3855,11 +4291,19 @@ function finalizeBSResolution(
   const revealedTargetLabels = targetPlayCards.map((card) => formatCardLabel(card))
   const targetCharacter = G.players[resolution.targetPlayerID]?.character ?? null
   const targetLiedAboutCards = targetPlayCards.some((card) => !isTrumpCardInMatch(G, card, resolution.trumpRank, targetCharacter))
-  const outcomeDetail = punishment.reverseRuleTriggered
-    ? `Four or more ${resolution.trumpRank}s were on the table, so the punishment was reversed.`
+  const reverseRuleReason = punishment.reverseRuleTriggered
+    ? `Four or more ${resolution.trumpRank}s were on the table`
     : isRuleRemoved(G, 'reverse')
-    ? 'The Reverse Rule is not in play, so the default punishment stood.'
-    : `Fewer than four ${resolution.trumpRank}s were on the table, so the default punishment stood.`
+    ? 'The Reverse Rule is not in play'
+    : `Fewer than four ${resolution.trumpRank}s were on the table`
+  const contrarianReason = punishment.contrarianTriggered
+    ? `, and ${formatPlayerLabel(G, resolution.callerPlayerID)} is The Contrarian`
+    : ''
+  // Both layers reverse, so two of them cancel. The line names the reasons and then the net result
+  // rather than narrating a flip that was immediately undone.
+  const outcomeDetail = punishment.reverseRuleTriggered !== Boolean(punishment.contrarianTriggered)
+    ? `${reverseRuleReason}${contrarianReason}, so the punishment was reversed.`
+    : `${reverseRuleReason}${contrarianReason}, so the default punishment stood.`
   const cardLieDetail = targetLiedAboutCards
     ? ' The hidden play was not all trump.'
     : ''
@@ -3948,10 +4392,16 @@ function resolveReset(context: BlowCowMoveContext) {
   G.players[playerID].matchStats.resetCount += 1
 
   G.resetResolution = createResetResolution(G, playerID, 'reset')
-  G.tableStatus = `${formatPlayerLabel(G, playerID)} called Reset. Returning the table cards before redistributing them.`
+  // Routed through the shared builder so the showdown wording lives in one place.
+  G.tableStatus = buildTurnStatus(G, playerID)
+
+  const callDetail = G.resetResolution.showdown
+    ? 'Marked the table for a Gambler showdown at the current turn.'
+    : 'Marked the table for redistribution at the current turn.'
+
   appendArchiveTurnAction(G, playerID, context.ctx.turn, {
     kind: 'callReset',
-    detail: 'Marked the table for redistribution at the current turn.',
+    detail: callDetail,
     resetKind: 'reset',
     cards: getAllTableCards(G),
   })
@@ -3959,10 +4409,104 @@ function resolveReset(context: BlowCowMoveContext) {
     G,
     'action',
     `${formatPlayerLabel(G, playerID)} called Reset`,
-    'Marked the table for redistribution at the current turn.',
+    callDetail,
     playerID,
     context.ctx.turn,
   )
+}
+
+/**
+ * The Gambler's ending for a Reset. Nothing is shuffled and nothing is dealt: the weakest hand takes
+ * the whole table, the way a lost BS call does.
+ *
+ * The caller still opens the next round, exactly as the Call Reset Rule says — the showdown replaces
+ * the redistribution and leaves the rest of the rule alone. That is deliberately true even when the
+ * caller is the one who just took the table, which is the risk in calling a Reset with a weak pile
+ * in front of you.
+ */
+function resolveResetShowdown(
+  context: BlowCowMoveContext,
+  resolution: BlowCowResetResolution,
+  showdown: BlowCowResetShowdown,
+) {
+  const { G, ctx, events } = context
+  const punishedPlayerID = showdown.punishedPlayerID
+
+  // Only reachable if a client somehow finalized without pressing Punish, which would otherwise hand
+  // the table to nobody and clear it.
+  if (!punishedPlayerID || !G.players[punishedPlayerID]) {
+    return INVALID_MOVE
+  }
+
+  const punishmentCards = getAllTableCards(G)
+  const punishmentLabels = punishmentCards.map((card) => formatCardLabel(card))
+  const standingsDetail = showdown.standings
+    .map((standing) => `${formatPlayerLabel(G, standing.playerID)}: ${standing.handLabel}`)
+    .join('; ')
+  // Naming the tie matters: it is the one point where the outcome was the caller's choice rather
+  // than the cards', and the log is the only place that distinction survives.
+  const tieDetail = showdown.weakestPlayerIDs.length > 1
+    ? ` ${showdown.weakestPlayerIDs.map((playerID) => formatPlayerLabel(G, playerID)).join(' and ')} tied for weakest, so ${formatPlayerLabel(G, resolution.callerPlayerID)} chose.`
+    : ''
+  const punishmentScoredSets = addCardsToPlayerHand(
+    G,
+    punishedPlayerID,
+    punishmentCards,
+    'punishment',
+    ctx.turn,
+    { deferPointHistory: true },
+  )
+
+  G.players[punishedPlayerID].matchStats.punishmentCount += 1
+  G.players[punishedPlayerID].wasPunishedThisRound = true
+
+  appendHistoryEvent(
+    G,
+    'action',
+    `${formatPlayerLabel(G, resolution.callerPlayerID)} called Reset`,
+    'The Gambler turned it into a showdown, so the weakest hand took the table instead of it being redistributed.',
+    resolution.callerPlayerID,
+    ctx.turn,
+  )
+  appendHistoryEvent(
+    G,
+    'verdict',
+    'Reset showdown',
+    `${standingsDetail}.${tieDetail}`,
+    punishedPlayerID,
+    ctx.turn,
+  )
+  appendHistoryEvent(
+    G,
+    'punishment',
+    `${formatPlayerLabel(G, punishedPlayerID)} took ${punishmentCards.length} card(s)`,
+    punishmentCards.length > 0
+      ? `Took ${punishmentLabels.join(', ')}.`
+      : 'The table was empty.',
+    punishedPlayerID,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, resolution.callerPlayerID, ctx.turn, {
+    kind: 'resolveReset',
+    detail: `The Gambler's showdown. ${standingsDetail}.${tieDetail}`,
+    characterUsed: 'The Gambler',
+    resetKind: 'reset',
+    cards: punishmentCards,
+    cardsByPlayer: createCardsByPlayerRecord([[punishedPlayerID, punishmentCards]]),
+    punishedPlayerID,
+  })
+  appendPointHistoryEvents(G, punishedPlayerID, punishmentScoredSets, ctx.turn)
+
+  beginNextRound(
+    G,
+    resolution.callerPlayerID,
+    `${formatPlayerLabel(G, punishedPlayerID)} had the weakest hand and took the table. ${formatPlayerLabel(G, resolution.callerPlayerID)} starts the next round.`,
+  )
+
+  const nextStartingPlayerID = resolveRoundStart(G, events, ctx.turn)
+  if (nextStartingPlayerID) {
+    events.endTurn({ next: nextStartingPlayerID })
+  }
 }
 
 function finalizeResetResolution(
@@ -3983,6 +4527,10 @@ function finalizeResetResolution(
 
    if (resolution.kind === 'roundReturn') {
     return returnCardsAfterAllPass(context)
+  }
+
+  if (resolution.showdown) {
+    return resolveResetShowdown(context, resolution, resolution.showdown)
   }
 
   const tableCards = shuffleCards(getAllTableCards(G), random?.Shuffle)
@@ -4095,12 +4643,27 @@ function hideSecretState(state: BlowCowState, playerID: string | null) {
         punishment: isRevealComplete(state.bsResolution) ? state.bsResolution.punishment : null,
       }
 
+  /*
+   * The showdown ranks hands that are still face down when the Reset is called, so publishing it
+   * early would name the loser before the table could see why — the same leak `punishment` above is
+   * held back for. Nulled rather than removed, so every client sees the same shape throughout; that a
+   * Reset is a showdown at all is public from the start, because everyone can see The Gambler's seat.
+   */
+  const nextResetResolution = state.resetResolution === null
+    ? null
+    : {
+        ...state.resetResolution,
+        showdown: isRevealComplete(state.resetResolution) ? state.resetResolution.showdown ?? null : null,
+      }
+
   return {
     ...state,
     archive: createEmptyArchiveState(),
     bsResolution: nextBSResolution,
-    // Never leaves the server. Everyone watches the direction indicator flip, but knowing who did it
-    // is the whole gamble an accusation takes, and the tamper record is the answer written down.
+    resetResolution: nextResetResolution,
+    // Never leaves the server. Everyone watches the direction indicator flip, and `directionFlip`
+    // deliberately does go out, saying whose hand did it — but whether that hand was entitled to is
+    // the gamble an accusation takes, and the tamper record is that answer written down.
     directionTamper: null,
     players: nextPlayers,
     table: {
@@ -4164,6 +4727,7 @@ function createStagedBlowCowState(
       previousTrumpRank: null,
       passStreak: 0,
       lastNonPassingPlayerID: null,
+      forcedPlayPlayerID: null,
       maxCardsOnTable: getMaxCardsOnTable(normalizedPlayerCount),
     },
     table: {
@@ -4173,6 +4737,7 @@ function createStagedBlowCowState(
     resetResolution: null,
     accusation: null,
     directionTamper: null,
+    directionFlip: null,
     conspiracy: null,
     history,
     telemetry: {
@@ -4213,6 +4778,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.resetResolution = null
   state.accusation = null
   state.directionTamper = null
+  state.directionFlip = null
   state.conspiracy = null
   state.round.roundNumber = 1
   state.round.status = 'awaitingTrumpSelection'
@@ -4223,6 +4789,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.round.previousTrumpRank = null
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
+  state.round.forcedPlayPlayerID = null
   state.round.maxCardsOnTable = getMaxCardsOnTable(shuffledSeatOrder.length)
   state.tableStatus = INITIAL_TABLE_STATUS
   state.telemetry = {
@@ -4354,7 +4921,7 @@ export const BlowCowGame = {
     sneakPlay: {
       redact: true,
       move: (context: BlowCowMoveContext, args: BlowCowSneakPlayArgs) => {
-        return resolveDreamerSneakPlay(context, args)
+        return resolveSneakPlay(context, args)
       },
     },
     play: {
@@ -4370,7 +4937,7 @@ export const BlowCowGame = {
       },
     },
     toggleDirection: (context: BlowCowMoveContext) => {
-      return resolveContrarianToggleDirection(context)
+      return resolveToggleDirection(context)
     },
     catHideCard: (context: BlowCowMoveContext, args: BlowCowCatHideCardArgs) => {
       return resolveCatHideCard(context, args)
@@ -4395,6 +4962,9 @@ export const BlowCowGame = {
         return resolveConspire(context, args)
       },
     },
+    manipulate: (context: BlowCowMoveContext, args: BlowCowManipulateArgs) => {
+      return resolveManipulate(context, args)
+    },
     pass: (context: BlowCowMoveContext, args?: BlowCowPassArgs) => {
       const { G, ctx, playerID, events } = context
       if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isFinalTwoResolutionTurn(G, playerID)) {
@@ -4412,6 +4982,11 @@ export const BlowCowGame = {
 
       // An open conspiracy owes the table a play. See `resolveConspire`.
       if (getOpenConspiracy(G, playerID, ctx.turn)) {
+        return INVALID_MOVE
+      }
+
+      // So does a round somebody else opened on your behalf. See `resolveManipulate`.
+      if (G.round.forcedPlayPlayerID === playerID) {
         return INVALID_MOVE
       }
 
@@ -4498,14 +5073,24 @@ export const BlowCowGame = {
     finalizeBSResolution: (context: BlowCowMoveContext, args: BlowCowFinalizeBSResolutionArgs) => {
       return finalizeBSResolution(context, args)
     },
-    callReset: (context: BlowCowMoveContext) => {
-      return resolveReset(context)
+    callReset: {
+      /*
+       * Same reason as `callBS`. A Gambler showdown is decided from cards the caller cannot see yet,
+       * so an optimistic local run would rank masked hands and publish a made-up loser.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext) => {
+        return resolveReset(context)
+      },
     },
     revealResetCard: (context: BlowCowMoveContext, args: BlowCowRevealResetCardArgs) => {
       return revealResetCard(context, args)
     },
     advanceResetReveal: (context: BlowCowMoveContext, args: BlowCowAdvanceResetRevealArgs) => {
       return advanceResetReveal(context, args)
+    },
+    beginResetPunishment: (context: BlowCowMoveContext, args: BlowCowBeginResetPunishmentArgs) => {
+      return beginResetPunishment(context, args)
     },
     finalizeResetResolution: (context: BlowCowMoveContext, args: BlowCowFinalizeResetResolutionArgs) => {
       return finalizeResetResolution(context, args)

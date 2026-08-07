@@ -9,7 +9,6 @@ type TableCenterHubProps = {
   frontCardsTooltip: string
   maxCardsOnTable: number
   onToggleDirection: () => void
-  tableStatus: string
   totalCardsOnTable: number
   trumpLabel: string
   trumpRank: string
@@ -23,7 +22,6 @@ export function TableCenterHub({
   frontCardsTooltip,
   maxCardsOnTable,
   onToggleDirection,
-  tableStatus,
   totalCardsOnTable,
   trumpLabel,
   trumpRank,
@@ -41,7 +39,7 @@ export function TableCenterHub({
         */}
       <button
         aria-label={directionIndicatorLabel}
-        className={`turn-direction-indicator ${directionArrowOrientation}${canToggleDirection ? ' contrarian-ready' : ''}`}
+        className={`turn-direction-indicator ${directionArrowOrientation}${canToggleDirection ? ' direction-ready' : ''}`}
         onClick={onToggleDirection}
         title={directionToggleTitle}
         type="button"
@@ -54,13 +52,17 @@ export function TableCenterHub({
         />
       </button>
 
+      {/*
+        * One tooltip, and it explains the number beside it. The turn-status one that used to lead
+        * this row is gone: whose turn it is, what the trump is, and what they may do are all already
+        * on the board, so it only restated them in prose.
+        */}
       <div className="hub-table-meta">
         <span className="hub-table-count">
           {totalCardsOnTable}
           <span className="hub-table-count-separator">/</span>
           {maxCardsOnTable}
         </span>
-        <InlineInfoTooltip tooltip={tableStatus} />
         <InlineInfoTooltip alignment="end" tooltip={frontCardsTooltip} />
       </div>
     </div>

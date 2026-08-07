@@ -53,7 +53,8 @@ export type CharacterCardOverlay = {
   playerName: string
   seatLabel: string
   characterName: string
-  sprite: string
+  /** Every frame of the enlarged card. More than one means the art animates while the panel is open. */
+  spriteFrames: string[]
   wasSeekerPick: boolean
 }
 

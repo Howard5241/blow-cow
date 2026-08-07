@@ -82,10 +82,13 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   is not turn-bound and has no deadline, so `G.rules` can change mid-turn — read it at the moment of
   enforcement rather than caching a decision. `brokenRemovedRuleID` on the player is the spent flag,
   since breaking a rule leaves `character` alone.
-- The Prototype (`defy` move) destroys a hand card and a random rule card, once per round, without
-  ending the turn. It shares The Broken's pool through `getBreakableRuleIDs`, draws from it with
-  `random.Shuffle`, and is refused when that pool is empty, so the action can never do only half of
-  what its card says. `hasUsedDefyThisRound` is the spent flag, cleared by `beginNextRound`.
+- The Prototype (`defy` move) destroys a heart from hand and a random rule card, once per round,
+  without ending the turn. It shares The Broken's pool through `getBreakableRuleIDs`, draws from it
+  with `random.Shuffle`, and is refused when that pool is empty, so the action can never do only half
+  of what its card says. The suit is one helper, `isDefyDestroyableCard`, read by both `canUseDefy`
+  and `resolveDefy` — the latter before anything is removed, so a card of the wrong suit costs
+  neither half nor the round's use. `hasUsedDefyThisRound` is the spent flag, cleared by
+  `beginNextRound`.
 - The Mastermind (`conspire` move) opens another player's hand and commits the turn to a play out of
   it, once per round. `G.conspiracy` is the live record; while it stands, `pass`, `callBS`,
   `callReset` and `accuseDreamer` all refuse for its owner, and `performPlay` reads the cards out of
@@ -95,6 +98,71 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   check happens in `resolveConspire` rather than being discovered afterwards: opening a hand that
   cannot be played out of would strand the turn with no legal move. It is the one ability that widens
   `hideSecretState` — one extra hand, for one seat, until the play clears the conspiracy.
+- The Invisible Hand (`manipulate` move) sets the round's trump rank and direction and hands the
+  first turn to another player, who may not pass on it. Its window is the starting player on the
+  round's very first turn, which `canManipulate` reads off `startingPlayerID`, a null `trumpRank`, a
+  zero `passStreak`, and a null `lastNonPassingPlayerID` — any pass or play breaks all of them.
+  Unlimited use needs no spent flag: handing the round away is what stops the player being the
+  starting player, and they may not name themselves. `round.forcedPlayPlayerID` is the lock,
+  enforced only against `pass` and lifted by `handleTurnStart` as soon as any other turn begins.
+  Manipulate leaves `lastNonPassingPlayerID` null on purpose, so the turn it hands over has nothing
+  to call BS on.
+- Conspire and Manipulate are pressed on a player block, not in the action row: `renderSeatTargetActions`
+  carries them beside `Call BS` and `Accuse`, and the block being clicked is the target. That is why
+  neither has a player dropdown, and why `getConspireFailure` and `getManipulateFailure` both check
+  the turn, which the old action-row tooltips never had to — a block is hoverable on anyone's turn.
+  Manipulate's rank and direction selectors moved with it, so all three of its decisions are made in
+  one bubble. They write one shared choice rather than one per block, and their wrapper stops click
+  and key events, since the block underneath is a click-and-Enter target of its own.
+- The Gambler turns every Reset into a poker showdown: the weakest hand in front takes the whole
+  table instead of it being shuffled and dealt. It is a rule imposed on the table, not an action, so
+  `isGamblerShowdownActive` reads the seating rather than the caller, and an all-pass `roundReturn` is
+  never a showdown because nobody called anything. `createResetShowdown` builds the standings at call
+  time and `hideSecretState` withholds them until the reveal is complete, exactly as it does a BS
+  `punishment` — which is also why `callReset` is now a server-only move. The caller still opens the
+  next round, even when they are the one punished. `beginResetPunishment` splits from
+  `finalizeResetResolution` for the same reason `beginBSPunishment` does, and additionally carries the
+  chosen seat, because a tie is the caller's to break; the server re-checks it against
+  `weakestPlayerIDs`. On the client the showdown reuses the BS punishment travel through
+  `activePunishment` and makes the gather-shuffle-deal chain bail out, since those animations belong
+  to the redistribution it replaces.
+- Poker evaluation lives in `src/game/blowCowPoker.ts`, deliberately outside the game module: it takes
+  cards and returns a comparable score, with no state. Standard five-card categories, so four to a
+  flush is not a flush and a short hand simply cannot reach the higher ones — nothing is padded to
+  five. Ace is high only. Jokers are wild and spent once; The Confused's Jacks stay Jacks. Card count
+  is the last tiebreak, and `comparePokerHands` returning 0 is a real tie that the caller settles.
+- The Cat owns the direction flip as well as the table-card flip. `resolveToggleDirection` reads
+  `isCat`, and its own-turn flip is the only legal one — every other flip is a tamper, cheat licence
+  or not. The Contrarian no longer touches the direction at all.
+- The Contrarian is a second layer of the Reverse Rule, applied in `createBSResolution` and nowhere
+  else. It is a layer, not an override, so the two are combined as `reverseRuleTriggered !==
+  contrarianTriggered` and a call that trips both lands on the default punishment. It is bound to
+  `callerPlayerID`, so being called on by a Contrarian does nothing. Nothing in the UI needed adding:
+  `Punish` is already rendered on `punishment.punishedPlayerID`'s block, so moving that field moves
+  the button. Keep `contrarianTriggered` optional-tolerant when reading it — a match staged before
+  this existed restores a punishment record without the field.
+- Cheating is gated by one helper, `canCheat`: The Dreamer while the No Cheating Rule stands, and
+  everybody once it is removed. Every one of the five cheats routes through it, permission and
+  detection alike, so the licence and the accusation window can never disagree about who is
+  answerable. `isDreamer` survives only where the question really is "is this seat The Dreamer" —
+  archive labelling, and nothing else. Removing the rule is the one removal that widens the game
+  rather than narrowing it, and it leaves The Dreamer an ordinary seat.
+- A direction flip writes no history event at all. It publishes `G.directionFlip`, which names the
+  player who made it so each client can lean their block toward the hub, plus an anonymous telemetry
+  line for the archive. `directionFlip` is the deliberate opposite of `directionTamper`: the flip
+  record is public and says only *who*, the tamper record is stripped by `hideSecretState` and holds
+  *whether they were allowed to*. Legal flips publish too — nudging only the cheats would announce
+  the verdict, and nudging only the illegitimate flippers would say the same thing in reverse.
+  `handleTurnStart` clears both together, so the tell dies with its accusation window.
+- The No Cheating Rule card does not list the cheats it covers, and neither description mentions The
+  Dreamer. `RULES.md` is where the five are written down; the card is what every seat can open.
+- `BlowCowTablePlay.claimedRank` is nullable for exactly one case: a card sneaked onto the table
+  before the round had a trump rank. `settleUnclaimedPlays` fills it in wherever `round.trumpRank`
+  goes from null to a rank — the trump-selecting play and Manipulate — and counts the lie there,
+  since until a rank exists there is nothing to have lied about. Nothing reads that null in between:
+  the play callout is already suppressed for a sneak, a BS call needs a live trump, and a sneak is
+  never a pending reveal. A new reader of `claimedRank` should still handle null rather than assume
+  those three hold.
 - Removing a rule takes any ability built on it with it: Pass removes The Foreigner's ability, Joker
   removes The Confused's, Reveal removes The Spy's, and a Dreamer cheat against a removed rule stops
   being a cheat. That is a consequence, not a special case — see the interaction list in `RULES.md`.
@@ -116,8 +184,13 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 - Sprite folders live at the repo root, not in `public/`, and are loaded via `import.meta.glob`:
   `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`,
   `rule_card_sprites/`.
-- Character sprite filename matching tolerates suffixes after the name, such as `The Cat 2.png`,
-  because there a suffix only ever means a newer revision of the same art.
+- Character sprite filename matching tolerates suffixes after the name, such as `The Contrarian 2.png`,
+  because there a suffix only ever means a newer revision of the same art. The one exception is a run
+  numbered from `1` — `The Prototype 1/2/3.png` — which is an animation, since a revision is never
+  numbered 1: the first of those is the unsuffixed file. `getCharacterCardSpriteFrames` is what tells
+  the two apart, and `CharacterCardSpriteImage` plays a multi-frame run at 300ms a frame wherever the
+  card is shown at readable size. `getCharacterCardSprite` still returns one still for everywhere
+  else, the 30px seat badge included.
 - Rule sprites are the exception: a `Reverse Rule 2.png` beside a `Reverse Rule.png` is the
   **upgraded** illustration, and every rule that ships one is a rule with an upgraded variant.
   `getRuleCardSprite(title, isUpgraded)` looks the two up separately for that reason; the tolerant
@@ -136,7 +209,7 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 
 ## Code Organization
 
-- `src/game/` — rules, helpers, character definitions, rule card definitions.
+- `src/game/` — rules, helpers, character definitions, rule card definitions, poker evaluation.
 - `src/ui/` — board UI and sprite helpers.
 - `src/App.tsx`, `src/config.ts` — lobby flow and client configuration.
 - `server/server.cjs` — local server runtime, including the custom `/games/:name/:id/rejoin` route,

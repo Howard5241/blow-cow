@@ -10,7 +10,7 @@
  * (`blowCowGame.ts:2672`), which masks card identities but not `character`,
  * `wasTrumpSelection`, `claimedRank`, or `declaredCardCount`.
  *
- * Nothing here mirrors The Dreamer's rules. Those are only ever judged by `accuseDreamer`, on the
+ * Nothing here mirrors the cheating rules. Those are only ever judged by `accuseDreamer`, on the
  * server, from state (`G.directionTamper`) that never reaches a client — an accusation is meant to
  * be a guess, so the board must not be able to check the answer first.
  */

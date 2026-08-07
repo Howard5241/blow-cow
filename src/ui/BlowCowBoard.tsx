@@ -1,17 +1,22 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { BoardProps } from 'boardgame.io/react'
 import {
+  BLOW_COW_DIRECTIONS,
   BLOW_COW_RANKS,
   canBreakRule,
   canConspire,
+  canManipulate,
   canUseDefy,
   countsTowardReverseRule,
   formatLeaveEffectLabel,
   getActivePlayerIDs,
   getBreakableRuleIDs,
   getConspiracyTargetPlayerIDs,
+  getManipulableTrumpRanks,
+  getManipulationTargetPlayerIDs,
   getSeekerCharacterChoices,
   getTableCardCount,
+  isDefyDestroyableCard,
   isRuleRemoved,
   sortCards,
   type BlowCowAccusation,
@@ -28,6 +33,7 @@ import {
   type BlowCowAdvanceResetRevealArgs,
   type BlowCowRevealBSCardArgs,
   type BlowCowRevealResetCardArgs,
+  type BlowCowBeginResetPunishmentArgs,
   type BlowCowFinalizeResetResolutionArgs,
   type BlowCowPassArgs,
   type BlowCowPlayArgs,
@@ -38,24 +44,31 @@ import {
   type BlowCowBreakRuleArgs,
   type BlowCowConspireArgs,
   type BlowCowDefyArgs,
+  type BlowCowDirection,
+  type BlowCowManipulateArgs,
   type BlowCowSeekCharacterArgs,
   type BlowCowSelectTrumpAndPlayArgs,
   type BlowCowState,
 } from '../game/blowCowGame.ts'
 import type { BlowCowRuleID } from '../game/blowCowRules.ts'
 import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.ts'
-import { getCharacterCardSprite } from './characterCardSprites.ts'
+import { getCharacterCardSprite, getCharacterCardSpriteFrames } from './characterCardSprites.ts'
 import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
 import { getAvatarSprite } from './avatarSprites.ts'
+import { CharacterCardSpriteImage } from './CharacterCardSpriteImage.tsx'
 import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
 import { PlayerRing } from './PlayerRing.tsx'
 import {
   CONSPIRE_ICON_SPRITE,
   DEFY_ICON_SPRITE,
+  HISTORY_ICON_SPRITE,
+  LEAVE_ROOM_ICON_SPRITE,
+  MANIPULATE_ICON_SPRITE,
   PASS_ICON_SPRITE,
   PLAY_ICON_SPRITE,
   PLAY_RANDOM_ICON_SPRITE,
   RESET_ICON_SPRITE,
+  RULES_ICON_SPRITE,
   SNEAK_PLAY_ICON_SPRITE,
   X_ICON_SPRITE,
 } from './iconSprites.ts'
@@ -265,6 +278,8 @@ const SEAT_FOCUS_TRANSITION_MS = 460
 const BS_PUNISHMENT_MOVE_DURATION_MS = 420
 const BS_PUNISHMENT_MOVE_STAGGER_MS = 110
 const BS_PUNISHMENT_IMPACT_DURATION_MS = 720
+/** Must match the `seat-direction-flip-nudge` animation duration in App.css. */
+const DIRECTION_FLIP_TELL_DURATION_MS = 460
 /*
  * The beat between a Reset or all-pass return being called and the first block being pulled to the
  * centre, so the call registers before the procedure starts. The BS equivalent is spent drawing the
@@ -387,6 +402,7 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     advanceResetReveal: (args: BlowCowAdvanceResetRevealArgs) => void
     finalizeBSResolution: (args: BlowCowFinalizeBSResolutionArgs) => void
     finalizeResetResolution: (args: BlowCowFinalizeResetResolutionArgs) => void
+    beginResetPunishment: (args: BlowCowBeginResetPunishmentArgs) => void
     pass: (args?: BlowCowPassArgs) => void
     play: (args: BlowCowPlayArgs) => void
     playRandom: (args: BlowCowPlayRandomArgs) => void
@@ -394,6 +410,7 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     breakRule: (args: BlowCowBreakRuleArgs) => void
     defy: (args: BlowCowDefyArgs) => void
     conspire: (args: BlowCowConspireArgs) => void
+    manipulate: (args: BlowCowManipulateArgs) => void
     sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
@@ -794,8 +811,14 @@ export function BlowCowBoard({
   }
   const [selectedTrumpRank, setSelectedTrumpRank] = useState<BlowCowRank>('Q')
   const [selectedDrunkardRandomPlayCardCount, setSelectedDrunkardRandomPlayCardCount] = useState(1)
-  /** Whose hand The Mastermind means to open. Null falls back to the first eligible seat. */
-  const [selectedConspireTargetSeatID, setSelectedConspireTargetSeatID] = useState<string | null>(null)
+  /**
+   * The two halves of a Manipulate that are not a player. Its third — who the round is handed to —
+   * is the block that gets clicked, so it needs no state. Both are null-or-defaulted rather than
+   * corrected by an effect: each is resolved against the live options below, so a rank that becomes
+   * forbidden simply falls back instead of arming the button with something the server will refuse.
+   */
+  const [selectedManipulateRank, setSelectedManipulateRank] = useState<BlowCowRank | null>(null)
+  const [selectedManipulateDirection, setSelectedManipulateDirection] = useState<BlowCowDirection | null>(null)
   const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -811,6 +834,7 @@ export function BlowCowBoard({
   const [hasDismissedWinScreen, setHasDismissedWinScreen] = useState(false)
   const [leadInProgress, setLeadInProgress] = useState<RevealLeadInProgress | null>(null)
   const [isBSPunishPromptReady, setIsBSPunishPromptReady] = useState(false)
+  const [isResetPunishPromptReady, setIsResetPunishPromptReady] = useState(false)
   /**
    * Paces an accusation's answer. The server decided the outcome the moment the move landed; this is
    * only about letting the shout land before the reply does, and on a miss letting the denial land
@@ -822,6 +846,8 @@ export function BlowCowBoard({
   } | null>(null)
   const [resetSequenceProgress, setResetSequenceProgress] = useState<ResetSequenceProgress | null>(null)
   const [isPunishmentFlashActive, setIsPunishmentFlashActive] = useState(false)
+  /** The seat currently playing the direction-flip nudge, or null when nobody is. */
+  const [directionFlipTellSeatID, setDirectionFlipTellSeatID] = useState<string | null>(null)
   const [punishmentMoveSequence, setPunishmentMoveSequence] = useState<PunishmentMoveSequence | null>(null)
   const [punishmentImpactSeatID, setPunishmentImpactSeatID] = useState<string | null>(null)
   const [departedPunishmentCardIDs, setDepartedPunishmentCardIDs] = useState<string[]>([])
@@ -853,11 +879,14 @@ export function BlowCowBoard({
   } = useTransientMessage(BOARD_FAIL_MESSAGE_DURATION_MS)
   const hasMountedPunishmentWatcherRef = useRef(false)
   const lastSeenPunishmentEventIDRef = useRef<string | null>(null)
+  const hasMountedDirectionFlipWatcherRef = useRef(false)
+  const lastSeenDirectionFlipIDRef = useRef<string | null>(null)
   const finalizeBSResolutionRef = useRef(moves.finalizeBSResolution)
   const finalizeResetResolutionRef = useRef(moves.finalizeResetResolution)
   const finalizeAccusationRef = useRef(moves.finalizeAccusation)
   const latestBSResolutionRef = useRef<BlowCowBSResolution | null>(G.bsResolution)
   const latestAccusationRef = useRef<BlowCowAccusation | null>(G.accusation)
+  const latestResetResolutionRef = useRef<BlowCowResetResolution | null>(G.resetResolution)
   const latestTablePlaysRef = useRef(G.table.plays)
 
   /*
@@ -921,6 +950,19 @@ export function BlowCowBoard({
         cardCount: G.accusation.punishmentCardCount,
         driverSeatID: G.accusation.accuserPlayerID,
       }
+    /*
+     * A Gambler showdown ends the same way a lost BS call does — one seat takes the whole table — so
+     * it reuses this travel rather than the gather-shuffle-deal chain, which is the animation for the
+     * redistribution the showdown replaces. The cards are all face up by now, so they fly face up.
+     */
+    : G.resetResolution?.showdown?.isPunishing && G.resetResolution.showdown.punishedPlayerID
+    ? {
+        id: G.resetResolution.id,
+        kind: 'resetShowdown' as const,
+        punishedSeatID: G.resetResolution.showdown.punishedPlayerID,
+        cardCount: G.resetResolution.showdown.punishmentCardCount,
+        driverSeatID: G.resetResolution.callerPlayerID,
+      }
     : null
 
   useEffect(() => {
@@ -942,6 +984,10 @@ export function BlowCowBoard({
   useEffect(() => {
     latestBSResolutionRef.current = G.bsResolution
   }, [G.bsResolution])
+
+  useEffect(() => {
+    latestResetResolutionRef.current = G.resetResolution
+  }, [G.resetResolution])
 
   useEffect(() => {
     latestTablePlaysRef.current = G.table.plays
@@ -1168,6 +1214,32 @@ export function BlowCowBoard({
   }, [G.bsResolution?.id, isBSRevealComplete, G.bsResolution?.isPunishing, G.speedMultiplier])
 
   /*
+   * The same beat before a Gambler showdown's Punish buttons appear. Separate state from the BS one
+   * rather than shared, because the two procedures are mutually exclusive but their gates are not:
+   * this one waits on the standings arriving, which is a different unmasking.
+   *
+   * Read out as booleans first so the effect depends on primitives. `showdown` is a fresh object on
+   * every sync, so depending on it directly would restart the timer each time the server spoke and
+   * the prompt would never arrive.
+   */
+  const hasResetShowdown = Boolean(G.resetResolution?.showdown)
+  const isResetShowdownPunishing = Boolean(G.resetResolution?.showdown?.isPunishing)
+  useEffect(() => {
+    if (!hasResetShowdown || !isResetRevealComplete || isResetShowdownPunishing) {
+      setIsResetPunishPromptReady(false)
+      return
+    }
+
+    const timeoutID = window.setTimeout(() => {
+      setIsResetPunishPromptReady(true)
+    }, scaleSequenceDelay(BS_PUNISH_PROMPT_DELAY_MS, G.speedMultiplier))
+
+    return () => {
+      window.clearTimeout(timeoutID)
+    }
+  }, [G.resetResolution?.id, hasResetShowdown, isResetRevealComplete, isResetShowdownPunishing, G.speedMultiplier])
+
+  /*
    * Runs on every client off the synced isPunishing flag rather than a local timer, so the travel
    * stays in step and replays intact for anyone who reconnects mid-animation. Only the caller arms
    * the finalize that follows it.
@@ -1192,12 +1264,18 @@ export function BlowCowBoard({
       const boardElement = tableBoardRef.current
       // Re-read at animation-frame time rather than trusting the render that armed this, so the
       // measurement cannot run against a resolution that has already been finalized.
-      const liveProcedure = kind === 'bs' ? latestBSResolutionRef.current : latestAccusationRef.current
+      const liveProcedure = kind === 'bs'
+        ? latestBSResolutionRef.current
+        : kind === 'accusation'
+        ? latestAccusationRef.current
+        : latestResetResolutionRef.current
       const punishedPlayerID = liveProcedure?.id !== id
         ? null
         : kind === 'bs'
         ? latestBSResolutionRef.current?.punishment?.punishedPlayerID ?? null
-        : latestAccusationRef.current?.punishedPlayerID ?? null
+        : kind === 'accusation'
+        ? latestAccusationRef.current?.punishedPlayerID ?? null
+        : latestResetResolutionRef.current?.showdown?.punishedPlayerID ?? null
       const destinationElement = punishedPlayerID
         ? boardElement?.querySelector<HTMLElement>(`[data-punishment-target-name="${punishedPlayerID}"]`) ?? null
         : null
@@ -1285,6 +1363,11 @@ export function BlowCowBoard({
           return
         }
 
+        if (kind === 'resetShowdown') {
+          finalizeResetResolutionRef.current({ resolutionID: id })
+          return
+        }
+
         finalizeAccusationRef.current({ accusationID: id })
       }, punishmentMoveTotalDuration + punishmentImpactDuration))
     }
@@ -1303,7 +1386,12 @@ export function BlowCowBoard({
    * resolution arriving. Everything before that point is derived from `G.resetResolution`.
    */
   useEffect(() => {
-    if (!G.resetResolution || !isResetRevealComplete) {
+    /*
+     * A Gambler showdown bails out here and never enters this chain. The gather, shuffle and deal are
+     * the animation for a redistribution that is not going to happen; the table instead waits for the
+     * caller to press Punish, and from there the BS punishment travel above takes over.
+     */
+    if (!G.resetResolution || !isResetRevealComplete || G.resetResolution.showdown) {
       setResetSequenceProgress(null)
       setResetMoveSequence(null)
       setResetGatherSequence(null)
@@ -1706,7 +1794,14 @@ export function BlowCowBoard({
   )
   const isInteractiveTurn = isCurrentPlayersTurn && !isResolutionSequenceActive
   const isGrandmaster = currentPlayerState?.character === 'The Grandmaster'
+  const isCat = currentPlayerState?.character === 'The Cat'
   const isContrarian = currentPlayerState?.character === 'The Contrarian'
+  // The Contrarian never presses anything, so the Call BS tooltip is the one place the ability is
+  // worth naming: the call is where the reversal is decided. It stacks with the Reverse Rule instead
+  // of overriding it, which the wording leaves to the verdict line rather than spelling out here.
+  const contrarianCallBSDetail = isContrarian
+    ? ' As The Contrarian, the opposite player is punished.'
+    : ''
   const hasGrandmasterBSOverrideAvailable = canUseClientGrandmasterBSOverride(G, currentSeatID)
   const defaultBSTargetSeatID = getClientDefaultBSTargetSeatID(G, currentSeatID)
   // The Pawn's en-passant target needs no separate control: it is one of the seats
@@ -1743,6 +1838,15 @@ export function BlowCowBoard({
       && G.players[actionableBSTargetSeatID].hand.length === 0,
   )
   const isDreamer = currentPlayerState?.character === 'The Dreamer'
+  /*
+   * Mirrors the server's `canCheat`. With the No Cheating Rule gone the licence stops belonging to a
+   * character at all, so every gate below reads this and every label that would have said "The
+   * Dreamer" says "Cheat" instead — there is no character to credit any more.
+   */
+  const isCheatingUniversal = isRuleRemoved(G, 'noCheating')
+  const canCheat = isDreamer || isCheatingUniversal
+  /** What the action labels call the licence: a character while it is one, a plain verb once it is not. */
+  const cheatVerbPrefix = isCheatingUniversal ? 'Cheat and' : 'Use The Dreamer to'
   const isDrunkard = currentPlayerState?.character === 'The Drunkard'
   const isForeigner = currentPlayerState?.character === 'The Foreigner'
   const seekerCharacterChoices = isSeeker && currentSeatID ? getSeekerCharacterChoices(G, currentSeatID) : []
@@ -1756,52 +1860,63 @@ export function BlowCowBoard({
   const hasUsedDefyThisRound = Boolean(currentPlayerState?.hasUsedDefyThisRound)
   const isMastermind = currentPlayerState?.character === 'The Mastermind'
   const hasUsedConspireThisRound = Boolean(currentPlayerState?.hasUsedConspireThisRound)
+  // Whose block will accept a Conspire. A seat that empties its hand or leaves simply drops out of
+  // the list, which is the whole of the check: the target is whichever block was clicked.
   const conspiracyTargetSeatIDs = isMastermind && currentSeatID
     ? getConspiracyTargetPlayerIDs(G, currentSeatID)
     : []
-  // Resolved rather than corrected by an effect: a seat that empties its hand or leaves simply drops
-  // out of the list, and the selector falls back to the first one still standing.
-  const resolvedConspireTargetSeatID = selectedConspireTargetSeatID
-    && conspiracyTargetSeatIDs.includes(selectedConspireTargetSeatID)
-    ? selectedConspireTargetSeatID
-    : (conspiracyTargetSeatIDs[0] ?? null)
   // Only the once-a-round guard and the surviving rule pool; the card to destroy is checked below,
   // so the tooltip can tell the two refusals apart.
   const hasDefyAvailable = Boolean(isPrototype && currentSeatID && canUseDefy(G, currentSeatID))
-  const canDefy = isInteractiveTurn && hasDefyAvailable && selectedCards.length === 1
+  // Read off the player's own hand rather than the hand strip, which a conspiracy can point
+  // elsewhere. Defy burns a heart, so the suit decides which cards the button will accept.
+  const defyableCardIDSet = new Set(
+    isPrototype && currentPlayerState
+      ? currentPlayerState.hand.filter(isDefyDestroyableCard).map((card) => card.id)
+      : [],
+  )
+  const isSelectedCardDefyable = selectedCards.length === 1
+    && defyableCardIDSet.has(selectedCards[0].id)
+  const canDefy = isInteractiveTurn && hasDefyAvailable && isSelectedCardDefyable
   /*
    * Mirrors of the server's rule checks. The server is still the authority — these only decide
    * whether a button is offered and what its tooltip says.
    */
+  const isInvisibleHand = currentPlayerState?.character === 'The Invisible Hand'
+  const manipulationTargetSeatIDs = isInvisibleHand && currentSeatID
+    ? getManipulationTargetPlayerIDs(G, currentSeatID)
+    : []
+  const manipulableTrumpRanks = getManipulableTrumpRanks(G)
+  const resolvedManipulateRank = selectedManipulateRank && manipulableTrumpRanks.includes(selectedManipulateRank)
+    ? selectedManipulateRank
+    : (manipulableTrumpRanks[0] ?? null)
+  // Defaults to flipping, which is what a round change would have done on its own. Choosing the
+  // direction it already has is a legal and often deliberate use of the ability, not a no-op.
+  const resolvedManipulateDirection = selectedManipulateDirection
+    ?? (G.round.direction === 'clockwise' ? 'counterclockwise' : 'clockwise')
+  const canManipulateNow = isInteractiveTurn && Boolean(currentSeatID && canManipulate(G, currentSeatID))
+  /** This seat owes the table a play because The Invisible Hand opened the round for them. */
+  const isForcedToPlay = Boolean(currentSeatID && G.round.forcedPlayPlayerID === currentSeatID)
   const isTableLimitRemoved = isRuleRemoved(G, 'maxCardsOnTable')
   const isPassRemoved = isRuleRemoved(G, 'pass')
-  /*
-   * Mirrors `resolveConspire`. The table-room half is checked here rather than left to the play that
-   * follows, because Conspire commits the turn: opening a hand with no room to play it out would
-   * leave the turn with nothing legal left at all.
-   */
-  const canConspireNow = isInteractiveTurn
-    && Boolean(currentSeatID && canConspire(G, currentSeatID))
-    && !isFinalTwoResolutionTurn
-    && (isTableLimitRemoved || totalCardsOnTable < maxCardsOnTable)
   const hasTableRoomForSelection = isTableLimitRemoved
     || totalCardsOnTable + selectedCards.length <= maxCardsOnTable
   const isRepeatingPreviousTrump = !isRuleRemoved(G, 'rankChange')
     && selectedTrumpRank === G.round.previousTrumpRank
-  const canDreamerRepeatPreviousTrump = isDreamer && isRepeatingPreviousTrump
+  const canRepeatPreviousTrump = canCheat && isRepeatingPreviousTrump
   const canSelectTrumpAndPlay = isInteractiveTurn
     && !isFinalTwoResolutionTurn
     && currentTrump === null
     && selectedCards.length > 0
-    && (isDreamer || selectedCards.length <= 2)
-    && (!isRepeatingPreviousTrump || canDreamerRepeatPreviousTrump)
-    && (isDreamer || hasTableRoomForSelection)
+    && (canCheat || selectedCards.length <= 2)
+    && (!isRepeatingPreviousTrump || canRepeatPreviousTrump)
+    && (canCheat || hasTableRoomForSelection)
   const canPlayCards = isInteractiveTurn
     && !isFinalTwoResolutionTurn
     && currentTrump !== null
     && selectedCards.length > 0
-    && (isDreamer || selectedCards.length <= 2)
-    && (isDreamer || hasTableRoomForSelection)
+    && (canCheat || selectedCards.length <= 2)
+    && (canCheat || hasTableRoomForSelection)
   const maxRandomPlayCardCount = Math.min(
     2,
     handCards.length,
@@ -1816,30 +1931,31 @@ export function BlowCowBoard({
     && !isFinalTwoResolutionTurn
     && maxRandomPlayCardCount > 0
     && (currentTrump !== null || !isRepeatingPreviousTrump)
-  // The Contrarian is bound to their own turn. The Dreamer is not: reaching into someone else's turn
-  // is the whole cheat, and the only thing that can undo it is an accusation before that turn ends.
+  // The Cat is bound to their own turn. A cheat is not: reaching into someone else's turn is
+  // the whole of it, and the only thing that can undo it is an accusation before that turn ends.
   const canToggleDirection = G.gameStatus === 'active'
     && isActive
     && !isResolutionSequenceActive
     && !currentPlayerState?.hasLeft
-    && (isDreamer || (isContrarian && isCurrentPlayersTurn))
+    && (canCheat || (isCat && isCurrentPlayersTurn))
   // Mirrors the server's one-per-turn guard. Any play of yours stamped with the live turn number
   // while somebody else is on the clock can only be one you sneaked, so this needs no extra state.
   const hasSneakedThisTurn = Boolean(currentSeatID) && G.table.plays.some(
     (play) => play.playerID === currentSeatID && play.playedAtTurn === ctx.turn,
   )
+  // No trump-rank condition: a sneaked card claims nothing of its own, so it can be slipped in
+  // before the round has a rank and simply inherits whichever one gets chosen.
   const isSneakWindowOpen = G.gameStatus === 'active'
     && isActive
-    && isDreamer
+    && canCheat
     && !isCurrentPlayersTurn
     && !isResolutionSequenceActive
     && !currentPlayerState?.hasLeft
-    && currentTrump !== null
     && !hasSneakedThisTurn
   const canSneakPlay = isSneakWindowOpen && selectedCards.length === 1
   // An open conspiracy owes the table a play, so every other way out of the turn is closed. The
   // borrowed hand still feeds the two play buttons, which is why only these three are gated.
-  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !openConspiracy
+  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !openConspiracy && !isForcedToPlay
   const selectedPlayCallout = currentTrump && selectedCards.length > 0
     ? buildPlayCalloutText(currentTrump, selectedCards.length)
     : null
@@ -1847,19 +1963,18 @@ export function BlowCowBoard({
     ? buildPlayCalloutText(selectedTrumpRank, selectedCards.length)
     : null
   const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable && !openConspiracy
-  const canUseCat = isInteractiveTurn && currentPlayerState?.character === 'The Cat' && !isResolutionSequenceActive
+  const canUseCat = isInteractiveTurn && isCat && !isResolutionSequenceActive
   const selectedForeignerCardLabel = FOREIGNER_CARD_OPTIONS.find((option) => option.value === selectedForeignerCardCode)?.label ?? 'the selected card'
   const displayedTrumpRank = currentTrump ?? selectedTrumpRank
   const displayedTrumpLabel = currentTrump ? 'Live trump' : 'Selected rank'
-  const currentPlayerLabel = playerName.trim() || (isSpectator ? 'Spectator' : getSeatLabel(currentPlayerState?.seatIndex))
   const actingSeatLabel = getSeatDisplayName(actingPlayerID, currentSeatID, playerName, playersFromRoom)
-  // The live conspiracy wins over the selector: once a hand is open, every line about Conspire is
-  // about that hand rather than about whoever the dropdown happens to be resting on.
-  const conspireTargetSeatID = openConspiracy?.targetPlayerID ?? resolvedConspireTargetSeatID
+  // Only ever the hand that is actually open. Every line built from it sits behind an
+  // `openConspiracy` check, so the fallback is a label nothing has occasion to print.
+  const conspireTargetSeatID = openConspiracy?.targetPlayerID ?? null
   const conspireTargetLabel = conspireTargetSeatID
     ? getSeatDisplayName(conspireTargetSeatID, currentSeatID, playerName, playersFromRoom)
     : 'nobody'
-  const tableStatusTooltip = `${G.tableStatus}\n\nYou are ${currentPlayerLabel}. The current player is ${actingSeatLabel}.`
+  const manipulateRank = resolvedManipulateRank ?? selectedTrumpRank
   // With the cap removed the number still gates Call Reset, so it is labelled as the reset threshold
   // rather than a maximum it no longer is.
   const tableCapacityLabel = isTableLimitRemoved
@@ -1926,10 +2041,13 @@ export function BlowCowBoard({
   // Seats advance bottom -> left -> top -> right around the ring, so the game's clockwise
   // direction is also clockwise on screen and the arrow sprite can be read literally.
   const directionArrowOrientation = G.round.direction
+  // A Cat off their own turn is cheating like anybody else, so the legal-flip copy is bound to
+  // the same condition the move is. Both halves warn about the tell: the log names nobody, but the
+  // board nudges your block toward the hub for anyone who happens to be watching it.
   const directionIndicatorLabel = canToggleDirection
-    ? isContrarian
-      ? `Turn direction is ${directionArrowOrientation}. Click to use The Contrarian and flip the direction.`
-      : `Turn direction is ${directionArrowOrientation}. Click to use The Dreamer and change the direction, on anyone's turn. Accuse can catch it until that turn ends.`
+    ? isCat && isCurrentPlayersTurn
+      ? `Turn direction is ${directionArrowOrientation}. Click to use The Cat and flip the direction. Your block gives a nod as you do.`
+      : `Turn direction is ${directionArrowOrientation}. Click to change the direction, on anyone's turn. Your block gives a nod as you do, and Accuse can catch it until that turn ends.`
     : `Turn direction is ${directionArrowOrientation}.`
   const latestTablePlay = G.table.plays[G.table.plays.length - 1] ?? null
   const tableRevealKey = G.table.plays.map((play) => `${play.id}:${play.revealedAtTurn ?? 'hidden'}:${(play.revealedCardIDs ?? []).join(',')}`).join('|')
@@ -1956,6 +2074,24 @@ export function BlowCowBoard({
   const bsPunishSeatID = isBSCaller && isBSRevealComplete && isBSPunishPromptReady && !bsResolution?.isPunishing
     ? bsResolution?.punishment?.punishedPlayerID ?? null
     : null
+  /*
+   * A Gambler showdown's standings, which arrive only once the caller has turned the whole table
+   * over. Every seat gets its reading; the weakest gets a Punish button, and a tie gets several, so
+   * the caller is the one who decides between hands the cards could not separate.
+   */
+  const resetShowdown = resetResolution?.showdown ?? null
+  const showdownHandLabelBySeatID = Object.fromEntries(
+    (resetShowdown?.standings ?? []).map((standing) => [standing.playerID, standing.handLabel]),
+  )
+  const showdownLoserSeatIDSet = new Set(resetShowdown?.weakestPlayerIDs ?? [])
+  const isResetCaller = Boolean(resetResolution && currentSeatID === resetResolution.callerPlayerID)
+  const resetPunishSeatIDSet = isResetCaller
+    && isResetRevealComplete
+    && isResetPunishPromptReady
+    && resetShowdown
+    && !resetShowdown.isPunishing
+    ? showdownLoserSeatIDSet
+    : new Set<string>()
   // Everything an accusation shows waits on the freeze beat, so the shout is not immediately talked
   // over by its own answer.
   const isAccusationPunishable = Boolean(accusation
@@ -2118,6 +2254,12 @@ export function BlowCowBoard({
      * lands without a word. Whatever they were already saying stays up, uncancelled.
      */
     if (latestTablePlay.playedAtTurn === ctx.turn && latestTablePlay.playerID !== ctx.currentPlayer) {
+      return
+    }
+
+    // A play with no claim yet was sneaked in before the round had a trump rank, so the guard above
+    // has already returned. Belt and braces: there is no sentence to say about a claim of nothing.
+    if (latestTablePlay.claimedRank === null) {
       return
     }
 
@@ -2652,9 +2794,54 @@ export function BlowCowBoard({
     }
   }, [latestPersonalPunishmentEvent?.id])
 
+  /*
+   * The direction-flip tell. `G.directionFlip` names the hand behind every flip, legal or not, and
+   * this turns it into a nudge of that player's block toward the hub. It is the only thing the board
+   * ever says about who touched the sign — the log entry names nobody, and the server's verdict on
+   * whether they were entitled to never leaves the server at all.
+   *
+   * Not replayed on mount, for the same reason the punishment flash is not: a player who joins or
+   * reloads after the fact was not there to catch it, and handing it to them would turn a thing you
+   * had to be watching for into a thing you cannot miss.
+   */
+  const directionFlipID = G.directionFlip?.id ?? null
+  const directionFlipPlayerID = G.directionFlip?.playerID ?? null
+
+  useEffect(() => {
+    if (!hasMountedDirectionFlipWatcherRef.current) {
+      hasMountedDirectionFlipWatcherRef.current = true
+      lastSeenDirectionFlipIDRef.current = directionFlipID
+      return
+    }
+
+    if (!directionFlipID || directionFlipID === lastSeenDirectionFlipIDRef.current) {
+      return
+    }
+
+    lastSeenDirectionFlipIDRef.current = directionFlipID
+
+    /*
+     * Cleared and re-set across two frames rather than in one go. Flipping back and forth inside a
+     * turn is a legitimate thing to do, and a second flip by the same player would otherwise leave
+     * the class untouched, so the browser would have no change to restart the keyframes from.
+     */
+    setDirectionFlipTellSeatID(null)
+    const frameID = window.requestAnimationFrame(() => {
+      setDirectionFlipTellSeatID(directionFlipPlayerID)
+    })
+    const timeoutID = window.setTimeout(() => {
+      setDirectionFlipTellSeatID(null)
+    }, DIRECTION_FLIP_TELL_DURATION_MS)
+
+    return () => {
+      window.cancelAnimationFrame(frameID)
+      window.clearTimeout(timeoutID)
+    }
+  }, [directionFlipID, directionFlipPlayerID])
+
   const toggleCardSelection = (cardID: string) => {
-    // Not turn-bound any more: The Dreamer has to be able to pick the cards they mean to sneak
-    // while somebody else is on the clock.
+    // Not turn-bound any more: a player has to be able to pick the cards they mean to sneak while
+    // somebody else is on the clock.
     if (!isInteractiveTurn && !isSneakWindowOpen) {
       return
     }
@@ -2665,7 +2852,7 @@ export function BlowCowBoard({
   }
 
   const sendSelectionToTable = (nextTrump: BlowCowRank | null) => {
-    if (selectedCards.length === 0 || (!isDreamer && selectedCards.length > 2)) {
+    if (selectedCards.length === 0 || (!canCheat && selectedCards.length > 2)) {
       return
     }
 
@@ -2682,7 +2869,7 @@ export function BlowCowBoard({
   }
 
   // Deliberately silent on the way out: no target to pick, no callout, no announcement. The cards
-  // simply appear in front of the Dreamer and it is on everyone else to notice.
+  // simply appear in front of the player and it is on everyone else to notice.
   const handleSneakPlay = () => {
     if (!canSneakPlay) {
       return
@@ -2737,17 +2924,6 @@ export function BlowCowBoard({
     }
 
     moves.defy({ cardID: selectedCards[0].id })
-    setSelectedCardIDs([])
-  }
-
-  // Clears the selection on the way in as well as on the way out: whatever was picked belonged to
-  // the hand this is about to replace.
-  const handleConspire = () => {
-    if (!canConspireNow || !resolvedConspireTargetSeatID) {
-      return
-    }
-
-    moves.conspire({ targetPlayerID: resolvedConspireTargetSeatID })
     setSelectedCardIDs([])
   }
 
@@ -2853,12 +3029,13 @@ export function BlowCowBoard({
   }
 
   /**
-   * Accuse shares nothing with Call BS any more. It is legal off your turn, against The Dreamer,
-   * and it never checks whether the cheat is really there — the board cannot know, because
+   * Accuse shares nothing with Call BS any more. It is legal off your turn, against anyone licensed
+   * to cheat, and it never checks whether the cheat is really there — the board cannot know, because
    * `G.directionTamper` never leaves the server. Everything below is a precondition, not a hint.
    *
-   * Including the character check: characters are public, so refusing to name anyone else gives
-   * away nothing that the target's own character badge is not already showing.
+   * Including the licence check: characters are public, so refusing to name anyone else gives away
+   * nothing that the target's own character badge is not already showing. Once the No Cheating Rule
+   * is gone that check refuses nobody, and every block at the table is worth pointing at.
    */
   const getAccuseFailure = (seatID: string) => {
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
@@ -2894,12 +3071,103 @@ export function BlowCowBoard({
     }
 
     // The one thing about an accusation the board *can* check, because characters are public.
-    if (G.players[seatID]?.character !== 'The Dreamer') {
+    if (!isCheatingUniversal && G.players[seatID]?.character !== 'The Dreamer') {
       return 'Only Dreamer can be accused'
     }
 
     if (currentPlayerState.hasUsedAccusationThisRound) {
       return 'You already used your accusation this round. You get another one next round.'
+    }
+
+    return null
+  }
+
+  /**
+   * Mirrors every server precondition for `conspire`. Unlike the action row this once lived in, the
+   * button is on somebody's block, so a hover off your own turn is an ordinary thing to do and the
+   * turn check has to be one of the answers.
+   */
+  const getConspireFailure = (seatID: string) => {
+    const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
+
+    if (G.gameStatus !== 'active') {
+      return 'The match is not running.'
+    }
+
+    if (isResolutionSequenceActive) {
+      return `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+    }
+
+    if (openConspiracy) {
+      return `You are already inside ${conspireTargetLabel}'s hand. Play out of it to end the turn.`
+    }
+
+    if (!isCurrentPlayersTurn) {
+      return 'Conspire only works on your own turn.'
+    }
+
+    if (hasUsedConspireThisRound) {
+      return 'You already used Conspire this round. It comes back at the start of the next one.'
+    }
+
+    if (isFinalTwoResolutionTurn) {
+      return 'With two players left, you cannot conspire after the other player emptied their hand with a hidden play.'
+    }
+
+    // Mirrors `resolveConspire`. The table-room half is checked here rather than left to the play
+    // that follows, because Conspire commits the turn: opening a hand with no room to play it out
+    // would leave the turn with nothing legal left at all.
+    if (totalCardsOnTable >= maxCardsOnTable && !isTableLimitRemoved) {
+      return 'The table is full, so there would be no room to play the cards you opened.'
+    }
+
+    if (!conspiracyTargetSeatIDs.includes(seatID)) {
+      return `${seatName} is not holding a card to conspire with.`
+    }
+
+    // Backstop, so the button can never offer something the server would refuse for a reason the
+    // branches above do not have wording for.
+    if (!currentSeatID || !canConspire(G, currentSeatID)) {
+      return 'Conspire is not available right now.'
+    }
+
+    return null
+  }
+
+  /** Mirrors every server precondition for `manipulate`, with the same turn caveat as Conspire. */
+  const getManipulateFailure = (seatID: string) => {
+    const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
+
+    if (G.gameStatus !== 'active') {
+      return 'The match is not running.'
+    }
+
+    if (isResolutionSequenceActive) {
+      return `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+    }
+
+    if (!isCurrentPlayersTurn) {
+      return 'Manipulate only works on your own turn.'
+    }
+
+    if (G.round.startingPlayerID !== currentSeatID) {
+      return 'Manipulate belongs to the player who starts the round. You are not it this round.'
+    }
+
+    if (currentTrump !== null) {
+      return 'The round already has a trump rank, so there is nothing left to decide.'
+    }
+
+    if (G.round.passStreak > 0 || G.round.lastNonPassingPlayerID !== null) {
+      return 'The round is already under way. Manipulate only works on its very first turn.'
+    }
+
+    if (!manipulationTargetSeatIDs.includes(seatID)) {
+      return `${seatName} cannot be handed the round.`
+    }
+
+    if (!currentSeatID || !canManipulate(G, currentSeatID)) {
+      return 'Manipulate is not available right now.'
     }
 
     return null
@@ -2926,6 +3194,38 @@ export function BlowCowBoard({
 
     moves.accuseDreamer({ targetPlayerID: seatID })
     setSelectedTargetSeatID(null)
+  }
+
+  // Clears the hand selection on the way in as well as on the way out: whatever was picked belonged
+  // to the hand this is about to replace.
+  const handleSeatConspire = (seatID: string) => {
+    const failure = getConspireFailure(seatID)
+    if (failure) {
+      showFailMessage(failure)
+      return
+    }
+
+    moves.conspire({ targetPlayerID: seatID })
+    setSelectedTargetSeatID(null)
+    setSelectedCardIDs([])
+  }
+
+  // The rank and direction come from the two selectors left in the action row; the block that was
+  // clicked is the third decision, and the only one that needed a target at all.
+  const handleSeatManipulate = (seatID: string) => {
+    const failure = getManipulateFailure(seatID)
+    if (failure) {
+      showFailMessage(failure)
+      return
+    }
+
+    moves.manipulate({
+      targetPlayerID: seatID,
+      trumpRank: manipulateRank,
+      direction: resolvedManipulateDirection,
+    })
+    setSelectedTargetSeatID(null)
+    setSelectedCardIDs([])
   }
 
   const handleToggleDirection = () => {
@@ -2995,6 +3295,19 @@ export function BlowCowBoard({
     moves.beginBSPunishment({ resolutionID: bsResolution.id })
   }
 
+  /*
+   * Same split again, plus the choice. The seat pressed is the seat punished, which is how a tie is
+   * broken; the server still checks it against `weakestPlayerIDs`, so a stale button cannot hand the
+   * table to somebody who was never in the running.
+   */
+  const handleBeginResetPunishment = (seatID: string) => {
+    if (!resetResolution || !resetPunishSeatIDSet.has(seatID)) {
+      return
+    }
+
+    moves.beginResetPunishment({ resolutionID: resetResolution.id, punishedPlayerID: seatID })
+  }
+
   // Same split as the BS Punish: this only arms the travel, and the effect watching the synced
   // isPunishing flag schedules the finalize that empties the table.
   const handleBeginAccusationPunishment = () => {
@@ -3034,15 +3347,22 @@ export function BlowCowBoard({
       playerName: seat.name,
       seatLabel: getSeatLabel(seat.seatIndex),
       characterName: seat.characterName ?? 'Unknown character',
-      sprite: seat.characterSprite,
+      spriteFrames: getCharacterCardSpriteFrames(seat.characterName),
       wasSeekerPick: seat.wasSeekerPick,
     })
   }
 
+  /*
+   * Every action that needs somebody to point at lives here rather than in the action row: Call BS
+   * and Accuse for everyone, plus Conspire and Manipulate for the one seat holding the character
+   * that has them. Both of those used to carry a player dropdown, which the block itself replaces.
+   */
   const renderSeatTargetActions = (seat: SeatRow) => {
     const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seat.id)
     const callBSFailure = getCallBSFailure(seat.id)
     const accuseFailure = getAccuseFailure(seat.id)
+    const conspireFailure = isMastermind ? getConspireFailure(seat.id) : null
+    const manipulateFailure = isInvisibleHand ? getManipulateFailure(seat.id) : null
 
     return (
       <div className="seat-target-actions">
@@ -3053,11 +3373,11 @@ export function BlowCowBoard({
             handleSeatCallBS(seat.id)
           }}
           title={callBSFailure
-            ?? (targetSelection?.kind === 'pawnEnPassant'
+            ?? `${targetSelection?.kind === 'pawnEnPassant'
               ? `Use The Pawn to challenge ${seat.name}'s earlier hidden play.`
               : targetSelection?.kind === 'grandmasterOverride'
               ? `Challenge ${seat.name}. This spends The Grandmaster override.`
-              : `Challenge ${seat.name}, the latest non-passing player.`)}
+              : `Challenge ${seat.name}, the latest non-passing player.`}${contrarianCallBSDetail}`}
           type="button"
         >
           Call BS
@@ -3070,11 +3390,94 @@ export function BlowCowBoard({
             handleSeatAccuse(seat.id)
           }}
           title={accuseFailure
-            ?? `Accuse ${seat.name} of cheating as The Dreamer. Costs your one accusation for this round whether or not it lands.`}
+            ?? `Accuse ${seat.name} of cheating. Costs your one accusation for this round whether or not it lands.`}
           type="button"
         >
           Accuse
         </button>
+
+        {isMastermind ? (
+          <button
+            className="seat-target-button conspire"
+            onClick={(event) => {
+              event.stopPropagation()
+              handleSeatConspire(seat.id)
+            }}
+            title={conspireFailure
+              ?? `Use The Mastermind to open ${seat.name}'s hand. You must then play out of it, and no other action is left this turn.`}
+            type="button"
+          >
+            <img alt="" aria-hidden="true" className="seat-target-button-icon" src={CONSPIRE_ICON_SPRITE} />
+            Conspire
+          </button>
+        ) : null}
+
+        {/*
+          * All three decisions in one place, on the block that answers the third of them. The two
+          * selectors read and write the same state on every block, because a Manipulate has one rank
+          * and one direction however many blocks are offering it — whichever bubble is open is the
+          * one that gets used. Both events are stopped at the wrapper: the block underneath is a
+          * click-and-Enter target itself, and a dropdown opened on it must not also select the seat.
+          */}
+        {isInvisibleHand ? (
+          <div
+            className="seat-target-manipulate"
+            onClick={(event) => {
+              event.stopPropagation()
+            }}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+            }}
+          >
+            {/* The previous round's trump is absent rather than disabled: Manipulate obeys the Rank
+              * Change Rule, so it is not a choice this control can offer at all. */}
+            <select
+              aria-label="Round trump rank"
+              className="trump-select seat-target-select seat-target-rank-select"
+              disabled={!canManipulateNow}
+              onChange={(event) => {
+                setSelectedManipulateRank(event.target.value as BlowCowRank)
+              }}
+              value={resolvedManipulateRank ?? ''}
+            >
+              {manipulableTrumpRanks.map((rank) => (
+                <option key={rank} value={rank}>
+                  {rank}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="Round direction"
+              className="trump-select seat-target-select seat-target-direction-select"
+              disabled={!canManipulateNow}
+              onChange={(event) => {
+                setSelectedManipulateDirection(event.target.value as BlowCowDirection)
+              }}
+              value={resolvedManipulateDirection}
+            >
+              {BLOW_COW_DIRECTIONS.map((direction) => (
+                <option key={direction} value={direction}>
+                  {direction === 'clockwise' ? 'Clockwise' : 'Counterclockwise'}
+                </option>
+              ))}
+            </select>
+
+            <button
+              className="seat-target-button manipulate"
+              onClick={(event) => {
+                event.stopPropagation()
+                handleSeatManipulate(seat.id)
+              }}
+              title={manipulateFailure
+                ?? `Use The Invisible Hand to make ${manipulateRank} trump, set the direction to ${resolvedManipulateDirection}, and hand the round to ${seat.name}, who must play and may not pass.`}
+              type="button"
+            >
+              <img alt="" aria-hidden="true" className="seat-target-button-icon" src={MANIPULATE_ICON_SPRITE} />
+              Manipulate
+            </button>
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -3129,6 +3532,30 @@ export function BlowCowBoard({
             handleBeginBSPunishment()
           }}
           title={`${seat.name} takes every card on the table.`}
+          type="button"
+        >
+          Punish
+        </button>
+      )
+    }
+
+    /*
+     * Last, so it never competes with the Continue button: the showdown's buttons only exist once
+     * the reveal is complete, which is exactly when Continue has stopped being offered.
+     */
+    if (resetPunishSeatIDSet.has(seat.id)) {
+      const isTiedChoice = resetPunishSeatIDSet.size > 1
+
+      return (
+        <button
+          className="seat-reveal-action-button punish"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleBeginResetPunishment(seat.id)
+          }}
+          title={isTiedChoice
+            ? `${seat.name} is tied for the weakest hand with ${showdownHandLabelBySeatID[seat.id] ?? 'no cards'}. Punish them to settle the tie, or press another tied seat instead.`
+            : `${seat.name} had the weakest hand with ${showdownHandLabelBySeatID[seat.id] ?? 'no cards'} and takes every card on the table.`}
           type="button"
         >
           Punish
@@ -3202,20 +3629,22 @@ export function BlowCowBoard({
       : openConspiracy
       ? `Choose ${selectedTrumpRank} as trump and play up to 2 cards out of ${conspireTargetLabel}'s hand. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump === null
-      ? isRepeatingPreviousTrump && isDreamer
-        ? `Use The Dreamer to pick ${selectedTrumpRank} again. The Dreamer may also send more than 2 cards or overfill the table. Accuse catches any of those, but only during the next player's turn.`
+      ? isRepeatingPreviousTrump && canCheat
+        ? `${cheatVerbPrefix} pick ${selectedTrumpRank} again. You may also send more than 2 cards or overfill the table. Accuse catches any of those, but only during the next player's turn.`
         : isRepeatingPreviousTrump
         ? `${selectedTrumpRank} was the previous round trump and cannot be selected again.`
-        : isDreamer
-        ? `Choose ${selectedTrumpRank} as trump. The Dreamer may also send more than 2 selected cards and can even overfill the table, but Accuse catches an illegal count during the next player's turn.`
+        : canCheat
+        ? `Choose ${selectedTrumpRank} as trump. You may also send more than 2 selected cards and can even overfill the table, but Accuse catches an illegal count during the next player's turn.`
         : `Choose ${selectedTrumpRank} as trump and play up to 2 selected cards.`
       : `Trump is already ${currentTrump}. Use Play to make the claim.`,
     disabled: !canSelectTrumpAndPlay,
     icon: PLAY_ICON_SPRITE,
     key: 'select-trump',
+    // Just `Play`, like its counterpart. The rank selector sitting beside it is what says a trump is
+    // being chosen, so naming that in the label too only made the widest button in the row wider.
     label: selectedTrumpPlayCallout
-      ? `Select Trump + Play "${selectedTrumpPlayCallout}"`
-      : 'Select Trump + Play',
+      ? `Play "${selectedTrumpPlayCallout}"`
+      : 'Play',
     onClick: () => {
       sendSelectionToTable(selectedTrumpRank)
     },
@@ -3227,8 +3656,8 @@ export function BlowCowBoard({
       : openConspiracy
       ? `Play the selected cards out of ${conspireTargetLabel}'s hand and claim they are ${currentTrump}. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump
-      ? isDreamer
-        ? `Play the selected cards and claim they are ${currentTrump}. The Dreamer may send more than 2 cards or overfill the table, but Accuse catches an illegal count during the next player's turn.`
+      ? canCheat
+        ? `Play the selected cards and claim they are ${currentTrump}. You may send more than 2 cards or overfill the table, but Accuse catches an illegal count during the next player's turn.`
         : `Play the selected cards and claim they are ${currentTrump}.`
       : 'Pick a trump rank first.',
     disabled: !canPlayCards,
@@ -3260,20 +3689,23 @@ export function BlowCowBoard({
   /*
    * One of two actions in this row that belong to a player who is not on the clock — `Seek
    * Character` is the other — and the only one of the two that sends a move. It appears for The
-   * Dreamer alone, which gives nothing away: characters are public, and their own badge says so.
+   * Dreamer alone — or, once the No Cheating Rule is gone, for everyone — which gives nothing away:
+   * characters are public, rule statuses are public, and both are on screen already.
    */
   const sneakPlayAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
-      : currentTrump === null
-      ? 'Nothing to claim until the round has a trump rank.'
       : hasSneakedThisTurn
       ? 'You already slipped cards onto the table this turn. Wait for the next one.'
       : selectedCards.length === 0
       ? `Select the one card to slip onto the table while ${actingSeatLabel} is acting.`
       : selectedCards.length > 1
       ? 'Only one card can be slipped onto the table at a time. Deselect the rest.'
-      : `Use The Dreamer to place 1 card face down in front of you, claiming ${currentTrump}, without saying a word. Accuse catches this until ${actingSeatLabel}'s turn ends.`,
+      // The no-trump case is a real one, and the tooltip has to say what the card will be held to,
+      // because at that moment nobody knows: whoever picks the rank picks it for this card too.
+      : currentTrump === null
+      ? `${cheatVerbPrefix} place 1 card face down in front of you, without saying a word. It claims whatever trump rank the round ends up with. Accuse catches this until ${actingSeatLabel}'s turn ends.`
+      : `${cheatVerbPrefix} place 1 card face down in front of you, claiming ${currentTrump}, without saying a word. Accuse catches this until ${actingSeatLabel}'s turn ends.`,
     disabled: !canSneakPlay,
     icon: SNEAK_PLAY_ICON_SPRITE,
     key: 'sneak-play',
@@ -3329,12 +3761,14 @@ export function BlowCowBoard({
       ? 'You already used Defy this round. It comes back at the start of the next one.'
       : destroyableRuleIDs.length === 0
       ? 'Every rule that could be removed is already gone, so there is nothing left to destroy.'
-      : handCards.length === 0
-      ? 'Defy destroys a card from your hand, and your hand is empty.'
+      : defyableCardIDSet.size === 0
+      ? 'Defy destroys a heart from your hand, and you are holding none.'
       : selectedCards.length === 0
-      ? 'Select the one card to destroy.'
+      ? 'Select the one heart to destroy.'
       : selectedCards.length > 1
       ? 'Defy destroys exactly one card. Deselect the rest.'
+      : !isSelectedCardDefyable
+      ? 'Defy only destroys hearts. Select a heart instead.'
       : `Use The Prototype to destroy ${getCardLabel(selectedCards[0].sprite)} and one random rule card. Your turn keeps going.`,
     disabled: !canDefy,
     icon: DEFY_ICON_SPRITE,
@@ -3343,33 +3777,9 @@ export function BlowCowBoard({
     onClick: handleDefy,
   }
 
-  /*
-   * The only action here that commits the turn to a different one. Nothing about it is reversible:
-   * the moment it lands the hand strip is somebody else's, Pass and Call Reset are shut, and the
-   * only way out of the turn is a play out of the hand it opened. The tooltip says so, because a row
-   * of buttons that all end a turn gives no reason to expect one that takes the turn hostage.
-   */
-  const conspireAction = {
-    description: isResolutionSequenceActive
-      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
-      : openConspiracy
-      ? `You are already inside ${conspireTargetLabel}'s hand. Play out of it to end the turn.`
-      : hasUsedConspireThisRound
-      ? 'You already used Conspire this round. It comes back at the start of the next one.'
-      : conspiracyTargetSeatIDs.length === 0
-      ? 'Nobody else is holding a card to conspire with.'
-      : totalCardsOnTable >= maxCardsOnTable && !isTableLimitRemoved
-      ? 'The table is full, so there would be no room to play the cards you opened.'
-      : `Use The Mastermind to open ${conspireTargetLabel}'s hand. You must then play out of it, and no other action is left this turn.`,
-    disabled: !canConspireNow,
-    icon: CONSPIRE_ICON_SPRITE,
-    key: 'conspire',
-    label: 'Conspire',
-    onClick: handleConspire,
-  }
-
-  // Call BS and Accuse are not here: they live on the player blocks, because both need a
-  // clicked target. See `renderSeatTargetActions`.
+  // Call BS, Accuse, Conspire, and Manipulate are not here: they live on the player blocks, because
+  // all four need a clicked target. Manipulate takes its rank and direction selectors with it, so
+  // all three of its decisions are made in one place. See `renderSeatTargetActions`.
   // Labels the action row for whoever is on the clock. Spectators and waiting players see the
   // acting player's name, so the row never claims a turn that is not the viewer's.
   const handActionHeading = isCurrentPlayersTurn
@@ -3378,17 +3788,18 @@ export function BlowCowBoard({
 
   const actionButtons = [
     currentTrump === null ? selectTrumpAction : playAction,
-    ...(isDreamer && !isCurrentPlayersTurn && !isSpectator ? [sneakPlayAction] : []),
+    ...(canCheat && !isCurrentPlayersTurn && !isSpectator ? [sneakPlayAction] : []),
     ...(isSeeker ? [seekCharacterAction] : []),
     ...(isBroken ? [breakRuleAction] : []),
     ...(isPrototype && !isSpectator ? [defyAction] : []),
-    ...(isMastermind && !isSpectator ? [conspireAction] : []),
     ...(isDrunkard ? [playRandomAction] : []),
     {
       description: isResolutionSequenceActive
         ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
         : isPassRemoved
         ? 'The Pass Rule was removed from this match, so Pass is not an available action.'
+        : isForcedToPlay
+        ? 'The Invisible Hand opened this round for you, so you must play this turn and may not pass.'
         : isFinalTwoResolutionTurn
         ? 'With two players left, you cannot pass after the other player emptied their hand with a hidden play.'
         : isForeigner && selectedForeignerCardCode !== 'none'
@@ -3456,11 +3867,16 @@ export function BlowCowBoard({
               </div>
 
               <button
-                className="secondary-button"
+                className="secondary-button toolbar-button leave-room-button"
                 disabled={isLeaving}
                 onClick={onLeaveRoom}
                 type="button"
               >
+                <span
+                  aria-hidden="true"
+                  className="toolbar-button-icon"
+                  style={{ '--toolbar-icon-sprite': `url(${LEAVE_ROOM_ICON_SPRITE})` } as CSSProperties}
+                />
                 {isLeaving ? 'Leaving Room...' : 'Leave Room'}
               </button>
             </div>
@@ -3693,10 +4109,10 @@ export function BlowCowBoard({
                 onPointerMove={handleCharacterCardPointerMove}
                 ref={characterCardRef}
               >
-                <img
+                <CharacterCardSpriteImage
                   alt={`${selectedCharacterCard.playerName}: ${selectedCharacterCard.characterName}`}
                   className="character-card-overlay-image"
-                  src={selectedCharacterCard.sprite}
+                  frames={selectedCharacterCard.spriteFrames}
                 />
               </div>
             </div>
@@ -3751,7 +4167,10 @@ export function BlowCowBoard({
                   }}
                   type="button"
                 >
-                  <img alt={characterName} src={getCharacterCardSprite(characterName)} />
+                  <CharacterCardSpriteImage
+                    alt={characterName}
+                    frames={getCharacterCardSpriteFrames(characterName)}
+                  />
                 </button>
               ))}
             </div>
@@ -3951,11 +4370,16 @@ export function BlowCowBoard({
             </span>
             <span className={`status-pill ${serverState}`}>{serverStatusLabel}</span>
             <button
-              className="secondary-button"
+              className="secondary-button toolbar-button leave-room-button"
               disabled={isLeaving}
               onClick={onLeaveRoom}
               type="button"
             >
+              <span
+                  aria-hidden="true"
+                  className="toolbar-button-icon"
+                  style={{ '--toolbar-icon-sprite': `url(${LEAVE_ROOM_ICON_SPRITE})` } as CSSProperties}
+                />
               {isLeaving ? 'Leaving Room...' : 'Leave Room'}
             </button>
           </div>
@@ -4061,6 +4485,9 @@ export function BlowCowBoard({
         bsVerdictIsHonest={bsVerdictIsHonest}
         bsVerdictSeatID={bsVerdictSeatID}
         calloutTextBySeatID={calloutTextBySeatID}
+        showdownHandLabelBySeatID={showdownHandLabelBySeatID}
+        showdownLoserSeatIDSet={showdownLoserSeatIDSet}
+        directionFlipTellSeatID={directionFlipTellSeatID}
         enteringCardIDSet={enteringFrontCardIDSet}
         pointsFlashDirectionBySeatID={pointsFlashDirectionBySeatID}
         getSeatLabel={getSeatLabel}
@@ -4082,14 +4509,13 @@ export function BlowCowBoard({
           directionArrowOrientation={directionArrowOrientation}
           directionIndicatorLabel={directionIndicatorLabel}
           directionToggleTitle={canToggleDirection
-            ? isContrarian
-              ? 'Use The Contrarian to flip the turn direction.'
-              : "Use The Dreamer to change the direction, on anyone's turn. Accuse can catch it until that turn ends."
+            ? isCat && isCurrentPlayersTurn
+              ? 'Use The Cat to flip the turn direction. Your block gives a nod as you do.'
+              : "Change the direction, on anyone's turn. Your block gives a nod as you do, and Accuse can catch it until that turn ends."
             : undefined}
           frontCardsTooltip={frontCardsColumnTooltip}
           maxCardsOnTable={maxCardsOnTable}
           onToggleDirection={handleToggleDirection}
-          tableStatus={tableStatusTooltip}
           totalCardsOnTable={totalCardsOnTable}
           trumpLabel={displayedTrumpLabel}
           trumpRank={displayedTrumpRank}
@@ -4202,36 +4628,51 @@ export function BlowCowBoard({
                 <button
                   aria-expanded={isRulesOpen}
                   aria-haspopup="dialog"
-                  className={`subtle-button rules-toggle ${isRulesOpen ? 'active' : ''}`}
+                  className={`subtle-button toolbar-button rules-toggle ${isRulesOpen ? 'active' : ''}`}
                   onClick={() => {
                     setIsRulesOpen((previousValue) => !previousValue)
                     setIsHistoryOpen(false)
                   }}
                   type="button"
                 >
+                  <span
+                    aria-hidden="true"
+                    className="toolbar-button-icon"
+                    style={{ '--toolbar-icon-sprite': `url(${RULES_ICON_SPRITE})` } as CSSProperties}
+                  />
                   Rules
                 </button>
 
                 <button
                   aria-expanded={isHistoryOpen}
                   aria-haspopup="dialog"
-                  className={`subtle-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
+                  className={`subtle-button toolbar-button history-toggle ${isHistoryOpen ? 'active' : ''}`}
                   onClick={() => {
                     setIsHistoryOpen((previousValue) => !previousValue)
                     setIsRulesOpen(false)
                   }}
                   type="button"
                 >
+                  <span
+                    aria-hidden="true"
+                    className="toolbar-button-icon"
+                    style={{ '--toolbar-icon-sprite': `url(${HISTORY_ICON_SPRITE})` } as CSSProperties}
+                  />
                   History
                   <span className="history-count-pill">{historyEvents.length}</span>
                 </button>
 
                 <button
-                  className="secondary-button"
+                  className="secondary-button toolbar-button leave-room-button"
                   disabled={isLeaving}
                   onClick={onLeaveRoom}
                   type="button"
                 >
+                  <span
+                  aria-hidden="true"
+                  className="toolbar-button-icon"
+                  style={{ '--toolbar-icon-sprite': `url(${LEAVE_ROOM_ICON_SPRITE})` } as CSSProperties}
+                />
                   {isLeaving ? 'Leaving Room...' : 'Leave Room'}
                 </button>
               </div>
@@ -4240,7 +4681,7 @@ export function BlowCowBoard({
             </div>
 
             {actionButtons.map((action) => (
-              <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'conspire' ? ' mastermind-conspire-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
+              <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
                 {action.key === 'select-trump' ? (
                   <div className="trump-action-combo">
                     <select
@@ -4299,36 +4740,6 @@ export function BlowCowBoard({
                       {drunkardRandomPlayCardCountOptions.map((countOption) => (
                         <option key={countOption} value={countOption}>
                           {countOption} card{countOption === 1 ? '' : 's'}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className={`action-button ${action.disabled ? 'disabled' : ''}`}
-                      disabled={action.disabled}
-                      onClick={action.onClick}
-                      title={action.description}
-                      type="button"
-                    >
-                      <ActionButtonContent icon={action.icon} label={action.label} />
-                    </button>
-                  </div>
-                ) : action.key === 'conspire' ? (
-                  <div className="trump-action-combo mastermind-conspire-combo">
-                    <select
-                      aria-label="Conspiracy target"
-                      className="trump-select mastermind-conspire-select"
-                      disabled={!canConspireNow}
-                      onChange={(event) => {
-                        setSelectedConspireTargetSeatID(event.target.value)
-                      }}
-                      value={conspireTargetSeatID ?? ''}
-                    >
-                      {conspiracyTargetSeatIDs.length === 0 ? (
-                        <option value="">No target</option>
-                      ) : null}
-                      {conspiracyTargetSeatIDs.map((seatID) => (
-                        <option key={seatID} value={seatID}>
-                          {getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)}
                         </option>
                       ))}
                     </select>

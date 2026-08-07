@@ -21,6 +21,7 @@ export const BLOW_COW_RULE_IDS = [
   'finalRanking',
   'callReset',
   'rankChange',
+  'noCheating',
 ] as const
 
 export type BlowCowRuleID = (typeof BLOW_COW_RULE_IDS)[number]
@@ -135,6 +136,14 @@ export const BLOW_COW_RULE_DEFINITIONS: readonly BlowCowRuleDefinition[] = [
     title: 'Rank Change Rule',
     description: 'The trump rank chosen for a round may not be the same as the previous round\'s trump rank.',
     removedDescription: 'The same trump rank may be chosen in consecutive rounds.',
+  },
+  {
+    id: 'noCheating',
+    title: 'No Cheating Rule',
+    description:
+      'Nobody may break the rules of the game. Only a player permitted to cheat may be accused of cheating.',
+    removedDescription:
+      'Anyone may cheat, and anyone may be accused of it.',
   },
 ]
 

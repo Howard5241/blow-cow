@@ -112,7 +112,8 @@
 	- If the target lied, meaning the card(s) they played on their last turn were not all of the trump rank, the target is punished.
 	- If the target was honest, the caller is punished.
 3. Flip all other cards on the table face up.
-4. Check whether the Reverse Rule applies.
+4. Check whether the Reverse Rule applies, and whether the caller is `The Contrarian`. Each one
+   reverses the punishment, so both together leave it where the default put it.
 5. The punished player takes all cards on the table.
 6. The round ends and a new round begins.
 7. The unpunished player, among the caller and the accused player, becomes the starting player of the next round.
@@ -121,6 +122,10 @@
 - After `Call BS` is used and every card on the table is face up, check the trump rank selected by the starting player of the round.
 - If 4 or more cards of that rank are on the table, the punishment is reversed.
 - Example: if player `X` calls BS on player `Y` and `X` would normally be punished, then `Y` is punished instead. If `Y` would normally be punished, then `X` is punished instead.
+- `The Contrarian` reverses the punishment the same way, on every `Call BS` they make and regardless
+  of what is on the table. It is a second layer rather than an override, so a call that triggers both
+  is reversed twice and the default punishment stands. Being called on by `The Contrarian` does
+  nothing; only their own calls carry it.
 
 ### Call Reset
 - This action immediately ends the round.
@@ -131,6 +136,30 @@
 - Each player adds the cards they receive to their hand.
 - If the number of table cards is not divisible by `n`, the player who called `Reset` receives the extra cards.
 - The player who called `Reset` becomes the starting player of the next round.
+
+### Reset Showdown
+- This replaces the shuffle and the deal above whenever `The Gambler` is still in the game. It applies
+  to every `Reset`, whoever called it — the ability is a rule that character imposes on the table, not
+  an action they spend.
+- After every card on the table is face up, the cards in front of each player are read as a poker
+  hand. The weakest hand takes every card on the table, and nothing is redistributed.
+- Every player still in the game is ranked, including anyone who passed all round and has nothing in
+  front of them. Nothing in front is the weakest hand there is.
+- Hands are the standard five-card categories: straight flush, four of a kind, full house, flush,
+  straight, three of a kind, two pair, pair, high card. A player holding more than five cards is read
+  as their best five.
+- Flushes and straights need a real five cards. Four to a flush is not a flush, and four to a straight
+  is not a straight — both are read as high card. A short hand is scored as it stands and is never
+  padded out, so two cards can never beat a pair.
+- The ace is high only. `A-2-3-4-5` is not a straight.
+- Jokers are wild, as the `Joker Rule` says, and stand in for whatever card makes the best hand. A
+  wild card is spent once: a Joker that completes a flush is not also completing the trips.
+  `The Confused`'s Jacks are not wild here — they stay Jacks, exactly as they do for 4-of-a-kind
+  scoring.
+- If two hands read the same, the player who has fewer cards in front is the weaker of the two.
+- If they are still tied, the player who called `Reset` chooses which of the tied players is punished.
+- The player who called `Reset` still becomes the starting player of the next round, even if they are
+  the one who just took the table.
 
 ## Other Rules
 
@@ -155,6 +184,34 @@
 ### Reveal Rule
 - At the beginning of each player's turn, the player reveals what they played on their last turn by flipping the card(s) face up.
 - This is not an action.
+
+### No Cheating Rule
+- Nobody may break the rules of the game.
+- `The Dreamer` is the single exception, and is the only player `Accuse` may name.
+- The five things the exception covers are: playing more cards than you declare, pushing the table
+  past `MaxCardsOnTable`, reusing the previous round's trump rank on the opening play, slipping a
+  card onto the table during someone else's turn, and changing `Direction` on anyone's turn.
+- `Accuse` is how a cheat is caught. Anyone may raise one, on or off their turn, once per round.
+  A hit makes the cheat take the table; a miss makes the accuser take it instead. Either way the
+  round ends.
+- Slipping a card onto the table is the one cheat that does not need a trump rank. Before the round
+  has one, the card claims nothing; it takes on whichever rank the round settles on, whether that
+  comes from the opening play or from `The Invisible Hand`. That makes it the widest window of the
+  five — it is open before the round has a shape at all.
+- Each cheat stays catchable only inside a narrow window. Tampering with `Direction` and slipping a
+  card onto the table are properties of the turn they happened in, so they close when that turn ends.
+  The other three are properties of a play, and are catchable during the turn immediately after it.
+- Nobody is ever told a cheat happened. Playing more cards than you declare announces the declared
+  count, a slipped card is placed in silence, and a change of `Direction` is never written down at
+  all — the arrow simply points the other way. Every accusation is a guess.
+- The one thing the table does see is who touched the direction sign: the block of whoever flipped it
+  leans toward the middle of the table and settles back. That happens on every flip, including
+  `The Cat`'s legal one, and it says nothing about whether the flip was allowed — working that
+  out from the flipper's character and whose turn it is remains the accuser's problem. It is also
+  the only word on the subject, and it is gone as soon as it has played: a player looking elsewhere
+  has nothing to go back and read.
+- The rule card deliberately does not list the five cheats, so a player has to learn them from the
+  characters that use them rather than from the card.
 
 ### Joker Rule
 - Jokers function as wild cards.
@@ -187,9 +244,11 @@
   upgraded description, but the game still plays the rule as written above.
 - `The Broken` removes one rule card at the start of the game. Only a rule that defines a `Removed`
   variant can be chosen, and only one that is still `Active`.
-- `The Prototype` destroys one card from their hand and one random rule card with the `Defy` action,
-  once per round. The rule is drawn from the same pool `The Broken` picks from: rules that define a
-  `Removed` variant and are still `Active`. `Defy` is unavailable once that pool is empty.
+- `The Prototype` destroys one heart card from their hand and one random rule card with the `Defy`
+  action, once per round. The card must be of the heart suit; no other card, joker included, can pay
+  for it. The rule is drawn from the same pool `The Broken` picks from: rules that define a `Removed`
+  variant and are still `Active`. `Defy` is unavailable once that pool is empty, or once the hand
+  holds no heart.
 
 | Rule Card | Removed | Upgraded |
 | --- | --- | --- |
@@ -205,10 +264,12 @@
 | Final Ranking Rule | no | yes |
 | Call Reset Rule | no | yes |
 | Rank Change Rule | yes | no |
+| No Cheating Rule | yes | no |
 
 ### Removed Rule Cards
-- `Reverse Rule`: punishment is never reversed. Whoever the BS resolution names takes the table,
-  however many trump-rank cards are on it.
+- `Reverse Rule`: the cards on the table never reverse a punishment. Whoever the default names takes
+  it, however many trump-rank cards are showing. `The Contrarian` still reverses their own calls —
+  that layer is the character's, not this card's.
 - `Pass Rule`: `Pass` is not an available action. Every turn has to be resolved some other way.
 - `Joker Rule`: Jokers have no rank at all, so any play containing one is always a lie.
 - `Max Cards On Table Rule`: the table has no limit, and a play may push it to any size. `Call Reset`
@@ -217,6 +278,11 @@
 - `Pass Ending Rule`: consecutive passes never end a round.
 - `Reveal Rule`: played cards stay face down. Nothing is revealed at the start of a turn.
 - `Rank Change Rule`: the same trump rank may be chosen in consecutive rounds.
+- `No Cheating Rule`: anyone may cheat, and anyone may be accused of it. Every player gains all five
+  cheats listed under the rule above. Nothing else changes: the windows are the same, the silence is
+  the same, the direction tell is the same, and each player still gets one accusation per round.
+  The card itself says only the first sentence — spelling the cheats out on a card everybody can
+  read would hand new players a checklist and take the discovery out of it.
 
 #### Character Interactions With Removed Rules
 A removed rule takes any ability built on top of it with it. This is a consequence of the removal,
@@ -229,13 +295,25 @@ not a special case:
   of the start-of-turn reveal happened.
 - `Rank Change Rule` or `Max Cards On Table Rule` removed: the matching Dreamer cheat stops being a
   cheat, so the play is honest and `Accuse` cannot catch it.
+- `Call Reset Rule` is the rule The Gambler overrides, and it is the one rule card that cannot be
+  removed, so the showdown has no removal interaction at all. It simply replaces the redistribution
+  for as long as that character is seated.
+- `Reverse Rule` removed: The Contrarian is the exception that proves the rule above. Their layer is
+  written on their own card and reverses their calls whatever this one says, so removing it does not
+  disarm them — it makes them the only thing that ever reverses a punishment.
+- `No Cheating Rule` removed: The Dreamer is left with an ordinary seat, because their whole ability
+  was being the exception to that rule and everyone is now the exception. This is the same mechanic as
+  the entries above, running the other way: it universalises the ability instead of deleting it.
+  The Cat is the one character it partly cuts across — their own-turn flip is still the only
+  legal one, and it is still the only flip that leaves nothing for `Accuse` to catch, but reaching
+  into somebody else's turn now makes them a cheat like anyone else.
 
 ### Upgraded Rule Cards
 - `Max Cards On Table Rule+`: `MaxCardsOnTable` is doubled for every player count.
 - `Max Cards Per Play Rule+`: a play puts down at most 3 cards at a time instead of 2.
 - `Direction Change Rule+`: `Direction` no longer flips on its own. It carries over from the last
   round, and the starting player sets it on their first turn of the round by clicking the direction
-  arrow, the same way The Contrarian does.
+  arrow, the same way The Cat does.
 - `Pass Ending Rule+`: the round ends after `2n` consecutive passes instead of `n`.
 - `Leave Game Rule+`: running out of cards no longer removes a player. A player leaves when they make
   a successful BS call while holding no cards, meaning they called BS and the challenged player was

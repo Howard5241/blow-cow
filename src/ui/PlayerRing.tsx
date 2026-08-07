@@ -52,8 +52,14 @@ type PlayerRingProps = {
   bsVerdictSeatID: string | null
   /** The line each seat is currently saying, keyed by seat id. Seats with nothing to say are absent. */
   calloutTextBySeatID: Record<string, string>
+  /** Each seat's poker reading during a Gambler showdown, keyed by seat id. Empty outside one. */
+  showdownHandLabelBySeatID: Record<string, string>
+  /** Every seat tied for the weakest hand, and so a Punish target. Empty outside a showdown. */
+  showdownLoserSeatIDSet: Set<string>
   /** The centre hub. */
   children: ReactNode
+  /** The seat whose block is currently nodding at the direction sign it just flipped, or null. */
+  directionFlipTellSeatID: string | null
   enteringCardIDSet: Set<string>
   getSeatLabel: (seatIndex: number) => string
   onCatHideCard: (cardID: string) => void
@@ -82,7 +88,10 @@ export function PlayerRing({
   bsVerdictIsHonest,
   bsVerdictSeatID,
   calloutTextBySeatID,
+  showdownHandLabelBySeatID,
+  showdownLoserSeatIDSet,
   children,
+  directionFlipTellSeatID,
   enteringCardIDSet,
   getSeatLabel,
   onCatHideCard,
@@ -119,8 +128,11 @@ export function PlayerRing({
               ? (bsVerdictIsHonest ? 'Honest' : 'Lie')
               : null}
             calloutText={calloutTextBySeatID[seat.id] ?? null}
+            showdownHandLabel={showdownHandLabelBySeatID[seat.id] ?? null}
+            isShowdownLoser={showdownLoserSeatIDSet.has(seat.id)}
             enteringCardIDSet={enteringCardIDSet}
             isAccusedCheat={seat.id === accusedCheatSeatID}
+            isDirectionFlipTell={seat.id === directionFlipTellSeatID}
             isRevealFocused={seat.id === focusedSeatID}
             pointsFlashDirection={pointsFlashDirectionBySeatID[seat.id] ?? null}
             isPunishmentImpact={seat.id === punishmentImpactSeatID}

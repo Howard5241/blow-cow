@@ -99,7 +99,7 @@ main.app-shell
 - The character pool defaults to all implemented characters and only narrows when the creator deselects specific cards.
 - House rules default to every rule card `Active`, and `rules` is omitted from `setupData` entirely while that holds, the same way a full character pool is.
 - A rule card only offers the statuses it defines. `removedDescription` and `upgradedDescription` in `src/game/blowCowRules.ts` are what make a variant exist, so an undescribed variant cannot be selected here and cannot reach the server.
-- The rule cards live behind a button rather than inline. Twelve illustrated tiles made the left column several screens tall, and the overlay is the same `rules-overlay-panel` the match uses, so a host sees the cards exactly as the players will.
+- The rule cards live behind a button rather than inline. A dozen-odd illustrated tiles made the left column several screens tall, and the overlay is the same `rules-overlay-panel` the match uses, so a host sees the cards exactly as the players will.
 - `Removed` is enforced during the match. `Upgraded` is not yet — the card's `+` title and upgraded description are shown to players, but the game still plays the rule as written, which is what the overlay's subtitle says.
 - In manual-rank mode, `The Confused` is unavailable until `J` is part of the selected deck.
 - Room-code join and quick join both reclaim an offline seat instead of taking a new one when the local display name exactly matches that offline player.

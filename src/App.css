@@ -832,7 +832,7 @@
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  padding: 16px;
+  padding: 8px;
   border: 0;
   border-radius: 0;
   /*
@@ -1673,6 +1673,17 @@
 }
 
 /*
+ * How far a block leans toward the hub while it plays the direction-flip tell. Registered so the
+ * keyframes below can interpolate it; the block's own transform reads it and turns it into a
+ * translation along the seat's own ring angle, which points at the hub from wherever the seat sits.
+ */
+@property --seat-nudge-distance {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+/*
  * Above the hand stage, so the viewing player's block reads as sitting on the panel rather than
  * behind it. The card-travel layers are all at z-index 10 and 11, so they still fly over the ring.
  */
@@ -1751,7 +1762,51 @@
       calc(var(--seat-ring-ry) * sin(var(--seat-angle)) + var(--seat-ring-shift-y))
     )
     translate(var(--seat-focus-x), var(--seat-focus-y))
+    translate(
+      calc(-1 * var(--seat-nudge-distance) * cos(var(--seat-angle))),
+      calc(-1 * var(--seat-nudge-distance) * sin(var(--seat-angle)))
+    )
     scale(var(--seat-focus-scale));
+}
+
+/*
+ * The direction-flip tell: whoever just flipped the sign leans their block toward it and settles
+ * back. Negating the ring offset is what aims it at the hub, so it works from every seat, the
+ * viewing player's dropped block included -- that one sits at 90deg and simply nods upward.
+ *
+ * A translation and a colour, nothing more, for the reason spelled out on .seat-block above: a
+ * scale() here would inflate every measurement the card-travel animations take off this element.
+ *
+ * The transform transition is dropped for the duration, or it would chase the keyframes frame by
+ * frame and smear the nod into a drift. Safe to drop because the one thing that transition exists
+ * for is .focused-seat, and a flip is refused outright while any resolution is running.
+ */
+.seat-block.direction-flip-tell {
+  z-index: 5;
+  transition:
+    border-color 200ms ease,
+    box-shadow 200ms ease,
+    background-color 200ms ease,
+    translate 460ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: seat-direction-flip-nudge 460ms cubic-bezier(0.33, 0, 0.24, 1);
+}
+
+@keyframes seat-direction-flip-nudge {
+  0% {
+    --seat-nudge-distance: 0px;
+    border-color: rgba(245, 239, 225, 0.08);
+  }
+
+  /* The far end of the lean. Out is slower than back, so it reads as a reach and a recoil. */
+  56% {
+    --seat-nudge-distance: 22px;
+    border-color: rgba(168, 214, 255, 0.72);
+  }
+
+  100% {
+    --seat-nudge-distance: 0px;
+    border-color: rgba(245, 239, 225, 0.08);
+  }
 }
 
 /*
@@ -2172,6 +2227,48 @@
 }
 
 /*
+ * The Gambler showdown's reading of the cards directly above it. In normal flow rather than absolute,
+ * unlike the verdict stamp and the leave effect, because every seat carries one at the same time and
+ * they must not overlap the blocks around them.
+ */
+.seat-showdown-label {
+  width: 100%;
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 221, 134, 0.28);
+  background: rgba(28, 34, 30, 0.86);
+  color: #ffe7b0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: seat-showdown-label-in 320ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* The seat about to take the table, or one of several when the hands could not be separated. */
+.seat-showdown-label.weakest {
+  border-color: rgba(255, 90, 74, 0.5);
+  background: rgba(56, 16, 14, 0.92);
+  color: #ffb3a8;
+}
+
+@keyframes seat-showdown-label-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/*
  * Mounted on every selectable block and revealed by pointing at it, so challenging somebody costs
  * a hover rather than a click. `visibility` rather than `display` keeps the bubble out of the tab
  * order while it is hidden without it ever affecting layout.
@@ -2180,6 +2277,15 @@
   position: absolute;
   z-index: 4;
   display: flex;
+  /*
+   * Two buttons for everyone, plus whatever the viewer's own character adds: a third button for The
+   * Mastermind, or the whole three-control Manipulate group for The Invisible Hand. The cap is set
+   * just above the two-button width so that pair never breaks, and anything extra takes a line of
+   * its own rather than pushing the bubble across its neighbours.
+   */
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 220px;
   gap: 6px;
   padding: 6px;
   border: 1px solid rgba(255, 221, 134, 0.42);
@@ -2228,6 +2334,9 @@
 }
 
 .seat-target-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 7px 12px;
   border: 1px solid rgba(255, 206, 92, 0.34);
   border-radius: 10px;
@@ -2260,6 +2369,75 @@
 }
 
 /*
+ * The two character abilities that need a target. Each takes a colour of its own so the extra
+ * button never reads as a second Call BS, and both keep the shape of the pair beside them.
+ */
+.seat-target-button.conspire {
+  border-color: rgba(133, 205, 232, 0.34);
+  background: linear-gradient(180deg, rgba(133, 205, 232, 0.16), rgba(6, 19, 17, 0.7));
+}
+
+.seat-target-button.conspire:hover,
+.seat-target-button.conspire:focus-visible {
+  border-color: rgba(133, 205, 232, 0.8);
+  background: linear-gradient(180deg, rgba(133, 205, 232, 0.26), rgba(16, 32, 38, 0.86));
+}
+
+.seat-target-button.manipulate {
+  border-color: rgba(255, 146, 122, 0.34);
+  background: linear-gradient(180deg, rgba(255, 146, 122, 0.16), rgba(6, 19, 17, 0.7));
+}
+
+.seat-target-button.manipulate:hover,
+.seat-target-button.manipulate:focus-visible {
+  border-color: rgba(255, 146, 122, 0.8);
+  background: linear-gradient(180deg, rgba(255, 146, 122, 0.26), rgba(38, 22, 20, 0.86));
+}
+
+/*
+ * All three decisions of a Manipulate, on the block that answers the third. It takes a line of its
+ * own under Call BS and Accuse, and the button takes a line under the two selectors, because a rank
+ * and a direction beside a word this long leaves nothing legible at the bubble's width.
+ */
+.seat-target-manipulate {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.seat-target-manipulate .seat-target-button {
+  flex: 1 1 100%;
+  justify-content: center;
+}
+
+/* Shorter and tighter than the same control in the action row, which has a whole row to fill. */
+.seat-target-select {
+  min-height: 32px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  font-size: 0.8rem;
+}
+
+.seat-target-rank-select {
+  flex: 0 0 62px;
+}
+
+.seat-target-direction-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The sprites ship as white glyphs, and these buttons are dark, so nothing needs recolouring. */
+.seat-target-button-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  opacity: 0.86;
+}
+
+/*
  * Continue and Punish. Below the block so they never collide with the play callout, which hugs the
  * hub-facing side. Unlike .seat-target-actions these are never hover-gated: they are the only way a
  * BS resolution moves forward, so they must be visible the moment they become legal. They are only
@@ -2273,6 +2451,27 @@
   translate: -50% 0;
   display: flex;
   gap: 6px;
+}
+
+/*
+ * The one seat with no board left below it: the viewing player's block is dropped out of the ring
+ * and into the hand stage, so a button under it lands beneath the hand row and is never seen. Their
+ * buttons alone go above, which is the hub-facing side every other bubble on a bottom seat already
+ * uses. A focused block is excluded because the reveal walk has already pulled it to the ring's
+ * centre, where below is clear again — and Continue then sits where it does on every other seat.
+ */
+.seat-block.viewing-seat:not(.focused-seat) .seat-reveal-actions {
+  top: auto;
+  bottom: calc(100% + 10px);
+}
+
+/*
+ * The same block is usually still saying the line that started the procedure — the caller of a BS
+ * or a Reset is who then has to press Punish — so the callout steps up over the buttons. The
+ * buttons are what the sequence is waiting on, so they keep the spot nearest the block.
+ */
+.seat-block.viewing-seat:not(.focused-seat):has(.seat-reveal-actions) {
+  --seat-callout-lift: 48px;
 }
 
 .seat-reveal-action-button {
@@ -2439,8 +2638,8 @@
     transform 180ms ease;
 }
 
-.turn-direction-indicator.contrarian-ready:hover,
-.turn-direction-indicator.contrarian-ready:focus-visible {
+.turn-direction-indicator.direction-ready:hover,
+.turn-direction-indicator.direction-ready:focus-visible {
   border-color: rgba(255, 221, 134, 0.62);
   background: linear-gradient(180deg, rgba(255, 221, 134, 0.2), rgba(22, 36, 33, 0.84));
   box-shadow: 0 0 0 1px rgba(255, 221, 134, 0.2), 0 18px 36px rgba(255, 186, 74, 0.16);
@@ -2491,8 +2690,8 @@
   }
 }
 
-.turn-direction-indicator.contrarian-ready:hover .turn-direction-arrow,
-.turn-direction-indicator.contrarian-ready:focus-visible .turn-direction-arrow {
+.turn-direction-indicator.direction-ready:hover .turn-direction-arrow,
+.turn-direction-indicator.direction-ready:focus-visible .turn-direction-arrow {
   filter: drop-shadow(0 0 18px rgba(255, 204, 97, 0.42)) saturate(1.08);
 }
 
@@ -2708,16 +2907,82 @@
   transform: translateY(0);
 }
 
-.history-toggle {
+/*
+ * The three toolbar controls, each carrying its own hue. They sit in one strip and do three
+ * unrelated things -- open reference material, open the match log, and leave -- so colour is what
+ * separates them at a glance, and it is the same colour on all three of a button's states rather
+ * than a single shared gold for every open panel.
+ *
+ * `--toolbar-accent` is an unwrapped rgb triple so one set of rules below can build every tint from
+ * it. Every button that sets it inherits the whole treatment; that is the only thing to add for a
+ * fourth.
+ */
+.toolbar-button {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  border: 1px solid rgba(var(--toolbar-accent), 0.34);
+  color: rgb(var(--toolbar-accent));
+  background: rgba(var(--toolbar-accent), 0.08);
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
 }
 
-.history-toggle.active,
-.rules-toggle.active {
-  border-color: rgba(255, 206, 92, 0.24);
-  background: rgba(255, 206, 92, 0.12);
+.rules-toggle {
+  --toolbar-accent: 133, 205, 232;
+}
+
+.history-toggle {
+  --toolbar-accent: 197, 166, 255;
+}
+
+.leave-room-button {
+  --toolbar-accent: 255, 146, 122;
+}
+
+.toolbar-button:hover:not(:disabled),
+.toolbar-button:focus-visible {
+  border-color: rgba(var(--toolbar-accent), 0.78);
+  background: rgba(var(--toolbar-accent), 0.2);
+  box-shadow: 0 0 0 1px rgba(var(--toolbar-accent), 0.2), 0 8px 20px rgba(var(--toolbar-accent), 0.18);
+  outline: none;
+}
+
+/* Held open rather than hovered: the same hue, turned up, so an open panel is obvious at rest. */
+.toolbar-button.active {
+  border-color: rgba(var(--toolbar-accent), 0.86);
+  background: rgba(var(--toolbar-accent), 0.24);
+}
+
+/*
+ * The sprites ship as white glyphs, so the accent is painted through their own alpha rather than
+ * filtered onto them -- CSS filters cannot recolour white cleanly, the same reason
+ * `.seat-bs-call-frame` masks. The sprite url arrives as a custom property because the file is
+ * resolved by the bundler, not by CSS.
+ */
+.toolbar-button-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  background-color: rgb(var(--toolbar-accent));
+  mask-image: var(--toolbar-icon-sprite);
+  mask-size: contain;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  -webkit-mask-image: var(--toolbar-icon-sprite);
+  -webkit-mask-size: contain;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  transition: transform 140ms ease;
+}
+
+.toolbar-button:hover:not(:disabled) .toolbar-button-icon,
+.toolbar-button:focus-visible .toolbar-button-icon {
+  transform: scale(1.12);
 }
 
 .history-count-pill {
@@ -2728,8 +2993,8 @@
   min-height: 28px;
   padding: 0 8px;
   border-radius: 999px;
-  background: rgba(255, 206, 92, 0.14);
-  color: var(--gold-text);
+  background: rgba(var(--toolbar-accent, 255, 206, 92), 0.18);
+  color: rgb(var(--toolbar-accent, 255, 206, 92));
   font-size: 0.78rem;
 }
 
@@ -3488,8 +3753,9 @@
   translate: -50% 0;
 }
 
+/* The lift is zero everywhere except the viewing seat while its reveal buttons hold this side. */
 .seat-block[data-seat-half='bottom'] .player-play-callout {
-  bottom: calc(100% + 10px);
+  bottom: calc(100% + 10px + var(--seat-callout-lift, 0px));
   left: 50%;
   translate: -50% 0;
 }
@@ -4207,29 +4473,16 @@
   line-height: 1;
 }
 
+/*
+ * Sized to their own labels rather than stretched across the row. Growing them filled the line
+ * whatever it held, so a row of two ended up as two very wide buttons of mostly empty amber, and a
+ * combo took a line to itself no matter how little was on it. `0 1 auto` lets each one be as wide as
+ * it needs and no wider; the row is right-aligned, so they stack up against the edge and wrap when
+ * they genuinely run out of room. The combos below keep only the widths their selectors need.
+ */
 .action-button-item {
   position: relative;
-  flex: 1 1 124px;
-  min-width: 124px;
-}
-
-.trump-action-item {
-  flex: 1 1 100%;
-  min-width: 0;
-}
-
-.drunkard-random-item {
-  flex: 1 1 100%;
-  min-width: 0;
-}
-
-.foreigner-pass-item {
-  flex: 1 1 100%;
-  min-width: 0;
-}
-
-.mastermind-conspire-item {
-  flex: 1 1 100%;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -4254,29 +4507,15 @@
   min-width: 0;
 }
 
-/* Wider than the rank selectors above it: this one holds player names, not a rank or a count. */
-.mastermind-conspire-select {
-  flex: 0 0 168px;
-  min-width: 0;
-}
-
-.trump-action-combo .action-button {
-  flex: 1 1 auto;
-  width: auto;
-}
-
-.foreigner-pass-combo .action-button {
-  flex: 0 0 132px;
-  width: auto;
-}
-
+/*
+ * The button in a combo takes its label's width and stops. Letting it grow made it swallow whatever
+ * the selectors beside it did not use, which is the same empty amber the row-level rule above fixes.
+ * The selectors keep their fixed widths, since those hold ranks, counts, and names.
+ */
+.trump-action-combo .action-button,
+.foreigner-pass-combo .action-button,
 .drunkard-random-combo .action-button {
-  flex: 1 1 auto;
-  width: auto;
-}
-
-.mastermind-conspire-combo .action-button {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   width: auto;
 }
 
@@ -4286,8 +4525,8 @@
   justify-content: center;
   gap: 8px;
   width: 100%;
-  min-height: 46px;
-  padding: 12px 14px;
+  min-height: 42px;
+  padding: 10px 16px;
   border-radius: 14px;
   border: 0;
   color: #162019;
@@ -4484,6 +4723,11 @@
     margin-top: 8px;
   }
 
+  /* In flow, so they are no longer above the block and the callout has nothing to clear. */
+  .seat-block {
+    --seat-callout-lift: 0px;
+  }
+
   /*
    * Same reason, one row up: above the block here would sit in the grid gap and be overlapped by
    * whichever seat is above it. In flow it is still attached to the player it belongs to.
@@ -4522,6 +4766,17 @@
     transform: none;
   }
 
+  /*
+   * The combos stack into columns below here, so their items take a row again — a stacked selector
+   * and button have nothing to gain from sitting beside another button, and the `width: 100%` rules
+   * under each one need a row to be 100% of.
+   */
+  .trump-action-item,
+  .drunkard-random-item,
+  .foreigner-pass-item {
+    flex: 1 1 100%;
+  }
+
   .trump-action-combo {
     width: 100%;
   }
@@ -4542,19 +4797,6 @@
 
   .foreigner-pass-combo .action-button {
     width: 100%;
-  }
-
-  .mastermind-conspire-combo {
-    width: 100%;
-    flex-direction: column;
-  }
-
-  .mastermind-conspire-combo .action-button {
-    width: 100%;
-  }
-
-  .mastermind-conspire-select {
-    flex: 1 1 auto;
   }
 
   .hand-scroll-row {

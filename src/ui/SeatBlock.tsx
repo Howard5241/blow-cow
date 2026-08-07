@@ -28,8 +28,20 @@ type SeatBlockProps = {
   calloutText: string | null
   /** This block is the one pulled to the centre of the table for its BS reveal step. */
   isRevealFocused?: boolean
-  /** This player was just caught cheating as The Dreamer, and stays red until they are punished. */
+  /** This player was just caught cheating, and stays red until they are punished. */
   isAccusedCheat?: boolean
+  /**
+   * How this seat's cards in front read as a poker hand, during a Gambler showdown. Server-supplied
+   * and withheld until the reveal is complete, so it cannot appear before the cards do.
+   */
+  showdownHandLabel?: string | null
+  /** This seat holds one of the weakest hands in the showdown, so it is a Punish target. */
+  isShowdownLoser?: boolean
+  /**
+   * This player just flipped the direction sign, and their block nods toward the hub to say so. The
+   * board's only word on who touched the sign, and it never says whether they were allowed to.
+   */
+  isDirectionFlipTell?: boolean
   enteringCardIDSet: Set<string>
   /** Which way this seat's points last moved, or null when the pill is not flashing. */
   pointsFlashDirection: PointsFlashDirection | null
@@ -63,6 +75,9 @@ export function SeatBlock({
   calloutText,
   enteringCardIDSet,
   isAccusedCheat = false,
+  showdownHandLabel = null,
+  isShowdownLoser = false,
+  isDirectionFlipTell = false,
   isRevealFocused = false,
   pointsFlashDirection,
   isPunishmentImpact,
@@ -90,6 +105,7 @@ export function SeatBlock({
     isSelected ? 'selected-seat' : '',
     isRevealFocused ? 'focused-seat' : '',
     isAccusedCheat ? 'accused-cheat-seat' : '',
+    isDirectionFlipTell ? 'direction-flip-tell' : '',
     isPunishmentImpact ? 'punishment-impact' : '',
     seat.hasLeft ? 'left-seat' : '',
     !seat.hasLeft && !seat.isConnected ? 'disconnected-seat' : '',
@@ -237,6 +253,20 @@ export function SeatBlock({
           seatName={seat.name}
         />
       </div>
+
+      {/*
+        * Directly under the cards it describes, because it is a reading of exactly those cards and
+        * nothing else. Every seat carries one during a showdown, so the table can see the ranking it
+        * is being punished by rather than only the result.
+        */}
+      {showdownHandLabel ? (
+        <span
+          className={`seat-showdown-label${isShowdownLoser ? ' weakest' : ''}`}
+          role="status"
+        >
+          {showdownHandLabel}
+        </span>
+      ) : null}
 
       {/*
         * The leave-triggered ability that moved this player's points, and the reason the total on

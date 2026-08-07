@@ -20,8 +20,13 @@ export const PASS_ICON_SPRITE = iconMap['pass_icon.png'] ?? ''
 export const RESET_ICON_SPRITE = iconMap['reset_icon.png'] ?? ''
 export const DEFY_ICON_SPRITE = iconMap['defy_icon.png'] ?? ''
 export const CONSPIRE_ICON_SPRITE = iconMap['conspire_icon.png'] ?? ''
+export const MANIPULATE_ICON_SPRITE = iconMap['manipulate_icon.png'] ?? ''
 // A square outline drawn with ~8% transparent padding, so it is stretched slightly past the seat
 // block for the drawn frame to land on the block's own edge.
 export const BLOCK_HOVER_ICON_SPRITE = iconMap['block_hover_icon.png'] ?? ''
 export const BS_TARGET_ICON_SPRITE = iconMap['BS_target_icon.png'] ?? ''
 export const X_ICON_SPRITE = iconMap['x_icon.png'] ?? ''
+// The three toolbar controls above the action row. Each carries its own accent colour in CSS.
+export const RULES_ICON_SPRITE = iconMap['rules_icon.png'] ?? ''
+export const HISTORY_ICON_SPRITE = iconMap['history_icon.png'] ?? ''
+export const LEAVE_ROOM_ICON_SPRITE = iconMap['leave_room_icon.png'] ?? ''
