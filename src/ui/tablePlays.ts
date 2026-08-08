@@ -73,6 +73,74 @@ export function getCatHiddenOverlayCardIDs(play: BlowCowTablePlay) {
     .map((card) => `${play.id}-${card.id}`)
 }
 
+export type BlowCowWornMimicry = NonNullable<BlowCowState['mimicry']>
+
+export type DisplayedFrontCard = {
+  /** Unique across the board. A borrowed card is drawn twice, so its copy carries its own id. */
+  overlayCardID: string
+  play: BlowCowTablePlay
+  card: BlowCowTablePlay['cards'][number]
+  faceDown: boolean
+  /** Drawn on this block for the disguise rather than owned by the seat showing it. */
+  isBorrowed: boolean
+}
+
+/**
+ * What one seat's block draws in front of it, disguise included. The single source of truth for both
+ * the seat rows and the flip watcher, so a card can never be animated as flipping while it is drawn
+ * the other way up.
+ *
+ * Three cases. An undisguised seat shows its own plays, which is all this ever used to do. The Mime's
+ * block shows the borrowed pile with their own later plays stacked on top of it and their earlier
+ * ones dropped underneath. And the source's own block, which looks untouched, still has to hold back
+ * the borrowed cards until the turn reaches it — see `mimicry.revealedPlayerIDs` for why the Reveal
+ * Rule has to run per chair here rather than per play.
+ */
+export function getDisplayedFrontCards(
+  tablePlays: BlowCowTablePlay[],
+  seatID: string,
+  mimicry: BlowCowWornMimicry | null,
+): DisplayedFrontCard[] {
+  const isWearer = mimicry?.playerID === seatID
+  const borrowedPlayIDSet = new Set(isWearer ? mimicry.borrowedPlayIDs : [])
+  const hiddenPlayIDSet = new Set(isWearer ? mimicry.hiddenPlayIDs : [])
+
+  /*
+   * The borrowed pile first, then whatever The Mime has played on top of it since. That is the order
+   * the source's own block builds itself in, so a play lands on the copy exactly as it would have
+   * landed on the original — which is the whole trick, because the block holding the turn is the one
+   * that grows whichever way the coin fell. The Mime's own earlier plays are not drawn at all; they
+   * are still on the table, and the table's counter still counts them.
+   */
+  const displayedPlays = isWearer && mimicry
+    ? [
+        ...tablePlays.filter((play) => borrowedPlayIDSet.has(play.id)),
+        ...tablePlays.filter((play) => play.playerID === seatID && !hiddenPlayIDSet.has(play.id)),
+      ]
+    : tablePlays.filter((play) => play.playerID === seatID)
+
+  const isDisguisedPair = isWearer || mimicry?.sourcePlayerID === seatID
+  const heldBackCardIDSet = isDisguisedPair && mimicry && !mimicry.revealedPlayerIDs.includes(seatID)
+    ? new Set(mimicry.borrowedFaceDownCardIDs)
+    : new Set<string>()
+
+  return displayedPlays.flatMap((play) => {
+    const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
+    const catHiddenCardIDSet = getCatHiddenCardIDSet(play)
+    const isBorrowed = play.playerID !== seatID
+
+    return play.cards.map((card) => ({
+      overlayCardID: `${isBorrowed ? 'mimic-' : ''}${play.id}-${card.id}`,
+      play,
+      card,
+      isBorrowed,
+      faceDown: heldBackCardIDSet.has(card.id)
+        || catHiddenCardIDSet.has(card.id)
+        || (play.revealedAtTurn === null && !revealedCardIDSet.has(card.id)),
+    }))
+  })
+}
+
 export function getLatestHiddenPlay(tablePlays: BlowCowTablePlay[], playerID: string | null | undefined) {
   if (!playerID) {
     return null

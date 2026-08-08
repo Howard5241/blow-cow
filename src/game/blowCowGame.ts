@@ -27,6 +27,12 @@ export const INITIAL_TABLE_STATUS = 'Waiting for everyone to sit down before the
 export const CARD_BACK_SPRITE = 'back01.png'
 export const DEFAULT_BLOW_COW_SPEED_MULTIPLIER = 1 as const
 export const BLOW_COW_SPEED_MULTIPLIERS = [0.5, DEFAULT_BLOW_COW_SPEED_MULTIPLIER, 2] as const
+/**
+ * How many emote sprites `emote_sprites/` holds. Hand-synced, because this module is also loaded
+ * directly by node and so cannot glob the folder. `EMOTE_SPRITES` in `src/ui/emoteSprites.ts` reads
+ * it back to drop any sprite the server would refuse, so the picker can never offer an unsendable one.
+ */
+export const BLOW_COW_EMOTE_COUNT = 26
 const INVALID_MOVE = 'INVALID_MOVE' as const
 /**
  * boardgame.io's `Stage.NULL`, which is the literal `null`: a player who is active but in no stage.
@@ -124,6 +130,16 @@ export type BlowCowPlayerState = {
    * Cleared by `beginNextRound`.
    */
   hasUsedConspireThisRound: boolean
+  /**
+   * One Mimic per round for The Mime, spent whichever way the coin lands. Cleared by `beginNextRound`.
+   */
+  hasUsedMimicThisRound: boolean
+  /**
+   * One encore per round for The Clown, spent by the play that earns it rather than by the action it
+   * buys — there is no way to decline an encore, so the two are the same moment. Cleared by
+   * `beginNextRound`.
+   */
+  hasUsedClownEncoreThisRound: boolean
   /**
    * Took the table this round, by a BS verdict or a resolved accusation. Both flags exist only so
    * The Privileged can be denied the next round's start: the claim is read while the new round is
@@ -227,6 +243,7 @@ export type BlowCowBSPunishment = {
 export const BLOW_COW_DREAMER_CHEAT_KINDS = [
   'directionChange',
   'sneakPlay',
+  'takeBackCard',
   'extraCardCount',
   'exceededTableLimit',
   'repeatTrump',
@@ -246,6 +263,30 @@ export type BlowCowDirectionTamper = {
 }
 
 /**
+ * A card taken back off the table waiting to be caught, and the only cheat that needs a record to be
+ * catchable at all. The others leave their evidence on the table — cards that appeared, a direction
+ * that moved, a count that does not match — while this one leaves a gap, and a gap is exactly what an
+ * honest table looks like a moment before somebody plays into it.
+ *
+ * The one piece of secret state `hideSecretState` hands back to a single player rather than to
+ * nobody. `directionTamper` is stripped from everyone because any client holding it could check the
+ * answer before gambling an accusation; this is stripped from everyone *except its owner*, who is the
+ * one person at the table who cannot use it that way — they already know what they did, and they may
+ * not accuse themselves. What they need it for is the lock: the cheat is only worth anything if the
+ * table gets a moment to notice the gap, so the client that made it grounds its own action buttons
+ * for two seconds rather than letting the same hand take a card back and end the turn on top of it.
+ *
+ * `id` changes on every take-back, so an unlimited run of them re-arms that lock each time instead of
+ * the client seeing one record it has already served.
+ */
+export type BlowCowTakeBackTamper = {
+  id: string
+  playerID: string
+  /** The accusation window, and the lock's own scope. Both die when the turn does. */
+  turnNumber: number
+}
+
+/**
  * The last flip of the direction sign, published so every client can nudge the block of whoever made
  * it. The deliberate opposite of `directionTamper`, and the reason both exist: this says who touched
  * the sign, never whether they were entitled to. Working that out from their character and whose
@@ -260,6 +301,13 @@ export type BlowCowDirectionTamper = {
 export type BlowCowDirectionFlip = {
   id: string
   playerID: string
+}
+
+/** A public, non-gameplay signal that the board briefly animates above its owner's avatar. */
+export type BlowCowEmote = {
+  id: string
+  playerID: string
+  emoteID: number
 }
 
 /**
@@ -302,6 +350,88 @@ export type BlowCowConspiracy = {
   targetPlayerID: string
   /** The turn it was opened on. A conspiracy never outlives its turn. */
   turnNumber: number
+}
+
+/**
+ * A live encore: The Clown has made the round's first play and the turn did not end with it. While it
+ * stands the turn is still theirs, and every action but another play is open.
+ *
+ * `bsTargetPlayerID` is why this is a record rather than a flag. A BS call always targets the latest
+ * non-passing player, and the play that earned the encore has just made that The Clown themselves —
+ * so without remembering who it was beforehand, playing would silently close the very action the
+ * encore exists to hand back. It is public in every sense: it is whoever the table could already see
+ * was challengeable a moment ago.
+ *
+ * Turn-bound like a conspiracy, and cleared the same way. Nothing about it survives the turn.
+ */
+export type BlowCowEncore = {
+  /** The Clown. Always the player on the clock, since only their own play can earn this. */
+  playerID: string
+  /** The turn the play landed on. An encore never outlives it. */
+  turnNumber: number
+  /** Who Call BS pointed at before the play, or null if it pointed at nobody. */
+  bsTargetPlayerID: string | null
+}
+
+/**
+ * A live disguise: The Mime is wearing their next player's block, and the two may or may not have
+ * traded chairs behind it. Everything here is a frozen copy taken the moment Mimic landed, because
+ * the whole point is that the two blocks read the same afterwards — see `resolveMimic` for why a
+ * snapshot rather than a live mirror is what makes the coin flip unreadable.
+ *
+ * This is a *display* illusion and nothing more. The engine never consults it: hands, points, plays
+ * and turn order all continue to belong to whoever really owns them, and a client that reads its own
+ * state rather than its own screen can still see which seat is disguised. What it hides is what a
+ * player at the table can see, which is the only place the bluff has to hold.
+ */
+export type BlowCowMimicry = {
+  /** The Mime. */
+  playerID: string
+  /** Whose block is being worn: The Mime's next player at the moment Mimic landed. */
+  sourcePlayerID: string
+  /** When the copy was taken. Nothing is scoped to it — the disguise outlives the turn — but it is
+   * what tells one Mimic apart from the next for anything keying off the record. */
+  turnNumber: number
+  character: BlowCowCharacterName | null
+  points: number
+  /** The scored ranks behind `points`, for the pill's tooltip. */
+  pointRanks: BlowCowRank[]
+  /**
+   * The copied hand count. What the board shows is this minus whatever The Mime has played since,
+   * which is the same subtraction the source's own block performs on itself — see `resolveMimic`.
+   */
+  handCount: number
+  wasSeekerPick: boolean
+  /** The source's plays as they stood, worn in place of The Mime's own. */
+  borrowedPlayIDs: string[]
+  /** The Mime's own plays as they stood, hidden underneath the borrowed ones. */
+  hiddenPlayIDs: string[]
+  /**
+   * The borrowed cards still face down when the copy was taken. Only these are held back — a card
+   * already face up is public, and hiding it again would be taking something off the table.
+   */
+  borrowedFaceDownCardIDs: string[]
+  /**
+   * Which of the two chairs has turned its share of the borrowed pile face up. The Reveal Rule is
+   * per chair rather than per card here: each of the two turns the pile over when the turn reaches
+   * it, so the pile behaves the same way in both branches of the coin flip instead of flipping on
+   * both blocks at once and announcing which chair the source really sits in.
+   *
+   * The consequence, and it is intended: in the branch where the seats swapped, the source's own
+   * genuinely-revealed cards stay drawn face down on their own block until the turn comes back to
+   * them. They are already public on the other block by then, so nothing is withheld for longer than
+   * a lap, and the other branch has the same gap in the mirror position.
+   */
+  revealedPlayerIDs: string[]
+  /**
+   * The turn a swap hands over, which must not count as the turn arriving at that chair — from
+   * outside the ring the turn never moved. Consumed by the first `handleTurnStart` that sees it.
+   *
+   * Stripped by `hideSecretState`, because a value here is the coin flip written down. It is
+   * consumed inside the same update that sets it, so no client should ever see one; the strip is
+   * there so that staying true does not depend on that.
+   */
+  pendingHandoverPlayerID?: string | null
 }
 
 /**
@@ -435,7 +565,9 @@ export type BlowCowArchiveTurnActionKind =
   | 'defy'
   | 'conspire'
   | 'manipulate'
+  | 'mimic'
   | 'hideTableCard'
+  | 'takeBackCard'
   | 'gainOutsideCard'
   | 'play'
   | 'pass'
@@ -532,16 +664,37 @@ export type BlowCowState = {
   accusation: BlowCowAccusation | null
   directionTamper: BlowCowDirectionTamper | null
   /*
+   * Optional for the same restore reason as `conspiracy`. Nobody is mid-take-back in a match staged
+   * before the cheat existed.
+   */
+  takeBackTamper?: BlowCowTakeBackTamper | null
+  /*
    * Optional for the same restore reason as `conspiracy`: a match staged before the tell existed
    * comes back without the field, and nobody is mid-nudge in a match that never had one.
    */
   directionFlip?: BlowCowDirectionFlip | null
+  /**
+   * The most recent public emotes. Kept bounded because they are animation triggers, not match
+   * history, and optional so a persisted match from before emotes restores normally.
+   */
+  emotes?: BlowCowEmote[]
+  emoteSequence?: number
   /*
    * Optional in the type as well as in practice: a match staged before The Mastermind existed
    * restores from `data/matches/` without the field, and every read of it optional-chains for that
    * reason. Nobody is mid-conspiracy in a match that never had one.
    */
   conspiracy?: BlowCowConspiracy | null
+  /*
+   * Optional for the same restore reason as `conspiracy`. Nobody is wearing anybody else's face in a
+   * match staged before The Mime existed.
+   */
+  mimicry?: BlowCowMimicry | null
+  /*
+   * Optional for the same restore reason as `conspiracy`. Nobody is owed a second action in a match
+   * staged before The Clown existed.
+   */
+  encore?: BlowCowEncore | null
   history: BlowCowHistoryEvent[]
   telemetry: BlowCowTelemetryState
   archive: BlowCowArchiveState
@@ -559,6 +712,10 @@ export type BlowCowPlayArgs = {
 
 export type BlowCowSneakPlayArgs = {
   cardIDs: string[]
+}
+
+export type BlowCowTakeBackCardArgs = {
+  cardID: string
 }
 
 export type BlowCowPlayRandomArgs = {
@@ -598,6 +755,10 @@ export type BlowCowManipulateArgs = {
   targetPlayerID: string
   trumpRank: BlowCowRank
   direction: BlowCowDirection
+}
+
+export type BlowCowEmoteArgs = {
+  emoteID: number
 }
 
 export type BlowCowAccuseDreamerArgs = {
@@ -1142,6 +1303,8 @@ function createEmptyPlayerState(playerID: string, seatIndex: number): BlowCowPla
     hasUsedAccusationThisRound: false,
     hasUsedDefyThisRound: false,
     hasUsedConspireThisRound: false,
+    hasUsedMimicThisRound: false,
+    hasUsedClownEncoreThisRound: false,
     wasPunishedThisRound: false,
     wasPunishedLastRound: false,
     hasLeft: false,
@@ -1984,6 +2147,67 @@ export function getOpenConspiracy(state: BlowCowState, playerID: string, turnNum
   return conspiracy
 }
 
+export function isClown(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Clown'
+}
+
+/**
+ * Whether this player's next play would leave the turn running. Read inside `performPlay` before
+ * anything moves, because the play itself is what spends the round's one use.
+ *
+ * Unlike every other once-a-round ability there is no button for this and so no board mirror to keep
+ * in step: the encore is not chosen, it simply happens to the first play of the round.
+ */
+export function canEarnEncore(state: BlowCowState, playerID: string) {
+  const player = state.players[playerID]
+
+  return isClown(state, playerID)
+    && !player?.hasUsedClownEncoreThisRound
+    && !player?.hasLeft
+    && !state.encore
+}
+
+/**
+ * Whether an encore would be worth handing out, checked after the play has landed. An encore that
+ * buys nothing is worse than none at all: the turn would never end, because a play is the one action
+ * it takes away.
+ *
+ * The three terms are the whole turn action space and are deliberately independent of each other, so
+ * this can be answered before `G.encore` is written rather than after. `bsTargetPlayerID` is the
+ * remembered pre-play target, which is also the only case in which the Final Two Players Rule closes
+ * Pass — so a true first term covers the one situation the second and third cannot see. Accuse is
+ * left out because it is not turn-bound: it is never what rescues a turn from having nothing left.
+ */
+function isEncoreWorthTaking(state: BlowCowState, bsTargetPlayerID: string | null) {
+  return bsTargetPlayerID !== null
+    || getTableCardCount(state.table) >= state.round.maxCardsOnTable
+    || !isRuleRemoved(state, 'pass')
+}
+
+/**
+ * The encore this player is still standing on, or null. Turn-scoped like `getOpenConspiracy`, so a
+ * record that somehow outlived its turn can neither block a later play nor lend it a stale BS target.
+ */
+export function getOpenEncore(state: BlowCowState, playerID: string, turnNumber: number) {
+  const encore = state.encore
+  if (!encore || encore.playerID !== playerID || encore.turnNumber !== turnNumber) {
+    return null
+  }
+
+  return encore
+}
+
+/**
+ * The BS target an encore is holding open for its owner, or null for everyone else.
+ *
+ * Not turn-scoped, unlike `getOpenEncore`, and it cannot be: `getDefaultBSTargetPlayerID` is asked
+ * the question from tooltips and status lines that have no turn number to hand it. `handleTurnStart`
+ * clears the record, so there is never a stale one for this to read.
+ */
+export function getEncoreBSTargetPlayerID(state: BlowCowState, playerID: string) {
+  return state.encore?.playerID === playerID ? state.encore.bsTargetPlayerID : null
+}
+
 export function isInvisibleHand(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Invisible Hand'
 }
@@ -2022,6 +2246,84 @@ export function canManipulate(state: BlowCowState, playerID: string) {
     && state.round.passStreak === 0
     && state.round.lastNonPassingPlayerID === null
     && getManipulationTargetPlayerIDs(state, playerID).length > 0
+}
+
+export function isMime(state: BlowCowState, playerID: string) {
+  return state.players[playerID]?.character === 'The Mime'
+}
+
+/**
+ * Whose block Mimic copies, and the seat it may trade chairs with: the next active player in the
+ * current direction. There is no choice to make, which is why Mimic sits in the action row rather
+ * than on a player block — the ability names its own target.
+ */
+export function getMimicryTargetPlayerID(state: BlowCowState, playerID: string) {
+  const targetPlayerID = getNextActivePlayerID(
+    playerID,
+    state.seatOrder,
+    state.round.direction,
+    getActivePlayerIDs(state),
+  )
+
+  return targetPlayerID === playerID ? null : targetPlayerID
+}
+
+/**
+ * The character-and-round half of Mimic's legality, mirrored by the board. The turn checks live in
+ * `resolveMimic`, alongside the final-two refusal that turn is the only place able to see.
+ */
+export function canMimic(state: BlowCowState, playerID: string) {
+  const player = state.players[playerID]
+
+  return isMime(state, playerID)
+    && !player?.hasUsedMimicThisRound
+    && !player?.hasLeft
+    && !state.mimicry
+    && getMimicryTargetPlayerID(state, playerID) !== null
+}
+
+/**
+ * Drops the disguise. Deliberately not tied to a turn: The Mime keeps wearing the face through their
+ * own later turns, so it comes off only when the round it belongs to does — through the start of any
+ * procedure, through `beginNextRound` behind it, or when either of the two players leaves.
+ *
+ * The procedure case is the one that carries the weight, and it is also the only route a round has
+ * out. A BS call, a Reset and an accusation all open the table and move cards between their real
+ * owners, and a borrowed pile would be exposed as a copy the moment the first card turned over, so
+ * every site that starts one drops the disguise first. `beginNextRound` clearing it again is belt
+ * and braces for a restored match rather than a second ending.
+ */
+function clearMimicry(state: BlowCowState) {
+  state.mimicry = null
+}
+
+/**
+ * Turns one chair's share of the borrowed pile face up, when the turn arrives at that chair.
+ *
+ * The Reveal Rule normally belongs to a play, and a borrowed pile is drawn twice, so obeying it
+ * literally would flip both copies at once — at whichever chair the source really occupies, which is
+ * the coin flip read straight off the table. Splitting it per chair is what makes the two branches
+ * look alike: whichever way the seats fell, the chair after the disguise turns its pile over first
+ * and the chair holding the turn follows a lap later.
+ *
+ * The handover a swap creates is skipped because it is not a fresh arrival. Nobody outside the pair
+ * saw the turn move — it was at that chair before Mimic and it is at that chair after — so counting
+ * it would put the swapped branch one turn ahead of the other.
+ */
+function advanceMimicryReveal(state: BlowCowState, currentPlayerID: string) {
+  const mimicry = state.mimicry
+  if (!mimicry || (currentPlayerID !== mimicry.playerID && currentPlayerID !== mimicry.sourcePlayerID)) {
+    return
+  }
+
+  if (mimicry.pendingHandoverPlayerID === currentPlayerID) {
+    mimicry.pendingHandoverPlayerID = null
+    return
+  }
+
+  if (!mimicry.revealedPlayerIDs.includes(currentPlayerID)) {
+    mimicry.revealedPlayerIDs.push(currentPlayerID)
+  }
 }
 
 function canUseGrandmasterBSOverride(state: BlowCowState, playerID: string) {
@@ -2124,6 +2426,12 @@ function getAccusableCheat(
     return 'sneakPlay'
   }
 
+  // Read off the record rather than off the table, because a card taken back leaves nothing behind to
+  // inspect — see `BlowCowTakeBackTamper`. Same one-turn window as the direction tamper above.
+  if (state.takeBackTamper?.playerID === targetPlayerID && state.takeBackTamper.turnNumber === turnNumber) {
+    return 'takeBackCard'
+  }
+
   const latestPlay = getLatestPlayForPlayer(state, targetPlayerID)
   if (!latestPlay || latestPlay.playedAtTurn + 1 !== turnNumber) {
     return null
@@ -2162,6 +2470,10 @@ export function getDreamerCheatDescription(cheatKind: BlowCowDreamerCheatKind) {
     return 'slipped cards onto the table out of turn'
   }
 
+  if (cheatKind === 'takeBackCard') {
+    return 'took a revealed card back off the table'
+  }
+
   if (cheatKind === 'extraCardCount') {
     return 'played more cards than they declared'
   }
@@ -2178,7 +2490,12 @@ function getDefaultBSTargetPlayerID(state: BlowCowState, currentPlayerID: string
     return null
   }
 
-  const targetPlayerID = state.round.lastNonPassingPlayerID
+  /*
+   * The remembered target comes first, and only The Clown mid-encore has one. Their own play is the
+   * latest non-passing one by then, so reading the round the usual way would answer "yourself" and
+   * take Call BS off the encore it was meant to be spendable on.
+   */
+  const targetPlayerID = getEncoreBSTargetPlayerID(state, currentPlayerID) ?? state.round.lastNonPassingPlayerID
   if (!state.round.trumpRank || !targetPlayerID || targetPlayerID === currentPlayerID) {
     return null
   }
@@ -2501,8 +2818,11 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     : ''
 
   const canPass = !isRuleRemoved(state, 'pass') && state.round.forcedPlayPlayerID !== currentPlayerID
+  // The Clown has already played this turn and the encore does not buy a second one.
+  const hasEncore = state.encore?.playerID === currentPlayerID
   // With the table cap gone, a full table no longer closes Play, so the two stop being exclusive.
-  const canPlayMore = isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable
+  const canPlayMore = !hasEncore
+    && (isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable)
 
   // A conspiracy leaves exactly one legal move, so the status names it instead of listing an action
   // space that no longer applies.
@@ -2512,6 +2832,24 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     return trumpRank
       ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${conspiracyLabel}`
       : `Round ${state.round.roundNumber}. ${conspiracyLabel} A trump rank is chosen with it.`
+  }
+
+  /*
+   * A disguise is up, and the seat on the clock is one of the two it hangs between. Everything below
+   * is read off the acting player themselves — Change Direction off their character, En Passant off
+   * The Pawn, Call BS off whether the last play was somebody else's — and all three differ between
+   * The Mime and the player they copied. Reciting them would answer in prose the question the two
+   * identical blocks are asking, so the status says only what both seats have in common.
+   *
+   * It cannot close the channel altogether. An ability the copy has and The Mime does not is still
+   * an ability only its real owner can press, so using one gives the game away — that is the cost of
+   * copying a face without the card behind it, and it is on the character.
+   */
+  if (state.mimicry
+    && (currentPlayerID === state.mimicry.playerID || currentPlayerID === state.mimicry.sourcePlayerID)) {
+    return trumpRank
+      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} to act.`
+      : `Round ${state.round.roundNumber}. ${playerLabel} to act. A trump rank is chosen with the first play.`
   }
 
   if (!trumpRank) {
@@ -2553,6 +2891,12 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     return `${tableSummary} ${playerLabel} has no legal action left this turn.${directionActionDetail}`
   }
 
+  // Said outright, because a turn that does not move on after a play is otherwise indistinguishable
+  // from a stalled table. `isEncoreWorthTaking` is what guarantees there is something in this list.
+  if (hasEncore) {
+    return `${tableSummary} ${playerLabel} played and still holds the turn, and may ${formatActionList(availableActions)}.${directionActionDetail}`
+  }
+
   return `${tableSummary} ${playerLabel} may ${formatActionList(availableActions)}.${directionActionDetail}`
 }
 
@@ -2591,6 +2935,8 @@ function buildGameOverSummary(state: BlowCowState): BlowCowGameOver {
 function finalizeGame(state: BlowCowState, events: BlowCowEventsAPI, statusMessage: string, turnNumber: number) {
   const gameOver = buildGameOverSummary(state)
   state.gameStatus = 'finished'
+  // Nothing left to bluff about, and the ring is still on screen behind the results.
+  clearMimicry(state)
   state.placements = gameOver.placements
   state.tableStatus = statusMessage
   appendTelemetryEvent(state, 'game', 'Match finished', statusMessage, gameOver.winnerID, turnNumber)
@@ -2652,14 +2998,21 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.resetResolution = null
   state.accusation = null
   // All round-scoped: nothing from the old round stays accusable, and everyone gets their one
-  // accusation back, The Prototype their one Defy, and The Mastermind their one Conspire.
+  // accusation back, The Prototype their one Defy, The Mastermind their one Conspire, The Mime their
+  // one Mimic, and The Clown their one encore. A disguise never outlives the round it was put on
+  // either.
   state.directionTamper = null
+  state.takeBackTamper = null
   state.directionFlip = null
   state.conspiracy = null
+  state.encore = null
+  clearMimicry(state)
   for (const player of Object.values(state.players)) {
     player.hasUsedAccusationThisRound = false
     player.hasUsedDefyThisRound = false
     player.hasUsedConspireThisRound = false
+    player.hasUsedMimicThisRound = false
+    player.hasUsedClownEncoreThisRound = false
   }
   clearPendingRevealIDs(state)
   updateRoundCapacity(state)
@@ -2879,6 +3232,12 @@ function markPlayerLeft(
   player.hasLeft = true
   player.leaveOrder = Object.values(state.players).filter((entry) => entry.hasLeft).length
   player.pendingRevealPlayID = null
+  // Either half of a disguise leaving takes it down: the leaver's table cards are removed below, and
+  // a borrowed pile pointing at cards that are no longer in the game would simply vanish from under
+  // it. A block wearing a face that has left the table is not a disguise anybody would be fooled by.
+  if (state.mimicry?.playerID === playerID || state.mimicry?.sourcePlayerID === playerID) {
+    clearMimicry(state)
+  }
   const removedTableCards = removeLeftPlayerTableCards(state, playerID)
   appendHistoryEvent(
     state,
@@ -2970,9 +3329,16 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   // later is not owed a replay of something they were meant to catch live.
   G.directionTamper = null
   G.directionFlip = null
+  // Same one-turn window, and the same reason for closing it here. The two-second lock this record
+  // arms is scoped to the turn as well, so a turn that has ended has nothing left to hold down.
+  G.takeBackTamper = null
   // A conspiracy is paid off by the play it commits to, so one still standing here belongs to a turn
   // that ended some other way — an accusation resolving mid-turn, or a match restored mid-flight.
   G.conspiracy = null
+  // An encore never outlives the turn that earned it, whether it was spent or simply not taken up.
+  // This is the clearing site that matters; `beginNextRound` is belt and braces behind it.
+  G.encore = null
+  advanceMimicryReveal(G, currentPlayerID)
   /*
    * Manipulate's lock covers exactly one turn: the one it forced. Any turn that is not the forced
    * player's is proof that theirs has been and gone. Two turns in a row is not a case to worry
@@ -3104,6 +3470,23 @@ function performPlay(
   const conspiracy = getOpenConspiracy(G, playerID, ctx.turn)
   const handSourcePlayerID = conspiracy?.targetPlayerID ?? playerID
 
+  /*
+   * An encore buys one action and a play is the one thing it does not buy, so a second play on the
+   * same turn is refused here rather than in `validateCommonPlay` — that helper has no turn number,
+   * and the encore is scoped to a turn like the conspiracy above it.
+   */
+  if (getOpenEncore(G, playerID, ctx.turn)) {
+    return INVALID_MOVE
+  }
+
+  /*
+   * Both read before a card moves. `earnsEncore` because the play is what spends the round's use, and
+   * the remembered target because the play is about to make this player the latest non-passing one —
+   * see `BlowCowEncore`.
+   */
+  const earnsEncore = canEarnEncore(G, playerID)
+  const encoreBSTargetPlayerID = earnsEncore ? getDefaultBSTargetPlayerID(G, playerID) : null
+
   const selectedCards = removeCardsFromPlayerHand(G, handSourcePlayerID, cardIDs)
   if (!selectedCards) {
     return INVALID_MOVE
@@ -3160,13 +3543,38 @@ function performPlay(
   if (conspiracy) {
     G.conspiracy = null
   }
+  /*
+   * So is the debt Manipulate created, and for the same reason. The lock only ever meant "you may not
+   * pass instead of playing"; leaving it up until the next turn would take Pass off the encore below
+   * from a player who has already done what it asked.
+   */
+  if (G.round.forcedPlayPlayerID === playerID) {
+    G.round.forcedPlayPlayerID = null
+  }
+
+  // Read after the play has landed, because a table the play itself filled is one of the things that
+  // makes an encore worth having.
+  const takesEncore = earnsEncore && isEncoreWorthTaking(G, encoreBSTargetPlayerID)
+  if (takesEncore) {
+    G.players[playerID].hasUsedClownEncoreThisRound = true
+    G.encore = {
+      playerID,
+      turnNumber: ctx.turn,
+      bsTargetPlayerID: encoreBSTargetPlayerID,
+    }
+  }
 
   const conspiracyDetailSuffix = conspiracy
     ? ` The card(s) came out of ${formatPlayerLabel(G, conspiracy.targetPlayerID)}'s hand.`
     : ''
+  // Announced, unlike most of what a play carries. The turn not ending is about to be visible to
+  // everyone anyway, and an unexplained turn that refuses to move on reads as a stalled table.
+  const encoreDetailSuffix = takesEncore
+    ? ' The Clown keeps the turn and may take one more action, but not another play.'
+    : ''
   const playDetail = nextTrumpRank !== null
-    ? `Selected ${nextTrumpRank} as trump and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}`
-    : `Claimed ${claimedRank} and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}`
+    ? `Selected ${nextTrumpRank} as trump and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}${encoreDetailSuffix}`
+    : `Claimed ${claimedRank} and placed ${declaredCardCount} card(s) face down.${conspiracyDetailSuffix}${encoreDetailSuffix}`
 
   appendHistoryEvent(
     G,
@@ -3188,6 +3596,10 @@ function performPlay(
       : isDreamer(G, playerID)
         && (usedRepeatTrump || usedDirectionChange || usedExtraCardCount || usedExceededTableLimit)
       ? 'The Dreamer'
+      // Last in the chain only because a seat holds one character: nothing above this can also be
+      // The Clown. The action the encore buys writes its own archive entry beside this one.
+      : takesEncore
+      ? 'The Clown'
       : null,
     // Whose hand the cards left, which for an ordinary play is nobody's business but the player's own.
     targetPlayerID: conspiracy?.targetPlayerID ?? null,
@@ -3199,6 +3611,12 @@ function performPlay(
     directionBefore: G.players[playerID].turnStartingDirection ?? G.round.direction,
     directionAfter: G.round.direction,
   })
+
+  // The Clown's first play of the round is the one play that leaves the turn where it was.
+  if (takesEncore) {
+    G.tableStatus = buildTurnStatus(G, playerID)
+    return
+  }
 
   advanceTurn(G, events, playerID, ctx.turn)
 }
@@ -3323,6 +3741,99 @@ function resolveSneakPlay(
     playMode: 'manual',
     directionBefore: G.round.direction,
     directionAfter: G.round.direction,
+  })
+}
+
+/**
+ * Palming a card back off the table. The Dreamer's alone while the No Cheating Rule stands; anyone's
+ * once it falls.
+ *
+ * The mirror image of `sneakPlay`, and it shares that move's silence for the same reason: it writes
+ * no history event and no telemetry, so no callout fires and nothing announces it. What the table
+ * gets instead is the gap. The card is gone from the block and the hand count has gone up to match,
+ * for everyone to see — the cheat lives or dies on whether anybody was watching a pile they had
+ * already read and stopped thinking about.
+ *
+ * Legal on any turn, the cheat's own included, which is what makes the lock necessary rather than
+ * decorative. Doing this and then immediately ending your own turn would close the accusation window
+ * in the same breath as opening it, so `takeBackTamper` goes back to its owner alone and their client
+ * grounds itself for two seconds. That is a client-side pause by construction: a deadline in `G`
+ * would have to be a wall clock, and a wall clock in `G` is not replayable.
+ *
+ * Unlimited, and deliberately so — each one re-arms the pause, so a player emptying their whole
+ * revealed pile spends the turn doing it in full view rather than getting a free raid.
+ */
+function resolveTakeBackCard(
+  context: BlowCowMoveContext,
+  args?: BlowCowTakeBackCardArgs,
+) {
+  const { G, ctx, playerID } = context
+
+  if (G.gameStatus !== 'active' || isProcedureRunning(G)) {
+    return INVALID_MOVE
+  }
+
+  if (!canCheat(G, playerID) || G.players[playerID].hasLeft) {
+    return INVALID_MOVE
+  }
+
+  const targetCardID = args?.cardID ?? null
+  if (!targetCardID) {
+    return INVALID_MOVE
+  }
+
+  /*
+   * Your own pile only. Reaching into somebody else's would be a different cheat with a different
+   * tell — their hand count would not move to match — and nothing in the accusation window
+   * distinguishes the two, so the one that is written on the card is the only one allowed.
+   */
+  const targetPlay = G.table.plays.find((play) => play.playerID === playerID
+    && play.cards.some((card) => card.id === targetCardID))
+  const targetCard = targetPlay?.cards.find((card) => card.id === targetCardID)
+
+  // Face up and nothing else. A face-down card is still a live claim that BS can be called on, and
+  // palming one would let a player answer a challenge by deleting the evidence rather than hiding it.
+  if (!targetPlay || !targetCard || !isCardFaceUpOnTable(targetPlay, targetCardID)) {
+    return INVALID_MOVE
+  }
+
+  targetPlay.cards = targetPlay.cards.filter((card) => card.id !== targetCardID)
+  targetPlay.revealedCardIDs = (targetPlay.revealedCardIDs ?? []).filter((cardID) => cardID !== targetCardID)
+  targetPlay.rehiddenCardIDs = (targetPlay.rehiddenCardIDs ?? []).filter((cardID) => cardID !== targetCardID)
+
+  /*
+   * A play with nothing left in it is dropped rather than kept as an empty shell. `getLatestPlayForPlayer`
+   * and The Pawn's En Passant both walk `table.plays` by position, so leaving one behind would put a
+   * play that is no longer on the table between two that are.
+   *
+   * `pendingRevealPlayID` needs no clearing alongside it. Only face-up cards can be palmed, so a play
+   * can only empty out once every card in it is face up — and by then the pointer has been dropped
+   * by the reveal that turned them, whether that was the whole play or The Spy's single card.
+   */
+  if (targetPlay.cards.length === 0) {
+    G.table.plays = G.table.plays.filter((play) => play.id !== targetPlay.id)
+  }
+
+  // Scored like any other way a card reaches a hand, so palming back the fourth of a rank pays out.
+  addCardsToPlayerHand(G, playerID, [targetCard], 'other', ctx.turn)
+
+  G.takeBackTamper = {
+    id: `takeback-${G.round.roundNumber}-${ctx.turn}-${playerID}-${targetCardID}`,
+    playerID,
+    turnNumber: ctx.turn,
+  }
+
+  /*
+   * Archive only, exactly as `sneakPlay` is. `hideSecretState` empties the archive before it reaches
+   * a client, so this is the one record that can name the card without handing the table the
+   * accusation. `tableStatus` is deliberately left alone too: rewriting it would re-announce the
+   * cheat in prose, and the next turn to begin rebuilds it anyway.
+   */
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'takeBackCard',
+    detail: `Took ${formatCardLabel(targetCard)} back off the table during ${formatPlayerLabel(G, ctx.currentPlayer)}'s turn. Accuse can catch this until that turn ends.`,
+    characterUsed: isDreamer(G, playerID) ? 'The Dreamer' : null,
+    cards: [targetCard],
   })
 }
 
@@ -3602,6 +4113,124 @@ function resolveConspire(
     cards: cloneCards(G.players[targetPlayerID].hand),
   })
   G.tableStatus = buildTurnStatus(G, playerID)
+}
+
+/**
+ * The Mime taking their next player's face, and half the time their chair with it.
+ *
+ * Every number copied here is frozen rather than mirrored, and the two halves of the ability are why.
+ * After Mimic the two seats hold identical blocks, and the table's whole job is to work out which of
+ * them moved. The turn always belongs to the block in The Mime's old chair — either they kept it, or
+ * they handed it over by moving out of it — so that block acts either way, and the illusion holds
+ * only while a copied number changes exactly as often as the real one behind it.
+ *
+ * A frozen count does that, because the board subtracts The Mime's own plays from it. If the coin
+ * said stay, The Mime plays and their copy loses those cards; if it said swap, the source plays and
+ * their real count loses them while the untouched copy sits in the other chair. Either way one block
+ * ends up short and the other does not, and both cases look the same from the outside. A live mirror
+ * would give the answer away instead: the shared number would track the source, so it would move on a
+ * swap and stand still without one. The borrowed pile works the same way, one card at a time.
+ *
+ * The seat trade is a real trade — `seatOrder` and both `seatIndex` values — so turn order, the ring
+ * and every "Seat N" label follow it. The labels are what makes it invisible: `seatIndex` stays with
+ * the chair rather than the player, so nothing on the board or in the log renames itself.
+ */
+function resolveMimic(context: BlowCowMoveContext) {
+  const { G, ctx, events, playerID, random } = context
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+    return INVALID_MOVE
+  }
+
+  if (!canMimic(G, playerID) || isFinalTwoResolutionTurn(G, playerID)) {
+    return INVALID_MOVE
+  }
+
+  const sourcePlayerID = getMimicryTargetPlayerID(G, playerID)
+  if (!sourcePlayerID) {
+    return INVALID_MOVE
+  }
+
+  const source = getPlayerState(G, sourcePlayerID)
+  // Read before the chairs can move, so the archive names the seat the copy was taken from rather
+  // than the one its owner ended up in.
+  const sourceLabel = formatPlayerLabel(G, sourcePlayerID)
+  const borrowedPlays = G.table.plays.filter((play) => play.playerID === sourcePlayerID)
+  G.mimicry = {
+    playerID,
+    sourcePlayerID,
+    turnNumber: ctx.turn,
+    character: source.character,
+    points: source.points,
+    pointRanks: source.scoredSets.map((scoredSet) => scoredSet.rank),
+    handCount: source.hand.length,
+    wasSeekerPick: source.seekerPickedCharacter !== null,
+    borrowedPlayIDs: borrowedPlays.map((play) => play.id),
+    hiddenPlayIDs: G.table.plays.filter((play) => play.playerID === playerID).map((play) => play.id),
+    borrowedFaceDownCardIDs: borrowedPlays.flatMap((play) => getFaceDownCardsForPlay(play)).map((card) => card.id),
+    revealedPlayerIDs: [],
+    pendingHandoverPlayerID: null,
+  }
+  G.players[playerID].hasUsedMimicThisRound = true
+
+  // Shuffled rather than drawn as a number, because `Shuffle` is the only randomness this game takes
+  // and mixing in a second source would shift every later shuffle in the match.
+  const hasSwapped = shuffleCards([true, false], random?.Shuffle)[0] ?? false
+  if (hasSwapped) {
+    swapSeatPositions(G, playerID, sourcePlayerID)
+    // The turn is about to be handed to the source, and that arrival is the one that must not count.
+    G.mimicry.pendingHandoverPlayerID = sourcePlayerID
+  }
+
+  /*
+   * Anonymous, and the only history event in the game that is. Naming the seat would answer the one
+   * question the ability exists to ask — and it could not even be phrased, since by the time this
+   * line is written the two seat labels may have changed hands. The archive records the truth; it is
+   * emptied before any client sees it.
+   */
+  appendHistoryEvent(
+    G,
+    'action',
+    'Mimic',
+    'Two seats now look alike. One of them is The Mime, and only they know whether the chairs moved with the faces.',
+    null,
+    ctx.turn,
+  )
+  appendArchiveTurnAction(G, playerID, ctx.turn, {
+    kind: 'mimic',
+    detail: hasSwapped
+      ? `Copied ${sourceLabel} and swapped seats with them, handing them the turn.`
+      : `Copied ${sourceLabel} and kept both the seat and the turn.`,
+    characterUsed: 'The Mime',
+    targetPlayerID: sourcePlayerID,
+  })
+
+  if (hasSwapped) {
+    // The chairs moved, so the turn stays where it was: the source now sits in it. Nothing here
+    // touches `passStreak` or `lastNonPassingPlayerID` — no cards moved and nobody passed, so the
+    // player being handed the turn inherits exactly the table the mover was looking at.
+    events.endTurn({ next: sourcePlayerID })
+    return
+  }
+
+  G.tableStatus = buildTurnStatus(G, playerID)
+}
+
+/**
+ * Trades two players' chairs. `seatIndex` is the index of the player in `seatOrder`, and both move
+ * together so the invariant holds — which is what keeps every "Seat N" label attached to a position
+ * on the ring rather than to a player, and so what stops the trade from announcing itself.
+ */
+function swapSeatPositions(state: BlowCowState, playerID: string, otherPlayerID: string) {
+  const seatIndex = state.seatOrder.indexOf(playerID)
+  const otherSeatIndex = state.seatOrder.indexOf(otherPlayerID)
+  if (seatIndex === -1 || otherSeatIndex === -1) {
+    return
+  }
+
+  state.seatOrder[seatIndex] = otherPlayerID
+  state.seatOrder[otherSeatIndex] = playerID
+  state.players[playerID].seatIndex = otherSeatIndex
+  state.players[otherPlayerID].seatIndex = seatIndex
 }
 
 /**
@@ -3889,6 +4518,7 @@ function resolveBS(context: BlowCowMoveContext, args?: BlowCowCallBSArgs) {
   }
 
   G.players[playerID].matchStats.callBSCount += 1
+  clearMimicry(G)
   G.bsResolution = createBSResolution(G, playerID, targetPlayerID, targetPlay, trumpRank)
   G.tableStatus = `${formatPlayerLabel(G, playerID)} called BS on ${formatPlayerLabel(G, targetPlayerID)}. Resolving the table.`
   appendArchiveTurnAction(G, playerID, context.ctx.turn, {
@@ -3968,6 +4598,7 @@ function resolveAccuseDreamer(context: BlowCowMoveContext, args?: BlowCowAccuseD
     G.players[playerID].matchStats.accusationWinCount += 1
   }
 
+  clearMimicry(G)
   G.accusation = {
     id: `accuse-${G.round.roundNumber}-${ctx.turn}-${playerID}-${targetPlayerID}`,
     accuserPlayerID: playerID,
@@ -4391,6 +5022,7 @@ function resolveReset(context: BlowCowMoveContext) {
 
   G.players[playerID].matchStats.resetCount += 1
 
+  clearMimicry(G)
   G.resetResolution = createResetResolution(G, playerID, 'reset')
   // Routed through the shared builder so the showdown wording lives in one place.
   G.tableStatus = buildTurnStatus(G, playerID)
@@ -4661,10 +5293,25 @@ function hideSecretState(state: BlowCowState, playerID: string | null) {
     archive: createEmptyArchiveState(),
     bsResolution: nextBSResolution,
     resetResolution: nextResetResolution,
+    /*
+     * The rest of the disguise is public — it is what every client draws one block from — but this
+     * one field is the coin flip written down, since only a swap ever sets it. It is consumed inside
+     * the update that sets it, so it should never be here at all; nulling it means that staying true
+     * does not rest on that.
+     */
+    mimicry: state.mimicry ? { ...state.mimicry, pendingHandoverPlayerID: null } : null,
     // Never leaves the server. Everyone watches the direction indicator flip, and `directionFlip`
     // deliberately does go out, saying whose hand did it — but whether that hand was entitled to is
     // the gamble an accusation takes, and the tamper record is that answer written down.
     directionTamper: null,
+    /*
+     * Stripped from everyone except the player it names, which is the one asymmetry in this function
+     * and the reason `BlowCowTakeBackTamper` documents itself so heavily. Nobody else may hold it —
+     * an opponent with this record would be checking the answer instead of gambling an accusation.
+     * Its owner may, because they cannot accuse themselves and already know what they did, and their
+     * client is the only one that has to act on it: the two-second lock is theirs to serve.
+     */
+    takeBackTamper: state.takeBackTamper?.playerID === playerID ? state.takeBackTamper : null,
     players: nextPlayers,
     table: {
       plays: state.table.plays.map((play) => ({
@@ -4737,8 +5384,13 @@ function createStagedBlowCowState(
     resetResolution: null,
     accusation: null,
     directionTamper: null,
+    takeBackTamper: null,
     directionFlip: null,
     conspiracy: null,
+    mimicry: null,
+    encore: null,
+    emotes: [],
+    emoteSequence: 0,
     history,
     telemetry: {
       events: [],
@@ -4778,8 +5430,13 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.resetResolution = null
   state.accusation = null
   state.directionTamper = null
+  state.takeBackTamper = null
   state.directionFlip = null
   state.conspiracy = null
+  state.mimicry = null
+  state.encore = null
+  state.emotes = []
+  state.emoteSequence = 0
   state.round.roundNumber = 1
   state.round.status = 'awaitingTrumpSelection'
   state.round.direction = 'counterclockwise'
@@ -4813,6 +5470,8 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
     player.hasUsedAccusationThisRound = false
     player.hasUsedDefyThisRound = false
     player.hasUsedConspireThisRound = false
+    player.hasUsedMimicThisRound = false
+    player.hasUsedClownEncoreThisRound = false
     player.wasPunishedThisRound = false
     player.wasPunishedLastRound = false
     player.hasLeft = false
@@ -4855,6 +5514,32 @@ export function createInitialBlowCowState(
   return state
 }
 
+function resolveEmote(context: BlowCowMoveContext, args?: BlowCowEmoteArgs) {
+  const { G, playerID } = context
+
+  if (
+    G.gameStatus !== 'active'
+    || !playerID
+    || G.players[playerID]?.hasLeft
+    || !args
+    || !Number.isInteger(args.emoteID)
+    || args.emoteID < 1
+    || args.emoteID > BLOW_COW_EMOTE_COUNT
+  ) {
+    return INVALID_MOVE
+  }
+
+  const nextSequence = (G.emoteSequence ?? 0) + 1
+  const nextEmote: BlowCowEmote = {
+    id: `emote-${nextSequence}-${playerID}`,
+    playerID,
+    emoteID: args.emoteID,
+  }
+
+  G.emoteSequence = nextSequence
+  G.emotes = [...(G.emotes ?? []), nextEmote].slice(-24)
+}
+
 export const BlowCowGame = {
   name: BLOW_COW_GAME_NAME,
   minPlayers: BLOW_COW_MIN_PLAYERS,
@@ -4892,6 +5577,20 @@ export const BlowCowGame = {
     },
   },
   moves: {
+    emote: {
+      /*
+       * Server-only because the id an emote animates under is derived from `emoteSequence`, a
+       * counter shared by the whole table. Any other player's emote landing between the local
+       * prediction and the server's answer shifts that counter, so the predicted id and the
+       * authoritative one differ — and the board, which animates every id it has not seen before,
+       * would play the mover's own emote a second time. The counter is what makes the record
+       * ordered; deciding it on the server is what makes it agree with every other client.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext, args: BlowCowEmoteArgs) => {
+        return resolveEmote(context, args)
+      },
+    },
     startMatch: (context: BlowCowMoveContext) => {
       const { G, ctx, events, playerID, random } = context
       if (G.gameStatus !== 'staging' || playerID !== G.hostPlayerID) {
@@ -4922,6 +5621,14 @@ export const BlowCowGame = {
       redact: true,
       move: (context: BlowCowMoveContext, args: BlowCowSneakPlayArgs) => {
         return resolveSneakPlay(context, args)
+      },
+    },
+    takeBackCard: {
+      // Redacted like the two play moves: the log line every other client receives must not name the
+      // card that left the table, only that a move happened.
+      redact: true,
+      move: (context: BlowCowMoveContext, args: BlowCowTakeBackCardArgs) => {
+        return resolveTakeBackCard(context, args)
       },
     },
     play: {
@@ -4965,6 +5672,17 @@ export const BlowCowGame = {
     manipulate: (context: BlowCowMoveContext, args: BlowCowManipulateArgs) => {
       return resolveManipulate(context, args)
     },
+    mimic: {
+      /*
+       * The disguise is built out of the source's public state, which the client already has, but the
+       * coin flip is not. Predicting it locally would show The Mime a swap that the server then
+       * reversed — and the two outcomes differ in whose turn it is, so the correction would be loud.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext) => {
+        return resolveMimic(context)
+      },
+    },
     pass: (context: BlowCowMoveContext, args?: BlowCowPassArgs) => {
       const { G, ctx, playerID, events } = context
       if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isFinalTwoResolutionTurn(G, playerID)) {
@@ -4998,6 +5716,7 @@ export const BlowCowGame = {
       G.players[playerID].matchStats.passCount += 1
       G.round.passStreak += 1
       if (!isRuleRemoved(G, 'passEnding') && G.round.passStreak >= getActivePlayerCount(G)) {
+        clearMimicry(G)
         G.resetResolution = createResetResolution(G, playerID, 'roundReturn')
         G.tableStatus = `${formatPlayerLabel(G, playerID)} passed. Everyone passed, so the table cards are returning to their owners.`
         appendArchiveTurnAction(G, playerID, ctx.turn, {

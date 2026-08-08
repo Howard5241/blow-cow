@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from 'react'
-import { SeatBlock } from './SeatBlock.tsx'
+import { SeatBlock, type SeatEmote } from './SeatBlock.tsx'
 import type { PointsFlashDirection, SeatHalf, SeatRow } from './boardTypes.ts'
 
 // Screen y grows downward, so sin(90deg) puts the anchor seat at the bottom of the ring.
@@ -60,12 +60,16 @@ type PlayerRingProps = {
   children: ReactNode
   /** The seat whose block is currently nodding at the direction sign it just flipped, or null. */
   directionFlipTellSeatID: string | null
+  /** Newly received emotes, grouped by the seat whose avatar should animate them. */
+  emotesBySeatID: Record<string, SeatEmote[]>
   enteringCardIDSet: Set<string>
   getSeatLabel: (seatIndex: number) => string
   onCatHideCard: (cardID: string) => void
+  onEmoteAnimationEnd: (emoteID: string) => void
   onOpenCharacterCard: (seat: SeatRow) => void
   onRevealCard: (cardID: string) => void
   onSelectSeat: (seatID: string) => void
+  onTakeBackCard: (cardID: string) => void
   /** Which way each mid-flash seat's points last moved. Seats that are not flashing are absent. */
   pointsFlashDirectionBySeatID: Record<string, PointsFlashDirection>
   punishmentImpactSeatID: string | null
@@ -92,12 +96,15 @@ export function PlayerRing({
   showdownLoserSeatIDSet,
   children,
   directionFlipTellSeatID,
+  emotesBySeatID,
   enteringCardIDSet,
   getSeatLabel,
   onCatHideCard,
+  onEmoteAnimationEnd,
   onOpenCharacterCard,
   onRevealCard,
   onSelectSeat,
+  onTakeBackCard,
   pointsFlashDirectionBySeatID,
   punishmentImpactSeatID,
   registerFrontCard,
@@ -128,6 +135,7 @@ export function PlayerRing({
               ? (bsVerdictIsHonest ? 'Honest' : 'Lie')
               : null}
             calloutText={calloutTextBySeatID[seat.id] ?? null}
+            emotes={emotesBySeatID[seat.id] ?? []}
             showdownHandLabel={showdownHandLabelBySeatID[seat.id] ?? null}
             isShowdownLoser={showdownLoserSeatIDSet.has(seat.id)}
             enteringCardIDSet={enteringCardIDSet}
@@ -140,9 +148,11 @@ export function PlayerRing({
             isSelected={seat.id === selectedSeatID}
             key={seat.id}
             onCatHideCard={onCatHideCard}
+            onEmoteAnimationEnd={onEmoteAnimationEnd}
             onOpenCharacterCard={onOpenCharacterCard}
             onRevealCard={onRevealCard}
             onSelect={onSelectSeat}
+            onTakeBackCard={onTakeBackCard}
             registerFrontCard={registerFrontCard}
             registerHandCountPill={registerHandCountPill}
             seat={seat}

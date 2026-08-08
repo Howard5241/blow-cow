@@ -14,7 +14,7 @@
  * server, from state (`G.directionTamper`) that never reaches a client — an accusation is meant to
  * be a guess, so the board must not be able to check the answer first.
  */
-import type { BlowCowState } from '../game/blowCowGame.ts'
+import { getEncoreBSTargetPlayerID, type BlowCowState } from '../game/blowCowGame.ts'
 import {
   getHiddenOverlayCardIDs,
   getLatestHiddenPlay,
@@ -53,7 +53,10 @@ export function getClientDefaultBSTargetSeatID(state: BlowCowState, callerSeatID
     return null
   }
 
-  const targetSeatID = state.round.lastNonPassingPlayerID
+  // The Clown's encore holds its pre-play target open; see `BlowCowEncore`. Shared with the server
+  // rather than mirrored, because the record is public state and there is nothing here to re-derive.
+  const targetSeatID = (callerSeatID ? getEncoreBSTargetPlayerID(state, callerSeatID) : null)
+    ?? state.round.lastNonPassingPlayerID
   if (!state.round.trumpRank || !targetSeatID || targetSeatID === callerSeatID) {
     return null
   }

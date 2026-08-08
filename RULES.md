@@ -54,6 +54,11 @@
 - At the beginning of each player's turn, that player reveals what they played on their previous turn by flipping those card(s) face up.
 - This reveal is mandatory and is not an action.
 - On each turn, a player must choose exactly one action.
+- `The Clown` is the exception: their first `Play` of each round does not end their turn, and they
+  then take one more action out of the same action space, minus `Play`. The play counts in every
+  other way, so the pass counter resets on it and they become the previous non-passing player.
+- Because of that, `Call BS` taken as their second action still targets whoever was the previous
+  non-passing player before their own play, not themselves.
 - The pass counter resets after any non-passing action.
 
 ## Action Spaces
@@ -161,6 +166,42 @@
 - The player who called `Reset` still becomes the starting player of the next round, even if they are
   the one who just took the table.
 
+### Mimic
+- `The Mime`'s action, once per round, on their own turn. It is not one of the actions above: taking
+  it does not end the turn on its own.
+- The target is fixed. It is always the caller's next player in the current `Direction`, so there is
+  nothing to choose.
+- Two things happen, in this order.
+- First, the caller's block takes on the target's appearance: the same avatar, name, character card,
+  point total, cards-in-hand count, and the same card or cards in front. Everything is copied as it
+  stands at that moment and does not change afterwards, so cards played later stack onto the copied
+  pile and count down from the copied hand, exactly as they would on the block being copied.
+- Second, a coin is flipped. Half the time the two players swap seats, and half the time nothing
+  moves. Nobody but `The Mime` is told which happened.
+- On a swap, the two trade places in the seating: the turn stays with the chair, so the target takes
+  it over and `The Mime` becomes the player after them. Seat numbers belong to the chairs and do not
+  move, so the swap renames nothing.
+- Without a swap, `The Mime` keeps the seat and the turn, and still owes the table an action.
+- The seat swap is permanent. Nothing restores it.
+- The appearance is not, but it lasts the rest of the round. `The Mime`'s own later turns do not end
+  it: they keep acting from behind the copied block, and cards they play keep stacking onto the
+  copied pile.
+- It ends when the round ends, when either of the two players leaves the game, or the moment a
+  `Call BS`, `Call Reset`, or `Accuse` procedure begins — whichever comes first. Since every way a
+  round can end is one of those, the procedure is always what takes it off.
+- The Reveal Rule runs per seat while the copy stands, rather than per play. Each of the two seats
+  turns the copied card or cards face up when the turn reaches it, so the pile opens on one seat and
+  then the other instead of on both at once.
+- A consequence, and an intended one: if the seats swapped, the copied player's own cards stay face
+  down on their seat until the turn comes back round to them, even though they have already revealed.
+  They are face up on the other seat by then, so nothing stays hidden for longer than one lap of the
+  table.
+- Cards that were already face up when the copy was taken stay face up on both seats. Only what was
+  still face down is held back.
+- Only the appearance is copied. `The Mime` does not gain the copied character's ability, keeps their
+  own hand, and answers for their own plays. `MaxCardsOnTable` still counts the real cards on the
+  table, not the copies drawn on top of them.
+
 ## Other Rules
 
 ### Leave Game Rule
@@ -188,29 +229,40 @@
 ### No Cheating Rule
 - Nobody may break the rules of the game.
 - `The Dreamer` is the single exception, and is the only player `Accuse` may name.
-- The five things the exception covers are: playing more cards than you declare, pushing the table
+- The six things the exception covers are: playing more cards than you declare, pushing the table
   past `MaxCardsOnTable`, reusing the previous round's trump rank on the opening play, slipping a
-  card onto the table during someone else's turn, and changing `Direction` on anyone's turn.
+  card onto the table during someone else's turn, taking one of your own revealed cards back off the
+  table on anyone's turn, and changing `Direction` on anyone's turn.
 - `Accuse` is how a cheat is caught. Anyone may raise one, on or off their turn, once per round.
   A hit makes the cheat take the table; a miss makes the accuser take it instead. Either way the
   round ends.
 - Slipping a card onto the table is the one cheat that does not need a trump rank. Before the round
   has one, the card claims nothing; it takes on whichever rank the round settles on, whether that
   comes from the opening play or from `The Invisible Hand`. That makes it the widest window of the
-  five — it is open before the round has a shape at all.
-- Each cheat stays catchable only inside a narrow window. Tampering with `Direction` and slipping a
-  card onto the table are properties of the turn they happened in, so they close when that turn ends.
-  The other three are properties of a play, and are catchable during the turn immediately after it.
+  six — it is open before the round has a shape at all.
+- Taking a revealed card back is the mirror of slipping one on, and the only cheat that may be done
+  on your own turn as well as anyone else's. It takes exactly one of your own face-up cards back into
+  your hand. Face-down cards may not be taken: those are still live claims, and palming one would let
+  a player answer `Call BS` by deleting the evidence rather than hiding it. There is no limit on how
+  many may be taken.
+- Each cheat stays catchable only inside a narrow window. Tampering with `Direction`, slipping a card
+  onto the table, and taking one back off it are properties of the turn they happened in, so they
+  close when that turn ends. The other three are properties of a play, and are catchable during the
+  turn immediately after it.
 - Nobody is ever told a cheat happened. Playing more cards than you declare announces the declared
-  count, a slipped card is placed in silence, and a change of `Direction` is never written down at
-  all — the arrow simply points the other way. Every accusation is a guess.
+  count, a slipped card is placed in silence, a card taken back simply stops being there, and a
+  change of `Direction` is never written down at all — the arrow simply points the other way. Every
+  accusation is a guess.
+- A player who takes a card back on their own turn cannot act again immediately. Their own actions
+  are held for two seconds, so the gap they have just left in their pile sits there long enough to be
+  noticed rather than being closed by ending the turn in the same breath.
 - The one thing the table does see is who touched the direction sign: the block of whoever flipped it
   leans toward the middle of the table and settles back. That happens on every flip, including
   `The Cat`'s legal one, and it says nothing about whether the flip was allowed — working that
   out from the flipper's character and whose turn it is remains the accuser's problem. It is also
   the only word on the subject, and it is gone as soon as it has played: a player looking elsewhere
   has nothing to go back and read.
-- The rule card deliberately does not list the five cheats, so a player has to learn them from the
+- The rule card deliberately does not list the six cheats, so a player has to learn them from the
   characters that use them rather than from the card.
 
 ### Joker Rule
@@ -288,11 +340,15 @@
 A removed rule takes any ability built on top of it with it. This is a consequence of the removal,
 not a special case:
 - `Pass Rule` removed: The Foreigner has no way to use their ability, and The Streamer's leave
-  penalty becomes unavoidable.
+  penalty becomes unavoidable. It can also take The Clown's second action away, since `Pass` is how
+  a kept turn is ended: with nothing to challenge and a table short of its cap, the turn is not kept
+  at all and the play ends it as usual.
 - `Joker Rule` removed: The Confused's Jacks are worthless too, because the ability makes them
   function as Jokers and a Joker is now nothing.
 - `Reveal Rule` removed: The Spy has nothing to modify, since their ability only ever chose how much
-  of the start-of-turn reveal happened.
+  of the start-of-turn reveal happened. Taking a card back off the table goes with it, for the same
+  reason running the other way: only face-up cards may be taken, and with no start-of-turn reveal
+  nothing reaches the table face up in the first place.
 - `Rank Change Rule` or `Max Cards On Table Rule` removed: the matching Dreamer cheat stops being a
   cheat, so the play is honest and `Accuse` cannot catch it.
 - `Call Reset Rule` is the rule The Gambler overrides, and it is the one rule card that cannot be

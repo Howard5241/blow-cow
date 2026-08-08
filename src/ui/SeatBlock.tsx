@@ -8,6 +8,11 @@ import {
 } from './iconSprites.ts'
 import type { PointsFlashDirection, SeatHalf, SeatRow } from './boardTypes.ts'
 
+export type SeatEmote = {
+  id: string
+  sprite: string
+}
+
 type SeatBlockProps = {
   /**
    * The Continue and Punish controls of a live BS resolution. Only ever supplied to the caller, so
@@ -26,6 +31,8 @@ type SeatBlockProps = {
    * player starts a turn, says something else, or the round ends.
    */
   calloutText: string | null
+  /** Any freshly received emotes travelling out from this seat's avatar. */
+  emotes: SeatEmote[]
   /** This block is the one pulled to the centre of the table for its BS reveal step. */
   isRevealFocused?: boolean
   /** This player was just caught cheating, and stays red until they are punished. */
@@ -49,9 +56,11 @@ type SeatBlockProps = {
   isSelectable: boolean
   isSelected: boolean
   onCatHideCard: (cardID: string) => void
+  onEmoteAnimationEnd: (emoteID: string) => void
   onOpenCharacterCard: (seat: SeatRow) => void
   onRevealCard: (cardID: string) => void
   onSelect: (seatID: string) => void
+  onTakeBackCard: (cardID: string) => void
   registerFrontCard: (overlayCardID: string, element: HTMLDivElement | null) => void
   registerHandCountPill: (seatID: string, element: HTMLSpanElement | null) => void
   seat: SeatRow
@@ -73,6 +82,7 @@ export function SeatBlock({
   bsTargetMarkDelayMs = 0,
   bsVerdictLabel = null,
   calloutText,
+  emotes,
   enteringCardIDSet,
   isAccusedCheat = false,
   showdownHandLabel = null,
@@ -84,9 +94,11 @@ export function SeatBlock({
   isSelectable,
   isSelected,
   onCatHideCard,
+  onEmoteAnimationEnd,
   onOpenCharacterCard,
   onRevealCard,
   onSelect,
+  onTakeBackCard,
   registerFrontCard,
   registerHandCountPill,
   seat,
@@ -152,6 +164,23 @@ export function SeatBlock({
       ) : null}
 
       <div className="seat-block-top">
+        {emotes.length > 0 ? (
+          <div aria-hidden="true" className="seat-emote-layer">
+            {emotes.map((emote, emoteIndex) => (
+              <img
+                alt=""
+                className="seat-emote"
+                key={emote.id}
+                onAnimationEnd={() => {
+                  onEmoteAnimationEnd(emote.id)
+                }}
+                src={emote.sprite}
+                style={{ '--emote-delay': `${emoteIndex * 70}ms` } as CSSProperties}
+              />
+            ))}
+          </div>
+        ) : null}
+
         {seat.avatarSprite ? (
           <img alt="" className="seat-avatar-image" src={seat.avatarSprite} />
         ) : (
@@ -249,6 +278,7 @@ export function SeatBlock({
           enteringCardIDSet={enteringCardIDSet}
           onCatHideCard={onCatHideCard}
           onRevealCard={onRevealCard}
+          onTakeBackCard={onTakeBackCard}
           registerFrontCard={registerFrontCard}
           seatName={seat.name}
         />

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { BoardProps } from 'boardgame.io/react'
 import {
   BLOW_COW_DIRECTIONS,
@@ -6,6 +6,7 @@ import {
   canBreakRule,
   canConspire,
   canManipulate,
+  canMimic,
   canUseDefy,
   countsTowardReverseRule,
   formatLeaveEffectLabel,
@@ -14,6 +15,7 @@ import {
   getConspiracyTargetPlayerIDs,
   getManipulableTrumpRanks,
   getManipulationTargetPlayerIDs,
+  getMimicryTargetPlayerID,
   getSeekerCharacterChoices,
   getTableCardCount,
   isDefyDestroyableCard,
@@ -44,6 +46,7 @@ import {
   type BlowCowBreakRuleArgs,
   type BlowCowConspireArgs,
   type BlowCowDefyArgs,
+  type BlowCowEmoteArgs,
   type BlowCowDirection,
   type BlowCowManipulateArgs,
   type BlowCowSeekCharacterArgs,
@@ -55,6 +58,7 @@ import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.
 import { getCharacterCardSprite, getCharacterCardSpriteFrames } from './characterCardSprites.ts'
 import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
 import { getAvatarSprite } from './avatarSprites.ts'
+import { EMOTE_SPRITES, getEmoteSprite } from './emoteSprites.ts'
 import { CharacterCardSpriteImage } from './CharacterCardSpriteImage.tsx'
 import { InlineInfoTooltip } from './InlineInfoTooltip.tsx'
 import { PlayerRing } from './PlayerRing.tsx'
@@ -64,6 +68,7 @@ import {
   HISTORY_ICON_SPRITE,
   LEAVE_ROOM_ICON_SPRITE,
   MANIPULATE_ICON_SPRITE,
+  MIMIC_ICON_SPRITE,
   PASS_ICON_SPRITE,
   PLAY_ICON_SPRITE,
   PLAY_RANDOM_ICON_SPRITE,
@@ -76,12 +81,9 @@ import { TableCenterHub } from './TableCenterHub.tsx'
 import { BreakRuleOverlay, HistoryOverlay, RulesOverlay } from './BoardOverlays.tsx'
 import { useTransientMessage } from './useTransientMessage.ts'
 import {
-  getCatHiddenCardIDSet,
-  getCatHiddenOverlayCardIDs,
+  getDisplayedFrontCards,
   getDisplayedPlayCardCount,
-  getExplicitlyRevealedCardIDSet,
   getFaceDownOverlayCardIDs,
-  getFaceUpOverlayCardIDs,
   getLatestHiddenPlay,
 } from './tablePlays.ts'
 import {
@@ -246,6 +248,12 @@ type FrontCardEntrySequence = {
   durationMs: number
 }
 
+type ActiveEmote = {
+  id: string
+  playerID: string
+  sprite: string
+}
+
 type BoardServerState = 'checking' | 'online' | 'offline'
 
 /*
@@ -280,6 +288,29 @@ const BS_PUNISHMENT_MOVE_STAGGER_MS = 110
 const BS_PUNISHMENT_IMPACT_DURATION_MS = 720
 /** Must match the `seat-direction-flip-nudge` animation duration in App.css. */
 const DIRECTION_FLIP_TELL_DURATION_MS = 460
+/*
+ * How long a player who has just palmed a card off the table is kept off their own action buttons.
+ * The point of the pause is that the gap in their pile has to sit there long enough for somebody to
+ * notice it: without one, the same hand could take a card back and end the turn on top of it, closing
+ * the accusation window in the same breath as opening it.
+ *
+ * Client-side by construction rather than by omission. A deadline the server could enforce would have
+ * to be a wall clock stored in `G`, and a wall clock in `G` is not replayable — it would break the
+ * archive replays and the check harness both. Every honest client runs this identically, and the one
+ * thing a doctored client could buy itself by skipping it is two seconds of a cheat nobody can prove.
+ */
+const TAKE_BACK_ACTION_LOCK_MS = 2000
+/*
+ * Only its owner ever reads this, on the buttons the lock is holding down. It says what happened
+ * without saying the word cheat, because the same player may be looking at a shared screen and the
+ * gap in their own pile is meant to be the only thing that gives them away.
+ */
+const TAKE_BACK_LOCK_DESCRIPTION = 'You just took a card back. Your hands are off the table for a moment.'
+/**
+ * Comfortably past the `seat-emote-travel` animation in App.css and the stagger a batch of emotes is
+ * dealt out under, so this only ever fires for an emote whose `onAnimationEnd` never came.
+ */
+const EMOTE_EXPIRY_MS = 5000
 /*
  * The beat between a Reset or all-pass return being called and the first block being pulled to the
  * centre, so the call registers before the procedure starts. The BS equivalent is spent drawing the
@@ -329,6 +360,28 @@ const ENDGAME_CHART_PADDING = {
   left: 40,
 } as const
 const ENDGAME_CHART_COLORS = ['#ffcf67', '#4fd2a3', '#7ebdff', '#ff8d7b', '#d9b8ff', '#7fe4ff', '#ffb36b', '#c7eb6c'] as const
+const TABLE_BOARD_PALETTES = [
+  {
+    top: 'rgb(22 74 67)',
+    middle: 'rgb(11 42 39)',
+    bottom: 'rgb(4 20 19)',
+  },
+  {
+    top: 'rgb(57 66 80)',
+    middle: 'rgb(31 39 51)',
+    bottom: 'rgb(12 17 24)',
+  },
+  {
+    top: 'rgb(76 58 22)',
+    middle: 'rgb(42 29 10)',
+    bottom: 'rgb(20 13 5)',
+  },
+  {
+    top: 'rgb(31 48 79)',
+    middle: 'rgb(16 27 50)',
+    bottom: 'rgb(7 13 29)',
+  },
+] as const
 const BS_PLAYER_CALLOUT_OPTIONS = ['BS!', "That's a lie!", "That's BS!", 'I call BS!', "You're lying!", 'BS!!!!!'] as const
 const PASS_PLAYER_CALLOUT_OPTIONS = ['Pass', 'Skip', 'I pass', "I'll pass"] as const
 /** `{name}` is filled with the accused seat's display name. */
@@ -409,8 +462,10 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     seekCharacter: (args: BlowCowSeekCharacterArgs) => void
     breakRule: (args: BlowCowBreakRuleArgs) => void
     defy: (args: BlowCowDefyArgs) => void
+    emote: (args: BlowCowEmoteArgs) => void
     conspire: (args: BlowCowConspireArgs) => void
     manipulate: (args: BlowCowManipulateArgs) => void
+    mimic: () => void
     sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
@@ -567,6 +622,25 @@ function pickCalloutTextForID(options: readonly string[], id: string) {
   }
 
   return options[hash] ?? ''
+}
+
+/** A repeatable palette shuffle keeps every client on the same round colour without game-state noise. */
+function getTableBoardPalette(matchID: string, roundNumber: number) {
+  const hashPaletteIndex = (paletteIndex: number) => {
+    let hash = 2166136261
+    const seed = `${matchID}:${paletteIndex}`
+
+    for (let index = 0; index < seed.length; index += 1) {
+      hash = Math.imul(hash ^ seed.charCodeAt(index), 16777619)
+    }
+
+    return hash >>> 0
+  }
+  const paletteOrder = TABLE_BOARD_PALETTES.map((_, paletteIndex) => paletteIndex)
+    .sort((leftIndex, rightIndex) => hashPaletteIndex(leftIndex) - hashPaletteIndex(rightIndex) || leftIndex - rightIndex)
+  const cycleIndex = Math.max(0, roundNumber - 1) % paletteOrder.length
+
+  return TABLE_BOARD_PALETTES[paletteOrder[cycleIndex]]
 }
 
 function scaleSequenceDelay(delayMs: number, speedMultiplier: number) {
@@ -742,6 +816,8 @@ export function BlowCowBoard({
    * Read this early — the hand effects below key off the seat the strip is currently showing.
    */
   const openConspiracy = currentSeatID && G.conspiracy?.playerID === currentSeatID ? G.conspiracy : null
+  /** The Clown has already played this turn and still holds it. Everything but a second play is open. */
+  const openEncore = currentSeatID && G.encore?.playerID === currentSeatID ? G.encore : null
   const handSourceSeatID = openConspiracy?.targetPlayerID ?? currentSeatID
   const tableBoardRef = useRef<HTMLElement | null>(null)
   const frontCardRefs = useRef(new Map<string, HTMLDivElement>())
@@ -754,8 +830,8 @@ export function BlowCowBoard({
   const previousHandCardsRef = useRef<HandCard[]>([])
   const previousFrontCardIDsBySeatRef = useRef(new Map<string, string[]>())
   const previousScoredSetIDsRef = useRef(new Set<string>())
-  const previousRevealedOverlayCardIDSetRef = useRef(new Set<string>())
-  const previousCatHiddenOverlayCardIDSetRef = useRef(new Set<string>())
+  /** What each drawn front card looked like last render, so a flip can be told from an arrival. */
+  const previousDisplayedFaceDownRef = useRef(new Map<string, boolean>())
   /**
    * The seat whose hand the strip was showing last frame. Normally the viewer's own, but a
    * conspiracy points it at somebody else, and that swap has to read as a seat change rather than as
@@ -763,6 +839,8 @@ export function BlowCowBoard({
    */
   const previousHandSourceSeatIDRef = useRef<string | null>(handSourceSeatID)
   const lastFrontCardIDsKeyRef = useRef('')
+  /** The disguise the front-card watcher last drew, so it can tell a swapped pile from a dealt one. */
+  const lastWornMimicryKeyRef = useRef('')
   const handAnimationTimeoutIDsRef = useRef<number[]>([])
   const frontCardEntryTimeoutIDsRef = useRef<number[]>([])
   const revealFlipTimeoutIDsRef = useRef<number[]>([])
@@ -771,7 +849,6 @@ export function BlowCowBoard({
   const hasMountedPlayWatcherRef = useRef(false)
   const hasMountedFrontCardWatcherRef = useRef(false)
   const hasMountedRevealWatcherRef = useRef(false)
-  const hasMountedCatHideWatcherRef = useRef(false)
   const lastSeenPlayIDRef = useRef<string | null>(null)
   const hasMountedBSCalloutWatcherRef = useRef(false)
   const lastSeenBSResolutionIDRef = useRef<string | null>(null)
@@ -779,6 +856,9 @@ export function BlowCowBoard({
   const lastSeenResetResolutionIDRef = useRef<string | null>(null)
   const hasMountedPassCalloutWatcherRef = useRef(false)
   const lastSeenPassEventIDRef = useRef<string | null>(null)
+  const hasMountedEmoteWatcherRef = useRef(false)
+  const seenEmoteIDsRef = useRef(new Set<string>())
+  const emoteExpiryTimeoutIDsRef = useRef(new Set<number>())
   const playersFromRoom = roomPlayers.length > 0
     ? roomPlayers
     : ((matchData as MatchPlayer[] | undefined) ?? [])
@@ -799,6 +879,17 @@ export function BlowCowBoard({
    * ends — so two players can be mid-sentence at once, which a single slot could not express.
    */
   const [playerCallouts, setPlayerCallouts] = useState<Record<string, { calloutID: string; text: string }>>({})
+  /*
+   * The Mime's disguise, seen from outside it. Never worn on The Mime's own client — they know what
+   * they did, and the block they have to read is their real one. Everything it copies is public
+   * state, so putting it on reaches past nothing this client had not already been sent.
+   */
+  const wornMimicry = G.mimicry && G.mimicry.playerID !== currentSeatID ? G.mimicry : null
+  const wornMimicryKey = wornMimicry
+    ? `${wornMimicry.playerID}:${wornMimicry.sourcePlayerID}:${wornMimicry.turnNumber}`
+    : ''
+  /** The disguise whose borrowed callout has already been seeded, so it is seeded exactly once. */
+  const lastSeededMimicryKeyRef = useRef('')
   /**
    * Every callout watcher writes through here: a seat's line replaces whatever that seat was saying
    * and leaves every other seat alone. There is no timer to cancel, because nothing expires.
@@ -821,6 +912,8 @@ export function BlowCowBoard({
   const [selectedManipulateDirection, setSelectedManipulateDirection] = useState<BlowCowDirection | null>(null)
   const [selectedTargetSeatID, setSelectedTargetSeatID] = useState<string | null>(null)
   const [selectedForeignerCardCode, setSelectedForeignerCardCode] = useState<string>('none')
+  const [isEmotePickerOpen, setIsEmotePickerOpen] = useState(false)
+  const [activeEmotes, setActiveEmotes] = useState<ActiveEmote[]>([])
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   // Kept mutually exclusive with the history overlay so the two panels never stack on the board.
   const [isRulesOpen, setIsRulesOpen] = useState(false)
@@ -848,6 +941,8 @@ export function BlowCowBoard({
   const [isPunishmentFlashActive, setIsPunishmentFlashActive] = useState(false)
   /** The seat currently playing the direction-flip nudge, or null when nobody is. */
   const [directionFlipTellSeatID, setDirectionFlipTellSeatID] = useState<string | null>(null)
+  /** Set for `TAKE_BACK_ACTION_LOCK_MS` after this client palms a card back on its own turn. */
+  const [isTakeBackLocked, setIsTakeBackLocked] = useState(false)
   const [punishmentMoveSequence, setPunishmentMoveSequence] = useState<PunishmentMoveSequence | null>(null)
   const [punishmentImpactSeatID, setPunishmentImpactSeatID] = useState<string | null>(null)
   const [departedPunishmentCardIDs, setDepartedPunishmentCardIDs] = useState<string[]>([])
@@ -881,6 +976,8 @@ export function BlowCowBoard({
   const lastSeenPunishmentEventIDRef = useRef<string | null>(null)
   const hasMountedDirectionFlipWatcherRef = useRef(false)
   const lastSeenDirectionFlipIDRef = useRef<string | null>(null)
+  const hasMountedTakeBackLockWatcherRef = useRef(false)
+  const lastSeenTakeBackTamperIDRef = useRef<string | null>(null)
   const finalizeBSResolutionRef = useRef(moves.finalizeBSResolution)
   const finalizeResetResolutionRef = useRef(moves.finalizeResetResolution)
   const finalizeAccusationRef = useRef(moves.finalizeAccusation)
@@ -1061,6 +1158,7 @@ export function BlowCowBoard({
     selectedCharacterCard
       || isSeekerPickerOpen
       || isBreakRulePickerOpen
+    || isEmotePickerOpen
       || isHistoryOpen
       || isRulesOpen
       || selectedTargetSeatID,
@@ -1092,6 +1190,11 @@ export function BlowCowBoard({
         return
       }
 
+      if (isEmotePickerOpen) {
+        setIsEmotePickerOpen(false)
+        return
+      }
+
       if (isHistoryOpen) {
         setIsHistoryOpen(false)
         return
@@ -1116,6 +1219,7 @@ export function BlowCowBoard({
     selectedCharacterCard,
     isSeekerPickerOpen,
     isBreakRulePickerOpen,
+    isEmotePickerOpen,
     isHistoryOpen,
     isRulesOpen,
     clearFailMessage,
@@ -1765,6 +1869,7 @@ export function BlowCowBoard({
   }, [G.resetResolution?.id, G.speedMultiplier, G.table.plays, ctx.currentPlayer, currentSeatID, isActive])
 
   const activePlayerIDs = getActivePlayerIDs(G)
+  const tableBoardPalette = getTableBoardPalette(matchID, G.round.roundNumber)
   const activePlayerCount = activePlayerIDs.length || ctx.numPlayers
   const totalCardsOnTable = getTableCardCount(G.table)
   const maxCardsOnTable = G.round.maxCardsOnTable
@@ -1786,6 +1891,11 @@ export function BlowCowBoard({
   const seatPointsKey = G.seatOrder.map((seatID) => `${seatID}:${G.players[seatID].points}`).join('|')
   const selectedCards = handCards.filter((card) => selectedCardIDs.includes(card.id))
   const isSpectator = currentSeatID === null
+  const canEmote = Boolean(
+    currentSeatID
+      && G.gameStatus === 'active'
+      && !currentPlayerState?.hasLeft,
+  )
   const isCurrentPlayersTurn = Boolean(
     currentSeatID
       && ctx.currentPlayer === currentSeatID
@@ -1895,6 +2005,14 @@ export function BlowCowBoard({
   const resolvedManipulateDirection = selectedManipulateDirection
     ?? (G.round.direction === 'clockwise' ? 'counterclockwise' : 'clockwise')
   const canManipulateNow = isInteractiveTurn && Boolean(currentSeatID && canManipulate(G, currentSeatID))
+  const isMime = currentPlayerState?.character === 'The Mime'
+  const hasUsedMimicThisRound = Boolean(currentPlayerState?.hasUsedMimicThisRound)
+  // Mimic names its own target, so unlike Conspire and Manipulate it stays in the action row. The
+  // seat is only read here to name it in the tooltip.
+  const mimicrySourceSeatID = isMime && currentSeatID ? getMimicryTargetPlayerID(G, currentSeatID) : null
+  const canMimicNow = isInteractiveTurn
+    && !isFinalTwoResolutionTurn
+    && Boolean(currentSeatID && canMimic(G, currentSeatID))
   /** This seat owes the table a play because The Invisible Hand opened the round for them. */
   const isForcedToPlay = Boolean(currentSeatID && G.round.forcedPlayPlayerID === currentSeatID)
   const isTableLimitRemoved = isRuleRemoved(G, 'maxCardsOnTable')
@@ -1911,8 +2029,12 @@ export function BlowCowBoard({
     && (canCheat || selectedCards.length <= 2)
     && (!isRepeatingPreviousTrump || canRepeatPreviousTrump)
     && (canCheat || hasTableRoomForSelection)
+  // `openEncore` gates the two play buttons and nothing else in the row: an encore takes away the
+  // play it followed, not the turn. Select Trump needs no gate — any play that earns an encore has
+  // already left the round with a trump rank.
   const canPlayCards = isInteractiveTurn
     && !isFinalTwoResolutionTurn
+    && !openEncore
     && currentTrump !== null
     && selectedCards.length > 0
     && (canCheat || selectedCards.length <= 2)
@@ -1929,6 +2051,7 @@ export function BlowCowBoard({
   const canPlayRandomCards = isInteractiveTurn
     && isDrunkard
     && !isFinalTwoResolutionTurn
+    && !openEncore
     && maxRandomPlayCardCount > 0
     && (currentTrump !== null || !isRepeatingPreviousTrump)
   // The Cat is bound to their own turn. A cheat is not: reaching into someone else's turn is
@@ -1953,6 +2076,17 @@ export function BlowCowBoard({
     && !currentPlayerState?.hasLeft
     && !hasSneakedThisTurn
   const canSneakPlay = isSneakWindowOpen && selectedCards.length === 1
+  /*
+   * The take-back window, and it is the widest of any cheat: your own face-up cards, on anybody's
+   * turn, as many as you dare. Nothing here is once-per-anything, so there is no spent flag to
+   * mirror — what limits it is that every one of them re-arms the lock below and leaves a fresh gap
+   * in your pile for the table to notice.
+   */
+  const isTakeBackWindowOpen = G.gameStatus === 'active'
+    && isActive
+    && canCheat
+    && !isResolutionSequenceActive
+    && !currentPlayerState?.hasLeft
   // An open conspiracy owes the table a play, so every other way out of the turn is closed. The
   // borrowed hand still feeds the two play buttons, which is why only these three are gated.
   const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !openConspiracy && !isForcedToPlay
@@ -1980,7 +2114,16 @@ export function BlowCowBoard({
   const tableCapacityLabel = isTableLimitRemoved
     ? `current cards: ${totalCardsOnTable}, no maximum (reset unlocks at ${maxCardsOnTable})`
     : `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}`
-  const frontCardsColumnTooltip = canUseCat
+  /*
+   * Read by its viewer alone, so it can name a cheat they hold the licence for. The take-back is
+   * listed first when both apply, because that is also the order the click resolves in — your own
+   * face-up cards go back to your hand, everyone else's flip.
+   */
+  const frontCardsColumnTooltip = canUseCat && isTakeBackWindowOpen
+    ? `${tableCapacityLabel}. Click a face-up card of your own to take it back into your hand; because you are The Cat, clicking anyone else's flips it face down.`
+    : isTakeBackWindowOpen
+    ? `${tableCapacityLabel}. You may click a face-up card of your own to take it back into your hand. Accuse catches that until the turn it happened on ends.`
+    : canUseCat
     ? `${tableCapacityLabel}. Because you are The Cat, you may click any face-up front card to flip it face down.`
     : tableCapacityLabel
   const roomCodeTooltip = `Room Code:\n${matchID}`
@@ -2050,8 +2193,15 @@ export function BlowCowBoard({
       : `Turn direction is ${directionArrowOrientation}. Click to change the direction, on anyone's turn. Your block gives a nod as you do, and Accuse can catch it until that turn ends.`
     : `Turn direction is ${directionArrowOrientation}.`
   const latestTablePlay = G.table.plays[G.table.plays.length - 1] ?? null
-  const tableRevealKey = G.table.plays.map((play) => `${play.id}:${play.revealedAtTurn ?? 'hidden'}:${(play.revealedCardIDs ?? []).join(',')}`).join('|')
-  const catHiddenKey = G.table.plays.map((play) => `${play.id}:${(play.rehiddenCardIDs ?? []).join(',')}`).join('|')
+  /*
+   * Every card the ring draws in front of a seat, worked out once. The seat rows and the flip
+   * watcher both read it, which is what stops a card being animated as flipping while it is drawn
+   * the other way up — a disguise deliberately turns its borrowed pile over on a different turn than
+   * the cards themselves are revealed on.
+   */
+  const displayedFrontCardsBySeatID = useMemo(() => new Map(
+    G.seatOrder.map((seatID) => [seatID, getDisplayedFrontCards(G.table.plays, seatID, wornMimicry)] as const),
+  ), [G.seatOrder, G.table.plays, wornMimicry])
   // The x marks belong to the lead-in only; they unmount as soon as the reveal procedure starts.
   const bsCallTrailMarks = bsResolution && leadInProgress?.resolutionID === bsResolution.id
     && leadInProgress.isActive
@@ -2122,71 +2272,52 @@ export function BlowCowBoard({
   const reversedHistory = [...G.history].reverse()
   const latestPassEvent = reversedHistory.find((event) => event.kind === 'action' && event.playerID !== null && event.title.endsWith(' passed')) ?? null
 
+  /*
+   * One watcher for both directions of a flip, because both play the same animation and both are now
+   * questions about what is drawn rather than about what the table holds. A card turning face up at a
+   * reveal and one being turned face down by The Cat are the same event seen from either side.
+   *
+   * Only cards present in both renders count. One that has just arrived is entering, which the
+   * front-card entry watcher owns, and one that has just left is on its way into somebody's hand.
+   */
   useEffect(() => {
-    const nextRevealedOverlayCardIDSet = new Set(
-      G.table.plays.flatMap((play) => getFaceUpOverlayCardIDs(play)),
-    )
+    const nextFaceDownByOverlayCardID = new Map<string, boolean>()
+    for (const displayedFrontCards of displayedFrontCardsBySeatID.values()) {
+      for (const displayedFrontCard of displayedFrontCards) {
+        nextFaceDownByOverlayCardID.set(displayedFrontCard.overlayCardID, displayedFrontCard.faceDown)
+      }
+    }
+
+    const previousFaceDownByOverlayCardID = previousDisplayedFaceDownRef.current
+    previousDisplayedFaceDownRef.current = nextFaceDownByOverlayCardID
 
     if (!hasMountedRevealWatcherRef.current) {
       hasMountedRevealWatcherRef.current = true
-      previousRevealedOverlayCardIDSetRef.current = nextRevealedOverlayCardIDSet
       return
     }
 
-    const newlyRevealedCardIDs = [...nextRevealedOverlayCardIDSet].filter(
-      (overlayCardID) => !previousRevealedOverlayCardIDSetRef.current.has(overlayCardID),
-    )
+    const flippedOverlayCardIDs = [...nextFaceDownByOverlayCardID.entries()]
+      .filter(([overlayCardID, faceDown]) => {
+        const previousFaceDown = previousFaceDownByOverlayCardID.get(overlayCardID)
 
-    previousRevealedOverlayCardIDSetRef.current = nextRevealedOverlayCardIDSet
+        return previousFaceDown !== undefined && previousFaceDown !== faceDown
+      })
+      .map(([overlayCardID]) => overlayCardID)
 
-    if (newlyRevealedCardIDs.length === 0) {
+    if (flippedOverlayCardIDs.length === 0) {
       return
     }
 
-    const revealedCardIDSet = new Set(newlyRevealedCardIDs)
-    setRevealFlippingCardIDs((previousIDs) => [...new Set([...previousIDs, ...newlyRevealedCardIDs])])
+    const flippedOverlayCardIDSet = new Set(flippedOverlayCardIDs)
+    setRevealFlippingCardIDs((previousIDs) => [...new Set([...previousIDs, ...flippedOverlayCardIDs])])
 
     const timeoutID = window.setTimeout(() => {
-      setRevealFlippingCardIDs((previousIDs) => previousIDs.filter((cardID) => !revealedCardIDSet.has(cardID)))
+      setRevealFlippingCardIDs((previousIDs) => previousIDs.filter((cardID) => !flippedOverlayCardIDSet.has(cardID)))
       revealFlipTimeoutIDsRef.current = revealFlipTimeoutIDsRef.current.filter((currentTimeoutID) => currentTimeoutID !== timeoutID)
     }, FRONT_CARD_FLIP_DURATION_MS)
 
     revealFlipTimeoutIDsRef.current.push(timeoutID)
-    // catHiddenKey matters here too: a Cat-rehidden card comes face up by leaving that set, not by
-    // entering revealedCardIDs.
-  }, [G.table.plays, tableRevealKey, catHiddenKey])
-
-  useEffect(() => {
-    const nextCatHiddenOverlayCardIDSet = new Set(
-      G.table.plays.flatMap((play) => getCatHiddenOverlayCardIDs(play)),
-    )
-
-    if (!hasMountedCatHideWatcherRef.current) {
-      hasMountedCatHideWatcherRef.current = true
-      previousCatHiddenOverlayCardIDSetRef.current = nextCatHiddenOverlayCardIDSet
-      return
-    }
-
-    const newlyCatHiddenCardIDs = [...nextCatHiddenOverlayCardIDSet].filter(
-      (overlayCardID) => !previousCatHiddenOverlayCardIDSetRef.current.has(overlayCardID),
-    )
-
-    previousCatHiddenOverlayCardIDSetRef.current = nextCatHiddenOverlayCardIDSet
-
-    if (newlyCatHiddenCardIDs.length === 0) {
-      return
-    }
-
-    const hiddenCardIDSet = new Set(newlyCatHiddenCardIDs)
-    setRevealFlippingCardIDs((previousIDs) => [...new Set([...previousIDs, ...newlyCatHiddenCardIDs])])
-
-    const timeoutID = window.setTimeout(() => {
-      setRevealFlippingCardIDs((previousIDs) => previousIDs.filter((cardID) => !hiddenCardIDSet.has(cardID)))
-      revealFlipTimeoutIDsRef.current = revealFlipTimeoutIDsRef.current.filter((currentTimeoutID) => currentTimeoutID !== timeoutID)
-    }, FRONT_CARD_FLIP_DURATION_MS)
-
-    revealFlipTimeoutIDsRef.current.push(timeoutID)
-  }, [G.table.plays, catHiddenKey])
+  }, [displayedFrontCardsBySeatID])
 
   useEffect(() => {
     const nextPointsBySeat = new Map(G.seatOrder.map((seatID) => [seatID, G.players[seatID].points]))
@@ -2404,6 +2535,41 @@ export function BlowCowBoard({
   }, [latestPassEvent?.id])
 
   /*
+   * A disguise arriving hands The Mime's block whatever line its source was saying, so the two do
+   * not differ over one of them being mid-sentence. Seeded into `playerCallouts` rather than drawn
+   * on top of it, so from here on it behaves like any other line on that block: overwritten when The
+   * Mime says something, and dropped when their turn starts. Both of those are exactly what would
+   * have happened to the source's line on that chair had the seats moved instead.
+   *
+   * Skipped when The Mime is the one on the clock, which is the no-swap case — a block whose turn
+   * has begun has already had its line cleared, and the source's block still shows theirs. Seeding
+   * then would put a line on the acting block that the other case does not have.
+   *
+   * Mimic itself says nothing. A line at the moment of use would land on the wearer, and the wearer
+   * is on a different side of the swap in each of the two cases this hides between.
+   */
+  useEffect(() => {
+    if (!wornMimicryKey) {
+      lastSeededMimicryKeyRef.current = ''
+      return
+    }
+
+    if (lastSeededMimicryKeyRef.current === wornMimicryKey || !wornMimicry) {
+      return
+    }
+
+    lastSeededMimicryKeyRef.current = wornMimicryKey
+
+    const borrowedCalloutText = ctx.currentPlayer === wornMimicry.playerID
+      ? null
+      : playerCallouts[wornMimicry.sourcePlayerID]?.text ?? null
+
+    if (borrowedCalloutText) {
+      showPlayerCallout(wornMimicry.playerID, `mimic-${wornMimicryKey}`, borrowedCalloutText)
+    }
+  }, [wornMimicryKey, wornMimicry, ctx.currentPlayer, playerCallouts])
+
+  /*
    * The two ways a callout ends, now that none of them expire on their own. A player starting a
    * turn drops only their own line, so everyone else's stays up; a new round wipes the table clean.
    * Saying something new simply overwrites, which `showPlayerCallout` handles by itself.
@@ -2530,50 +2696,127 @@ export function BlowCowBoard({
     handCardMetricsRef.current = nextMetrics
   }, [currentSeatID, handCardIDsKey])
 
+  /*
+   * Emote events stay in G long enough for every client to receive them, but only newly received
+   * ids animate. A reconnect therefore sees the current table without replaying old reactions.
+   */
+  useEffect(() => {
+    const emotes = G.emotes ?? []
+
+    if (!hasMountedEmoteWatcherRef.current) {
+      hasMountedEmoteWatcherRef.current = true
+      seenEmoteIDsRef.current = new Set(emotes.map((emote) => emote.id))
+      return
+    }
+
+    const nextActiveEmotes: ActiveEmote[] = []
+    for (const emote of emotes) {
+      if (seenEmoteIDsRef.current.has(emote.id)) {
+        continue
+      }
+
+      seenEmoteIDsRef.current.add(emote.id)
+      const sprite = getEmoteSprite(emote.emoteID)
+      if (sprite) {
+        nextActiveEmotes.push({
+          id: emote.id,
+          playerID: emote.playerID,
+          sprite,
+        })
+      }
+    }
+
+    if (nextActiveEmotes.length > 0) {
+      setActiveEmotes((previousEmotes) => [...previousEmotes, ...nextActiveEmotes].slice(-12))
+
+      /*
+       * `onAnimationEnd` is how one of these normally leaves the list. This is the backstop for the
+       * cases where that event never arrives: an emote whose owner is not on the ring has no element
+       * to fire it, and a backgrounded tab can drop it outright. Without this such an emote would sit
+       * in state until the cap evicted it, and reappear the moment its owner joined the ring.
+       */
+      const expiringEmoteIDs = new Set(nextActiveEmotes.map((emote) => emote.id))
+      const timeoutID = window.setTimeout(() => {
+        emoteExpiryTimeoutIDsRef.current.delete(timeoutID)
+        setActiveEmotes((previousEmotes) => previousEmotes.filter((emote) => !expiringEmoteIDs.has(emote.id)))
+      }, EMOTE_EXPIRY_MS)
+
+      emoteExpiryTimeoutIDsRef.current.add(timeoutID)
+    }
+  }, [G.emotes])
+
+  useEffect(() => {
+    const timeoutIDs = emoteExpiryTimeoutIDsRef.current
+
+    return () => {
+      for (const timeoutID of timeoutIDs) {
+        window.clearTimeout(timeoutID)
+      }
+
+      timeoutIDs.clear()
+    }
+  }, [])
+
   const seatRows: SeatRow[] = G.seatOrder.map((seatID) => {
     const player = G.players[seatID]
-    const matchPlayer = playersFromRoom.find((entry) => String(entry.id) === seatID)
-    const frontCards = G.table.plays
-      .filter((play) => play.playerID === seatID)
-      .flatMap((play) => {
-        const revealedCardIDSet = getExplicitlyRevealedCardIDSet(play)
-        const catHiddenCardIDSet = getCatHiddenCardIDSet(play)
+    const disguise = wornMimicry?.playerID === seatID ? wornMimicry : null
+    /** Whose face and numbers this block shows, which is its own unless it is wearing somebody's. */
+    const identitySeatID = disguise?.sourcePlayerID ?? seatID
+    const matchPlayer = playersFromRoom.find((entry) => String(entry.id) === identitySeatID)
+    const displayedFrontCards = displayedFrontCardsBySeatID.get(seatID) ?? []
+    /** What The Mime has spent out of the copied hand since copying it. See `resolveMimic`. */
+    const cardsPlayedUnderDisguise = disguise
+      ? displayedFrontCards.filter((displayedFrontCard) => !displayedFrontCard.isBorrowed).length
+      : 0
 
-        return play.cards.map((card) => {
-          const overlayCardID = `${play.id}-${card.id}`
-          const faceDown = catHiddenCardIDSet.has(card.id)
-            || (play.revealedAtTurn === null && !revealedCardIDSet.has(card.id))
+    const frontCards = displayedFrontCards.map(({ overlayCardID, play, card, faceDown }) => {
+      /*
+       * Your own face-up card is the one place these two compete, and the take-back takes it. A Cat
+       * who may also cheat therefore palms their own pile and still flips everybody else's, which is
+       * also why the two flags are made exclusive here rather than left to the click handler: a card
+       * carrying both would wear both affordances.
+       *
+       * `play.playerID` rather than `seatID`, so a borrowed pile drawn under a Mimic disguise stays
+       * with whoever really played it. You may only ever palm back a card that is genuinely yours.
+       */
+      const isTakeBackActionable = isTakeBackWindowOpen && !faceDown && play.playerID === currentSeatID
 
-          return {
-            id: overlayCardID,
-            cardID: card.id,
-            sprite: card.sprite,
-            faceDown,
-            isDeparted: departedPunishmentCardIDSet.has(overlayCardID) || departedResetCardIDSet.has(overlayCardID),
-            isFlipping: revealFlippingCardIDSet.has(overlayCardID),
-            isTargeted: !isResetSequenceActive && play.id === targetPlayID,
-            isCatActionable: canUseCat && !faceDown,
-            // Only the caller can flip, and only in the block currently pulled to the centre.
-            isRevealable: isRevealCaller && seatID === focusedSeatID && faceDown,
-            // A masked card is rewritten to rank Joker before it reaches the client, so an
-            // unflipped card can never light up here.
-            isTrumpHighlighted: Boolean(bsResolution) && !faceDown && G.round.trumpRank !== null
-              && countsTowardReverseRule(card, G.round.trumpRank, player.character),
-          }
-        })
-      })
+      return {
+        id: overlayCardID,
+        cardID: card.id,
+        sprite: card.sprite,
+        faceDown,
+        isDeparted: departedPunishmentCardIDSet.has(overlayCardID) || departedResetCardIDSet.has(overlayCardID),
+        isFlipping: revealFlippingCardIDSet.has(overlayCardID),
+        isTargeted: !isResetSequenceActive && play.id === targetPlayID,
+        isCatActionable: canUseCat && !faceDown && !isTakeBackActionable,
+        isTakeBackActionable,
+        // Only the caller can flip, and only in the block currently pulled to the centre.
+        isRevealable: isRevealCaller && seatID === focusedSeatID && faceDown,
+        // A masked card is rewritten to rank Joker before it reaches the client, so an
+        // unflipped card can never light up here.
+        isTrumpHighlighted: Boolean(bsResolution) && !faceDown && G.round.trumpRank !== null
+          && countsTowardReverseRule(card, G.round.trumpRank, G.players[play.playerID].character),
+      }
+    })
 
     return {
       id: seatID,
+      // The one thing a disguise never copies: the seat number belongs to the chair, not to whoever
+      // is sitting in it, so it survives a swap untouched and gives nothing away.
       seatIndex: player.seatIndex,
-      avatarSprite: getAvatarSprite(matchID, seatID),
-      characterName: player.character,
-      characterSprite: G.useCharacters ? getCharacterCardSprite(player.character) : '',
+      avatarSprite: getAvatarSprite(matchID, identitySeatID),
+      characterName: disguise ? disguise.character : player.character,
+      characterSprite: G.useCharacters
+        ? getCharacterCardSprite(disguise ? disguise.character : player.character)
+        : '',
       frontCards,
-      handCount: player.hand.length,
+      handCount: disguise
+        ? Math.max(0, disguise.handCount - cardsPlayedUnderDisguise)
+        : player.hand.length,
       hasLeft: player.hasLeft,
       isActingPlayer: seatID === actingPlayerID,
-      isConnected: seatID === currentSeatID ? isConnected : Boolean(matchPlayer?.isConnected),
+      isConnected: identitySeatID === currentSeatID ? isConnected : Boolean(matchPlayer?.isConnected),
       isTargetPlayer: seatID === visibleTargetSeatID,
       isViewingPlayer: seatID === currentSeatID,
       leaveEffect: player.leaveEffect
@@ -2582,15 +2825,21 @@ export function BlowCowBoard({
             isGain: player.leaveEffect.pointDelta > 0,
           }
         : null,
-      name: getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom),
-      pointRanks: player.scoredSets.map((scoredSet) => scoredSet.rank),
-      points: player.points,
-      wasSeekerPick: player.seekerPickedCharacter !== null,
+      name: getSeatDisplayName(identitySeatID, currentSeatID, playerName, playersFromRoom),
+      pointRanks: disguise ? disguise.pointRanks : player.scoredSets.map((scoredSet) => scoredSet.rank),
+      points: disguise ? disguise.points : player.points,
+      wasSeekerPick: disguise ? disguise.wasSeekerPick : player.seekerPickedCharacter !== null,
     }
   })
 
   const frontCardIDsKey = seatRows.map((seat) => `${seat.id}:${seat.frontCards.map((card) => card.id).join(',')}`).join('|')
   const enteringFrontCardIDSet = new Set(enteringFrontCardIDs)
+  const activeEmotesBySeatID = activeEmotes.reduce<Record<string, ActiveEmote[]>>((emotesBySeatID, emote) => {
+    const seatEmotes = emotesBySeatID[emote.playerID] ?? []
+
+    emotesBySeatID[emote.playerID] = [...seatEmotes, emote]
+    return emotesBySeatID
+  }, {})
 
   useLayoutEffect(() => {
     if (frontCardIDsKey === lastFrontCardIDsKeyRef.current) {
@@ -2598,6 +2847,15 @@ export function BlowCowBoard({
     }
 
     lastFrontCardIDsKeyRef.current = frontCardIDsKey
+
+    /*
+     * A disguise going on or coming off rewrites one block's whole pile in a single render, and none
+     * of those cards are arriving from anybody's hand. Left alone the watcher below would deal them
+     * in, on that block only — which would point straight at the seat the disguise exists to hide.
+     * Re-baseline instead and animate nothing: no card is ever played in the same render.
+     */
+    const hasMimicryChanged = wornMimicryKey !== lastWornMimicryKeyRef.current
+    lastWornMimicryKeyRef.current = wornMimicryKey
 
     frontCardEntryTimeoutIDsRef.current.forEach((timeoutID) => {
       window.clearTimeout(timeoutID)
@@ -2619,6 +2877,15 @@ export function BlowCowBoard({
     if (!hasMountedFrontCardWatcherRef.current) {
       hasMountedFrontCardWatcherRef.current = true
       previousFrontCardIDsBySeatRef.current = nextFrontCardIDsBySeat
+      return
+    }
+
+    if (hasMimicryChanged) {
+      previousFrontCardIDsBySeatRef.current = nextFrontCardIDsBySeat
+      // The timeouts that would have retired an in-flight entry were cleared above, so the clears
+      // have to happen here rather than being left to fire on their own.
+      setEnteringFrontCardIDs([])
+      setFrontCardEntrySequence(null)
       return
     }
 
@@ -2685,7 +2952,7 @@ export function BlowCowBoard({
       setEnteringFrontCardIDs([])
       setFrontCardEntrySequence(null)
     }, FRONT_CARD_ENTRY_DURATION_MS + maxDelay + 40))
-  }, [frontCardIDsKey, seatRows])
+  }, [frontCardIDsKey, seatRows, wornMimicryKey])
 
   const historyEvents: HistoryEvent[] = G.history.map((event) => ({
     id: event.id,
@@ -2839,6 +3106,47 @@ export function BlowCowBoard({
     }
   }, [directionFlipID, directionFlipPlayerID])
 
+  /*
+   * The take-back lock, and the deliberate opposite of the direction tell above: that one is played
+   * on everybody's screen and says who touched the sign, this one is played on one screen and says
+   * nothing to anybody. `hideSecretState` hands `takeBackTamper` back to its owner alone, so a record
+   * arriving here can only ever be this client's own.
+   *
+   * Armed only when the palm happened on this player's own turn, which is the only case the pause is
+   * for — off your turn there is no turn of yours to end early. The id changes on every take-back, so
+   * an unlimited run of them serves the full two seconds each time rather than the first one covering
+   * the rest.
+   */
+  const takeBackTamperID = G.takeBackTamper?.id ?? null
+
+  useEffect(() => {
+    if (!hasMountedTakeBackLockWatcherRef.current) {
+      hasMountedTakeBackLockWatcherRef.current = true
+      lastSeenTakeBackTamperIDRef.current = takeBackTamperID
+      return
+    }
+
+    if (!takeBackTamperID || takeBackTamperID === lastSeenTakeBackTamperIDRef.current) {
+      return
+    }
+
+    lastSeenTakeBackTamperIDRef.current = takeBackTamperID
+
+    if (ctx.currentPlayer !== currentSeatID) {
+      return
+    }
+
+    setIsTakeBackLocked(true)
+    const timeoutID = window.setTimeout(() => {
+      setIsTakeBackLocked(false)
+    }, TAKE_BACK_ACTION_LOCK_MS)
+
+    return () => {
+      window.clearTimeout(timeoutID)
+      setIsTakeBackLocked(false)
+    }
+  }, [ctx.currentPlayer, currentSeatID, takeBackTamperID])
+
   const toggleCardSelection = (cardID: string) => {
     // Not turn-bound any more: a player has to be able to pick the cards they mean to sneak while
     // somebody else is on the clock.
@@ -2927,6 +3235,14 @@ export function BlowCowBoard({
     setSelectedCardIDs([])
   }
 
+  const handleMimic = () => {
+    if (!canMimicNow) {
+      return
+    }
+
+    moves.mimic()
+  }
+
   /*
    * How far the card leans, in degrees, at the very edge of its own box. Large enough that the
    * parallax is unmistakable, small enough that the printed ability text never skews out of reading.
@@ -2987,6 +3303,11 @@ export function BlowCowBoard({
   const getCallBSFailure = (seatID: string) => {
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
 
+    // The two-second pause after a take-back covers the block buttons as well as the action row.
+    if (isTakeBackLocked) {
+      return TAKE_BACK_LOCK_DESCRIPTION
+    }
+
     if (G.gameStatus !== 'active') {
       return 'The match is not running.'
     }
@@ -3040,6 +3361,11 @@ export function BlowCowBoard({
   const getAccuseFailure = (seatID: string) => {
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
 
+    // The two-second pause after a take-back covers the block buttons as well as the action row.
+    if (isTakeBackLocked) {
+      return TAKE_BACK_LOCK_DESCRIPTION
+    }
+
     if (G.gameStatus !== 'active') {
       return 'The match is not running.'
     }
@@ -3090,6 +3416,11 @@ export function BlowCowBoard({
   const getConspireFailure = (seatID: string) => {
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
 
+    // The two-second pause after a take-back covers the block buttons as well as the action row.
+    if (isTakeBackLocked) {
+      return TAKE_BACK_LOCK_DESCRIPTION
+    }
+
     if (G.gameStatus !== 'active') {
       return 'The match is not running.'
     }
@@ -3137,6 +3468,11 @@ export function BlowCowBoard({
   /** Mirrors every server precondition for `manipulate`, with the same turn caveat as Conspire. */
   const getManipulateFailure = (seatID: string) => {
     const seatName = getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom)
+
+    // The two-second pause after a take-back covers the block buttons as well as the action row.
+    if (isTakeBackLocked) {
+      return TAKE_BACK_LOCK_DESCRIPTION
+    }
 
     if (G.gameStatus !== 'active') {
       return 'The match is not running.'
@@ -3236,6 +3572,19 @@ export function BlowCowBoard({
     moves.toggleDirection()
   }
 
+  const handleEmote = (emoteID: number) => {
+    if (!canEmote) {
+      return
+    }
+
+    moves.emote({ emoteID })
+    setIsEmotePickerOpen(false)
+  }
+
+  const handleEmoteAnimationEnd = (emoteID: string) => {
+    setActiveEmotes((previousEmotes) => previousEmotes.filter((emote) => emote.id !== emoteID))
+  }
+
   const handleCallReset = () => {
     if (!canCallReset) {
       return
@@ -3251,6 +3600,16 @@ export function BlowCowBoard({
     }
 
     moves.catHideCard({ cardID })
+  }
+
+  // Silent on the way out, exactly as `handleSneakPlay` is: no target to pick, no callout, no
+  // announcement. The card simply stops being in front of them and it is on everyone else to notice.
+  const handleTakeBackCard = (cardID: string) => {
+    if (!isTakeBackWindowOpen) {
+      return
+    }
+
+    moves.takeBackCard({ cardID })
   }
 
   // Both procedures share the click target and the Continue button, so these route to whichever
@@ -3377,6 +3736,10 @@ export function BlowCowBoard({
               ? `Use The Pawn to challenge ${seat.name}'s earlier hidden play.`
               : targetSelection?.kind === 'grandmasterOverride'
               ? `Challenge ${seat.name}. This spends The Grandmaster override.`
+              // Your own play is the latest one by now, so the default wording would be wrong. The
+              // encore is holding the target it displaced open — see `BlowCowEncore`.
+              : openEncore
+              ? `Challenge ${seat.name}, who was the latest non-passing player before your play. Your own cards flip with the rest of the table.`
               : `Challenge ${seat.name}, the latest non-passing player.`}${contrarianCallBSDetail}`}
           type="button"
         >
@@ -3653,6 +4016,8 @@ export function BlowCowBoard({
   const playAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : openEncore
+      ? 'The Clown kept the turn after that play, and the action it bought cannot be another play. Take a different one.'
       : openConspiracy
       ? `Play the selected cards out of ${conspireTargetLabel}'s hand and claim they are ${currentTrump}. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump
@@ -3672,6 +4037,8 @@ export function BlowCowBoard({
   const playRandomAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : openEncore
+      ? 'The Clown kept the turn after that play, and the action it bought cannot be another play. Take a different one.'
       : currentTrump === null
       ? isRepeatingPreviousTrump
         ? `${selectedTrumpRank} was the previous round trump and cannot be selected again. Play Random still has to choose a new trump first.`
@@ -3750,9 +4117,9 @@ export function BlowCowBoard({
   }
 
   /*
-   * The only action in this row that leaves the turn running, so its description says so outright —
-   * everything else here is a way to end the turn and a player has no other reason to expect this
-   * one is not.
+   * The only action in this row that always leaves the turn running, so its description says so
+   * outright — everything else here is a way to end the turn and a player has no other reason to
+   * expect this one is not. Mimic below is the coin-flip version of the same surprise.
    */
   const defyAction = {
     description: isResolutionSequenceActive
@@ -3777,6 +4144,28 @@ export function BlowCowBoard({
     onClick: handleDefy,
   }
 
+  /*
+   * The one action whose outcome the button cannot promise, so the description says both halves and
+   * commits to neither. It names the seat it will copy, which is safe: everyone can already see who
+   * sits next to whom, and the secret is not who was copied but whether the chairs moved after.
+   */
+  const mimicAction = {
+    description: isResolutionSequenceActive
+      ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : hasUsedMimicThisRound
+      ? 'You already used Mimic this round. It comes back at the start of the next one.'
+      : isFinalTwoResolutionTurn
+      ? 'With two players left, you cannot mimic after the other player emptied their hand with a hidden play.'
+      : !mimicrySourceSeatID
+      ? 'There is nobody sitting after you to copy.'
+      : `Use The Mime to take on ${getSeatDisplayName(mimicrySourceSeatID, currentSeatID, playerName, playersFromRoom)}'s block. Half the time you also swap seats with them, which hands them this turn and puts you after them.`,
+    disabled: !canMimicNow,
+    icon: MIMIC_ICON_SPRITE,
+    key: 'mimic',
+    label: 'Mimic',
+    onClick: handleMimic,
+  }
+
   // Call BS, Accuse, Conspire, and Manipulate are not here: they live on the player blocks, because
   // all four need a clicked target. Manipulate takes its rank and direction selectors with it, so
   // all three of its decisions are made in one place. See `renderSeatTargetActions`.
@@ -3792,6 +4181,7 @@ export function BlowCowBoard({
     ...(isSeeker ? [seekCharacterAction] : []),
     ...(isBroken ? [breakRuleAction] : []),
     ...(isPrototype && !isSpectator ? [defyAction] : []),
+    ...(isMime && !isSpectator ? [mimicAction] : []),
     ...(isDrunkard ? [playRandomAction] : []),
     {
       description: isResolutionSequenceActive
@@ -3802,6 +4192,10 @@ export function BlowCowBoard({
         ? 'The Invisible Hand opened this round for you, so you must play this turn and may not pass.'
         : isFinalTwoResolutionTurn
         ? 'With two players left, you cannot pass after the other player emptied their hand with a hidden play.'
+        // The encore has no decline button: Pass is how The Clown hands back a turn they have
+        // nothing else to spend it on, and it counts as a pass like any other.
+        : openEncore
+        ? 'End the turn The Clown kept. It still counts as a pass, so it adds to the pass streak even though you played.'
         : isForeigner && selectedForeignerCardCode !== 'none'
         ? `Pass and use The Foreigner to add ${selectedForeignerCardLabel} from outside the game to your hand before the turn ends.`
         : isForeigner
@@ -3827,10 +4221,30 @@ export function BlowCowBoard({
       label: 'Call Reset',
       onClick: handleCallReset,
     },
-  ]
+  ].map((action) => (isTakeBackLocked
+    /*
+     * Applied over the finished row rather than folded into each button's own gate, so the lock
+     * covers every action here including any added later, and so the reason it gives is the same
+     * sentence on all of them. `Sneak Play` and `Seek Character` go down with the rest: the lock is
+     * two seconds of this player's hands being off the board, not a turn-shaped rule.
+     */
+    ? {
+        ...action,
+        description: TAKE_BACK_LOCK_DESCRIPTION,
+        disabled: true,
+      }
+    : action))
 
   return (
-    <section className="table-board game-board-layout" ref={tableBoardRef}>
+    <section
+      className="table-board game-board-layout"
+      ref={tableBoardRef}
+      style={{
+        '--table-board-gradient-top': tableBoardPalette.top,
+        '--table-board-gradient-middle': tableBoardPalette.middle,
+        '--table-board-gradient-bottom': tableBoardPalette.bottom,
+      } as CSSProperties}
+    >
       {/*
         * Deliberately not a full-cover overlay: the ring stays visible behind it, because the last
         * player's leave-triggered ability lands at the same moment the game ends and its label is
@@ -4478,6 +4892,7 @@ export function BlowCowBoard({
       <>
       <PlayerRing
         anchorSeatID={currentSeatID}
+        emotesBySeatID={activeEmotesBySeatID}
         accusedCheatSeatID={accusedCheatSeatID}
         focusedSeatID={focusedSeatID}
         bsTargetMarkDelayMs={bsTargetMarkDelayMs}
@@ -4492,9 +4907,11 @@ export function BlowCowBoard({
         pointsFlashDirectionBySeatID={pointsFlashDirectionBySeatID}
         getSeatLabel={getSeatLabel}
         onCatHideCard={handleCatHideCard}
+        onEmoteAnimationEnd={handleEmoteAnimationEnd}
         onOpenCharacterCard={handleOpenCharacterCard}
         onRevealCard={handleRevealCard}
         onSelectSeat={handleSeatSelect}
+        onTakeBackCard={handleTakeBackCard}
         punishmentImpactSeatID={punishmentImpactSeatID}
         registerFrontCard={registerFrontCard}
         registerHandCountPill={registerHandCountPill}
@@ -4522,7 +4939,7 @@ export function BlowCowBoard({
         />
       </PlayerRing>
 
-      <section className="bottom-play-strip">
+      <section className={`bottom-play-strip${isEmotePickerOpen ? ' emote-picker-open' : ''}`}>
         <div className={`hand-stage${isInteractiveTurn ? ' active-turn' : ''}${isPunishmentFlashActive ? ' punishment-flash' : ''}`}>
           <div className="hand-play-row">
           <div className="hand-scroll-viewport">
@@ -4625,6 +5042,41 @@ export function BlowCowBoard({
               */}
             <div className="hand-action-top">
               <div className="hand-action-toolbar">
+                <div className="emote-picker-anchor">
+                  <button
+                    aria-expanded={isEmotePickerOpen}
+                    aria-haspopup="dialog"
+                    className={`subtle-button toolbar-button emote-toggle ${isEmotePickerOpen ? 'active' : ''}`}
+                    disabled={!canEmote}
+                    onClick={() => {
+                      setIsEmotePickerOpen((previousValue) => !previousValue)
+                    }}
+                    title={canEmote ? 'Choose an emote' : 'Only active players can emote.'}
+                    type="button"
+                  >
+                    {EMOTE_SPRITES[0] ? <img alt="" aria-hidden="true" className="emote-toggle-icon" src={EMOTE_SPRITES[0].url} /> : null}
+                    Emote
+                  </button>
+
+                  {isEmotePickerOpen ? (
+                    <div aria-label="Choose an emote" className="emote-picker" role="dialog">
+                      {EMOTE_SPRITES.map((emote) => (
+                        <button
+                          aria-label={`Send emote ${emote.id}`}
+                          className="emote-picker-option"
+                          key={emote.id}
+                          onClick={() => {
+                            handleEmote(emote.id)
+                          }}
+                          type="button"
+                        >
+                          <img alt="" src={emote.url} />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
                 <button
                   aria-expanded={isRulesOpen}
                   aria-haspopup="dialog"

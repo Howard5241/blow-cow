@@ -21,6 +21,7 @@ export const RESET_ICON_SPRITE = iconMap['reset_icon.png'] ?? ''
 export const DEFY_ICON_SPRITE = iconMap['defy_icon.png'] ?? ''
 export const CONSPIRE_ICON_SPRITE = iconMap['conspire_icon.png'] ?? ''
 export const MANIPULATE_ICON_SPRITE = iconMap['manipulate_icon.png'] ?? ''
+export const MIMIC_ICON_SPRITE = iconMap['mimic_icon.png'] ?? ''
 // A square outline drawn with ~8% transparent padding, so it is stretched slightly past the seat
 // block for the drawn frame to land on the block's own edge.
 export const BLOCK_HOVER_ICON_SPRITE = iconMap['block_hover_icon.png'] ?? ''

@@ -29,14 +29,19 @@ import {
   type BlowCowBreakRuleArgs,
   type BlowCowConspireArgs,
   type BlowCowDefyArgs,
+  type BlowCowEmoteArgs,
   type BlowCowManipulateArgs,
   canBreakRule,
   canConspire,
+  canEarnEncore,
   canManipulate,
+  canMimic,
   canUseDefy,
+  getEncoreBSTargetPlayerID,
   getConspiracyTargetPlayerIDs,
   getManipulableTrumpRanks,
   getManipulationTargetPlayerIDs,
+  getMimicryTargetPlayerID,
   createDeck,
   createInitialBlowCowState,
   DEFAULT_BLOW_COW_SPEED_MULTIPLIER,
@@ -58,12 +63,17 @@ import {
   type BlowCowPassArgs,
   type BlowCowPlayRandomArgs,
   type BlowCowSneakPlayArgs,
+  type BlowCowTakeBackCardArgs,
   type BlowCowRank,
   scoreHand,
   type BlowCowSetupData,
   type BlowCowState,
 } from '../src/game/blowCowGame.ts'
 import { comparePokerHands, evaluatePokerHand } from '../src/game/blowCowPoker.ts'
+// The one UI module this harness reaches into. It is pure play-and-card logic with no React or DOM,
+// and what The Mime promises is a claim about what the ring draws, so it cannot be checked anywhere
+// else: the whole ability is the two branches of its coin flip being drawn identically.
+import { getDisplayedFrontCards } from '../src/ui/tablePlays.ts'
 
 type TestContext = {
   G: BlowCowState
@@ -102,6 +112,10 @@ const sneakPlayMove = BlowCowGame.moves.sneakPlay.move as (
   context: TestContext,
   args: BlowCowSneakPlayArgs,
 ) => unknown
+const takeBackCardMove = BlowCowGame.moves.takeBackCard.move as (
+  context: TestContext,
+  args: BlowCowTakeBackCardArgs,
+) => unknown
 const toggleDirectionMove = BlowCowGame.moves.toggleDirection as (context: TestContext) => unknown
 const catHideCardMove = BlowCowGame.moves.catHideCard as (
   context: TestContext,
@@ -119,6 +133,10 @@ const defyMove = BlowCowGame.moves.defy as (
   context: TestContext,
   args: BlowCowDefyArgs,
 ) => unknown
+const emoteMove = BlowCowGame.moves.emote.move as (
+  context: TestContext,
+  args: BlowCowEmoteArgs,
+) => unknown
 const conspireMove = BlowCowGame.moves.conspire.move as (
   context: TestContext,
   args: BlowCowConspireArgs,
@@ -127,6 +145,7 @@ const manipulateMove = BlowCowGame.moves.manipulate as (
   context: TestContext,
   args: BlowCowManipulateArgs,
 ) => unknown
+const mimicMove = BlowCowGame.moves.mimic.move as (context: TestContext) => unknown
 const finalizeBSResolutionMove = BlowCowGame.moves.finalizeBSResolution as (
   context: TestContext,
   args: BlowCowFinalizeBSResolutionArgs,
@@ -238,6 +257,8 @@ function createScenarioState(numPlayers = 2): BlowCowState {
     state.players[playerID].hasUsedAccusationThisRound = false
     state.players[playerID].hasUsedDefyThisRound = false
     state.players[playerID].hasUsedConspireThisRound = false
+    state.players[playerID].hasUsedMimicThisRound = false
+    state.players[playerID].hasUsedClownEncoreThisRound = false
     state.players[playerID].wasPunishedThisRound = false
     state.players[playerID].wasPunishedLastRound = false
     state.players[playerID].hasLeft = false
@@ -3276,8 +3297,266 @@ function runDreamerIllegalCountCheck() {
 }
 
 /**
+ * Seat 1 is The Dreamer with a pile in front of them: one play fully face up, and one holding a card
+ * each way. Seat 0 is on the clock, so a take-back by seat 1 happens on somebody else's turn unless a
+ * case says otherwise.
+ */
+function createTakeBackScenario() {
+  const state = createScenarioState(3)
+  const { events, record } = createEventRecorder()
+
+  const openCard = card('hearts_queen.png')
+  const revealedCard = card('clubs_queen.png')
+  const hiddenCard = card('diamonds_queen.png')
+
+  state.players['0'].hand = [card('clubs_ace.png')]
+  state.players['1'].character = 'The Dreamer'
+  state.players['1'].hand = []
+  state.players['2'].hand = [card('spades_king.png')]
+  state.round.trumpRank = 'Q'
+  state.round.direction = 'clockwise'
+  state.round.lastNonPassingPlayerID = '2'
+  state.table.plays = [
+    // Fully open, so palming its one card empties the play.
+    {
+      id: 'play-open',
+      playerID: '1',
+      cards: [openCard],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: 1,
+      wasTrumpSelection: false,
+    },
+    // One card each way, so the same play answers both the face-up and the face-down case.
+    {
+      id: 'play-mixed',
+      playerID: '1',
+      cards: [revealedCard, hiddenCard],
+      revealedCardIDs: [revealedCard.id],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+    // Somebody else's face-up card, which is never a legal target.
+    {
+      id: 'play-other',
+      playerID: '2',
+      cards: [card('spades_queen.png')],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: 2,
+      wasTrumpSelection: false,
+    },
+  ]
+
+  beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+
+  return { state, events, record, openCard, revealedCard, hiddenCard }
+}
+
+function runTakeBackCheatCheck() {
+  {
+    // The power itself: a revealed card leaves the table and rejoins the hand, in silence.
+    const { state, events, record, openCard } = createTakeBackScenario()
+    const tableStatusBefore = state.tableStatus
+
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      undefined,
+    )
+
+    // The play held nothing else, so it goes with the card rather than staying as an empty shell.
+    assert.equal(state.table.plays.some((play) => play.id === 'play-open'), false)
+    assert.equal(getTableCardCount(state.table), 3)
+    assertCardSet(state.players['1'].hand, ['hearts_queen.png'])
+    assert.equal(state.takeBackTamper?.playerID, '1')
+    assert.equal(state.takeBackTamper?.turnNumber, 3)
+
+    // Nothing announces it, exactly as with a sneak play: no history, no telemetry, no table status
+    // rewrite, and the turn stays where it was.
+    assert.equal(state.history.length, 0)
+    assert.equal(state.telemetry.events.some((entry) => entry.playerID === '1'), false)
+    assert.equal(state.tableStatus, tableStatusBefore)
+    assert.equal(record.nextPlayerID, null)
+
+    // The archive is stripped by `hideSecretState`, so it is the one place that may name the card.
+    const archivedTurn = state.archive.turns.find((entry) => entry.turnNumber === 3 && entry.playerID === '1')
+    assert.ok(archivedTurn)
+    assert.equal(archivedTurn.actions[0].kind, 'takeBackCard')
+    assert.equal(archivedTurn.actions[0].characterUsed, 'The Dreamer')
+    assert.match(archivedTurn.actions[0].detail, /Q of Hearts/)
+
+    /*
+     * The one asymmetry in `hideSecretState`: stripped from every other seat, kept for the player it
+     * names. An opponent holding it would be checking the answer rather than gambling an accusation;
+     * its owner cannot use it that way and needs it to serve their own lock.
+     */
+    const ownerView = BlowCowGame.playerView({ G: state, playerID: '1' }) as BlowCowState
+    const opponentView = BlowCowGame.playerView({ G: state, playerID: '0' }) as BlowCowState
+    const spectatorView = BlowCowGame.playerView({ G: state, playerID: null }) as BlowCowState
+    assert.equal(ownerView.takeBackTamper?.playerID, '1')
+    assert.equal(opponentView.takeBackTamper, null)
+    assert.equal(spectatorView.takeBackTamper, null)
+  }
+
+  {
+    // Unlimited, and each one re-arms the lock the client serves, so the record has to change.
+    const { state, events, openCard, revealedCard } = createTakeBackScenario()
+    const context = { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' }
+
+    assert.equal(takeBackCardMove(context, { cardID: openCard.id }), undefined)
+    const firstTamperID = state.takeBackTamper?.id
+    assert.equal(takeBackCardMove(context, { cardID: revealedCard.id }), undefined)
+
+    assert.notEqual(state.takeBackTamper?.id, firstTamperID)
+    assertCardSet(state.players['1'].hand, ['hearts_queen.png', 'clubs_queen.png'])
+    // The mixed play keeps its face-down card, so it stays on the table and stays challengeable.
+    const mixedPlay = state.table.plays.find((play) => play.id === 'play-mixed')
+    assert.equal(mixedPlay?.cards.length, 1)
+    assert.deepEqual(mixedPlay?.revealedCardIDs, [])
+  }
+
+  {
+    /*
+     * Refusals. A face-down card is still a live claim, so palming one would let a player answer a
+     * BS call by deleting the evidence; somebody else's card would move a pile whose owner's hand
+     * count does not move with it; and an unlicensed seat has no business doing either.
+     */
+    const { state, events, openCard, hiddenCard } = createTakeBackScenario()
+    const dreamerContext = { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' }
+
+    assert.equal(takeBackCardMove(dreamerContext, { cardID: hiddenCard.id }), 'INVALID_MOVE')
+    assert.equal(
+      takeBackCardMove(dreamerContext, { cardID: state.table.plays[2].cards[0].id }),
+      'INVALID_MOVE',
+    )
+    assert.equal(takeBackCardMove(dreamerContext, { cardID: 'not-a-card' }), 'INVALID_MOVE')
+    assert.equal(
+      takeBackCardMove({ ...dreamerContext, playerID: '0' }, { cardID: openCard.id }),
+      'INVALID_MOVE',
+    )
+    assert.equal(state.players['1'].hand.length, 0)
+    assert.equal(getTableCardCount(state.table), 4)
+    assert.equal(state.takeBackTamper ?? null, null)
+
+    // And refused while a procedure owns the table, like every other move.
+    state.resetResolution = {
+      id: 'reset-1',
+      callerPlayerID: '0',
+      kind: 'reset',
+      revealOrder: [],
+      revealStepIndex: 0,
+    }
+    assert.equal(takeBackCardMove(dreamerContext, { cardID: openCard.id }), 'INVALID_MOVE')
+  }
+
+  {
+    // Legal on the cheat's own turn too, which is the case the client's two-second lock exists for.
+    const { state, events, openCard } = createTakeBackScenario()
+    // A card in hand, or the Leave Game Rule takes the seat out before their turn can start.
+    state.players['1'].hand = [card('clubs_02.png')]
+    beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '1', turn: 4 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      undefined,
+    )
+    assert.equal(state.takeBackTamper?.turnNumber, 4)
+  }
+
+  {
+    // Caught inside the turn it happened in, and the verdict says what was done.
+    const { state, events, openCard } = createTakeBackScenario()
+
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      undefined,
+    )
+    assert.equal(
+      accuseDreamerMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '2' },
+        { targetPlayerID: '1' },
+      ),
+      undefined,
+    )
+
+    assert.equal(state.accusation?.wasSuccessful, true)
+    assert.equal(state.accusation?.caughtCheat, 'takeBackCard')
+
+    completeAccusationPunishment(state, events, 3)
+    assert.equal(state.players['1'].matchStats.punishmentCount, 1)
+    assert.match(
+      state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
+      /took a revealed card back off the table/i,
+    )
+  }
+
+  {
+    // And uncatchable once that turn ends: the record dies with the window, like a direction tamper.
+    const { state, events, openCard } = createTakeBackScenario()
+
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      undefined,
+    )
+    beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+    assert.equal(state.takeBackTamper ?? null, null)
+
+    assert.equal(
+      accuseDreamerMove(
+        { G: state, ctx: { currentPlayer: '1', turn: 4 }, events, playerID: '2' },
+        { targetPlayerID: '1' },
+      ),
+      undefined,
+    )
+    assert.equal(state.accusation?.wasSuccessful, false)
+  }
+
+  {
+    // Removing the No Cheating Rule hands the cheat to an ordinary seat, like the other five.
+    const { state, events, openCard } = createTakeBackScenario()
+    state.players['1'].character = 'The Believer'
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      'INVALID_MOVE',
+    )
+
+    state.rules.noCheating = 'removed'
+    assert.equal(
+      takeBackCardMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' },
+        { cardID: openCard.id },
+      ),
+      undefined,
+    )
+    // Nobody's character in particular any more, so the archive credits none.
+    const archivedTurn = state.archive.turns.find((entry) => entry.turnNumber === 3 && entry.playerID === '1')
+    assert.equal(archivedTurn?.actions[0].characterUsed, null)
+  }
+}
+
+/**
  * The No Cheating Rule. While it stands, cheating is The Dreamer's alone and only The Dreamer may be
- * accused; removed, all five cheats belong to everybody and every seat is worth naming. Each case
+ * accused; removed, all six cheats belong to everybody and every seat is worth naming. Each case
  * below is run by a player holding an ordinary character, so nothing here can pass by accident.
  */
 function runNoCheatingRuleCheck() {
@@ -3579,6 +3858,50 @@ function runNoCheatingRuleCheck() {
     }), undefined)
     assert.deepEqual(state.directionTamper, { playerID: '1', turnNumber: 3 })
   }
+}
+
+function runEmoteCheck() {
+  const state = createScenarioState(2)
+  const { events } = createEventRecorder()
+
+  /*
+   * Server-only, because the id is cut from a table-wide counter: a client predicting it would draw
+   * a different id whenever somebody else emoted first, and the board would animate the same emote
+   * twice.
+   */
+  assert.equal(BlowCowGame.moves.emote.client, false)
+
+  const result = emoteMove({
+    G: state,
+    // An emote is intentionally legal off-turn and during any ordinary player turn.
+    ctx: { currentPlayer: '1', turn: 4 },
+    events,
+    playerID: '0',
+  }, { emoteID: 12 })
+
+  assert.equal(result, undefined)
+  assert.equal(state.emoteSequence, 1)
+  assert.deepEqual(state.emotes, [{
+    id: 'emote-1-0',
+    playerID: '0',
+    emoteID: 12,
+  }])
+  assert.deepEqual((BlowCowGame.playerView({ G: state, playerID: '1' }) as BlowCowState).emotes, state.emotes)
+
+  assert.equal(emoteMove({
+    G: state,
+    ctx: { currentPlayer: '1', turn: 4 },
+    events,
+    playerID: '0',
+  }, { emoteID: 0 }), 'INVALID_MOVE')
+
+  state.players['0'].hasLeft = true
+  assert.equal(emoteMove({
+    G: state,
+    ctx: { currentPlayer: '1', turn: 4 },
+    events,
+    playerID: '0',
+  }, { emoteID: 1 }), 'INVALID_MOVE')
 }
 
 /**
@@ -5231,6 +5554,10 @@ function runInvisibleHandCharacterCheck() {
   )
   assert.equal(playMove(forcedContext, { cardIDs: [forcedCard.id] }), undefined)
   assert.equal(state.round.lastNonPassingPlayerID, '2')
+  // The play pays the lock off there and then, rather than at the next turn start. Nothing here can
+  // tell the difference, but The Clown can: their play keeps the turn, and a lock still standing
+  // would take Pass off the encore it earned.
+  assert.equal(state.round.forcedPlayPlayerID, null)
 
   // One turn only: the next turn to begin lifts the lock and Pass comes back.
   beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 5 }, events })
@@ -6282,6 +6609,596 @@ function runGamblerCharacterCheck() {
   }
 }
 
+function runMimeCharacterCheck() {
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Mime'))
+
+  const state = createScenarioState(3)
+  state.players['0'].character = 'The Mime'
+  state.players['1'].character = 'The Cat'
+  state.players['0'].hand = [card('clubs_ace.png')]
+  state.players['1'].hand = [card('hearts_queen.png'), card('spades_king.png')]
+  state.players['2'].hand = [card('diamonds_king.png')]
+  state.players['1'].points = 1
+  state.players['1'].scoredSets = [{
+    id: 'set-source',
+    rank: 'K',
+    cards: [card('clubs_king.png')],
+    awardedAtRound: 1,
+    awardedAtTurn: 1,
+    source: 'initialDeal',
+  }]
+  const mimeFrontCard = card('clubs_02.png')
+  // One face down and one already face up, so the held-back set is the face-down half and only that.
+  const sourceHiddenFrontCard = card('diamonds_02.png')
+  const sourceRevealedFrontCard = card('spades_03.png')
+  state.table.plays = [
+    {
+      id: 'play-mime',
+      playerID: '0',
+      cards: [mimeFrontCard],
+      declaredCardCount: 1,
+      revealedCardIDs: [],
+      rehiddenCardIDs: [],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 1,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+    {
+      id: 'play-source',
+      playerID: '1',
+      cards: [sourceHiddenFrontCard, sourceRevealedFrontCard],
+      declaredCardCount: 2,
+      revealedCardIDs: [sourceRevealedFrontCard.id],
+      rehiddenCardIDs: [],
+      claimedRank: 'Q',
+      playedAtRound: 1,
+      playedAtTurn: 2,
+      revealedAtTurn: null,
+      wasTrumpSelection: false,
+    },
+  ]
+
+  // The ability names its own target: the next active seat in the current direction.
+  assert.equal(getMimicryTargetPlayerID(state, '0'), '1')
+  assert.equal(canMimic(state, '0'), true)
+  assert.equal(canMimic(state, '1'), false)
+
+  const { events, record } = createEventRecorder()
+  // `identityShuffle` leaves the coin on its first face, which is the swap.
+  const context = {
+    G: state,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+    random: { Shuffle: identityShuffle },
+  }
+
+  assert.equal(mimicMove({ ...context, ctx: { currentPlayer: '1', turn: 3 } }), 'INVALID_MOVE')
+  assert.equal(mimicMove(context), undefined)
+
+  // Everything copied is frozen where it stood, including which plays each block is wearing.
+  assert.deepEqual(state.mimicry, {
+    playerID: '0',
+    sourcePlayerID: '1',
+    turnNumber: 3,
+    character: 'The Cat',
+    points: 1,
+    pointRanks: ['K'],
+    handCount: 2,
+    wasSeekerPick: false,
+    borrowedPlayIDs: ['play-source'],
+    hiddenPlayIDs: ['play-mime'],
+    // Only the face-down half is held back. A card already face up is public, and hiding it again
+    // would be taking something off the table rather than delaying it.
+    borrowedFaceDownCardIDs: [sourceHiddenFrontCard.id],
+    revealedPlayerIDs: [],
+    // The turn about to be handed over, which must not count as the source arriving at their chair.
+    pendingHandoverPlayerID: '1',
+  })
+  assert.equal(state.players['0'].hasUsedMimicThisRound, true)
+  // The one field that is the coin flip written down, and the only part of the record withheld.
+  const mimicPlayerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+  assert.equal(mimicPlayerView({ G: state, playerID: '2' }).mimicry?.pendingHandoverPlayerID ?? null, null)
+  assert.equal(mimicPlayerView({ G: state, playerID: '2' }).mimicry?.sourcePlayerID, '1')
+
+  // The chairs really moved, and `seatIndex` moved with them rather than with the players — which is
+  // what keeps every "Seat N" label attached to a position on the ring.
+  assert.deepEqual(state.seatOrder, ['1', '0', '2'])
+  assert.equal(state.players['0'].seatIndex, 1)
+  assert.equal(state.players['1'].seatIndex, 0)
+  assert.ok(state.seatOrder.every((seatID, seatIndex) => state.players[seatID].seatIndex === seatIndex))
+  // The turn stays in the chair it was in, and the source is now sitting in it.
+  assert.equal(record.nextPlayerID, '1')
+
+  // The one anonymous history event in the game: naming a seat would answer the whole question.
+  const mimicEvent = state.history.at(-1)
+  assert.equal(mimicEvent?.title, 'Mimic')
+  assert.equal(mimicEvent?.playerID, null)
+  assert.ok(!mimicEvent?.detail.includes('Seat'))
+
+  const mimicArchiveAction = state.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'mimic')
+  assert.equal(mimicArchiveAction?.characterUsed, 'The Mime')
+  assert.equal(mimicArchiveAction?.targetPlayerID, '1')
+  // The archive is where the coin flip is written down, and it never leaves the server.
+  assert.match(mimicArchiveAction?.detail ?? '', /swapped seats/)
+
+  /*
+   * The broadcast status recites the acting player's own action space, and The Cat's Change Direction
+   * is in it. While the disguise stands the two seats it hangs between show the same character but
+   * only one of them has it, so the status is trimmed to what both have in common.
+   */
+  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+  assert.ok(state.mimicry)
+  assert.ok(!state.tableStatus.includes('Change Direction'))
+  /*
+   * That was the handover. From outside the ring the turn never moved chairs, so it is not the source
+   * arriving at theirs — counting it would turn the borrowed pile over a turn earlier here than in
+   * the branch where the seats stayed put, which is the coin flip read straight off the table.
+   */
+  assert.deepEqual(state.mimicry?.revealedPlayerIDs, [])
+  assert.equal(state.mimicry?.pendingHandoverPlayerID ?? null, null)
+
+  // No turn start takes the disguise off, including its wearer's own. It is worn for the round.
+  // What a turn start does move is the pile, one chair at a time, starting with the chair after the
+  // acting one — which after this swap is The Mime's.
+  beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 5 }, events })
+  assert.ok(state.mimicry)
+  assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0'])
+  beginTurn({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events })
+  assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0'])
+  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 7 }, events })
+  assert.ok(state.mimicry)
+  assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0', '1'])
+
+  // The other face of the coin: no swap, and the turn keeps running.
+  const stayState = createScenarioState(3)
+  stayState.players['0'].character = 'The Mime'
+  stayState.players['0'].hand = [card('clubs_ace.png')]
+  stayState.players['1'].hand = [card('hearts_queen.png')]
+  stayState.players['2'].hand = [card('diamonds_king.png')]
+
+  const { events: stayEvents, record: stayRecord } = createEventRecorder()
+  const stayContext = {
+    G: stayState,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events: stayEvents,
+    playerID: '0',
+    random: { Shuffle: reverseShuffle },
+  }
+  assert.equal(mimicMove(stayContext), undefined)
+  assert.deepEqual(stayState.seatOrder, ['0', '1', '2'])
+  assert.equal(stayState.players['0'].seatIndex, 0)
+  assert.equal(stayRecord.nextPlayerID, null)
+  assert.ok(stayState.mimicry)
+  // Nothing was handed over, so there is no arrival to discount.
+  assert.equal(stayState.mimicry.pendingHandoverPlayerID ?? null, null)
+
+  // One use per round, spent whichever way the coin landed.
+  assert.equal(canMimic(stayState, '0'), false)
+  assert.equal(mimicMove(stayContext), 'INVALID_MOVE')
+
+  /*
+   * The symmetry the whole ability rests on. In both branches the turn moves once and exactly one of
+   * the two chairs has turned its pile over — the chair after the acting one. Which player is sitting
+   * in it differs, and that is precisely what the table cannot see.
+   */
+  beginTurn({ G: stayState, ctx: { currentPlayer: '1', turn: 4 }, events: stayEvents })
+  assert.deepEqual(stayState.mimicry?.revealedPlayerIDs, ['1'])
+
+  // And it outlasts a full lap back to The Mime's own next turn, which used to be where it ended.
+  beginTurn({ G: stayState, ctx: { currentPlayer: '0', turn: 8 }, events: stayEvents })
+  assert.ok(stayState.mimicry)
+  assert.deepEqual(stayState.mimicry?.revealedPlayerIDs, ['1', '0'])
+
+  // Either half of the disguise leaving takes it down: the leaver's table cards go with them.
+  const leaveState = createScenarioState(3)
+  leaveState.players['0'].character = 'The Mime'
+  leaveState.players['0'].hand = [card('clubs_ace.png')]
+  leaveState.players['1'].hand = []
+  leaveState.players['2'].hand = [card('diamonds_king.png')]
+  leaveState.mimicry = {
+    playerID: '0',
+    sourcePlayerID: '1',
+    turnNumber: 2,
+    character: 'The Believer',
+    points: 0,
+    pointRanks: [],
+    handCount: 0,
+    wasSeekerPick: false,
+    borrowedPlayIDs: [],
+    hiddenPlayIDs: [],
+    borrowedFaceDownCardIDs: [],
+    revealedPlayerIDs: [],
+  }
+  beginTurn({ G: leaveState, ctx: { currentPlayer: '1', turn: 3 }, events })
+  assert.equal(leaveState.players['1'].hasLeft, true)
+  assert.equal(leaveState.mimicry ?? null, null)
+
+  // No disguise survives a procedure opening the table, and the round that follows hands the use back.
+  const procedureState = createScenarioState()
+  procedureState.players['0'].character = 'The Mime'
+  procedureState.players['0'].hand = [card('clubs_ace.png')]
+  procedureState.players['1'].hand = [card('hearts_queen.png')]
+  procedureState.players['0'].hasUsedMimicThisRound = true
+  procedureState.mimicry = {
+    playerID: '0',
+    sourcePlayerID: '1',
+    turnNumber: 1,
+    character: 'The Believer',
+    points: 0,
+    pointRanks: [],
+    handCount: 1,
+    wasSeekerPick: false,
+    borrowedPlayIDs: [],
+    hiddenPlayIDs: [],
+    borrowedFaceDownCardIDs: [],
+    revealedPlayerIDs: [],
+  }
+
+  assert.equal(passMove({ G: procedureState, ctx: { currentPlayer: '0', turn: 2 }, events, playerID: '0' }), undefined)
+  // A pass on its own is not a procedure, so the disguise is still standing.
+  assert.ok(procedureState.mimicry)
+  assert.equal(passMove({ G: procedureState, ctx: { currentPlayer: '1', turn: 3 }, events, playerID: '1' }), undefined)
+  assert.ok(procedureState.resetResolution)
+  assert.equal(procedureState.mimicry ?? null, null)
+  assert.equal(
+    mimicMove({ G: procedureState, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' }),
+    'INVALID_MOVE',
+  )
+
+  completeResetReveal(procedureState, events, 3)
+  assert.equal(
+    finalizeResetResolutionMove({
+      G: procedureState,
+      ctx: { currentPlayer: '1', turn: 3 },
+      events,
+      playerID: '1',
+    }, {
+      resolutionID: procedureState.resetResolution.id,
+    }),
+    undefined,
+  )
+  assert.equal(procedureState.round.roundNumber, 2)
+  assert.equal(procedureState.players['0'].hasUsedMimicThisRound, false)
+  assert.equal(canMimic(procedureState, '0'), true)
+}
+
+/**
+ * The claim the whole character rests on: while the disguise stands, the ring draws the same thing
+ * whichever way the coin fell.
+ *
+ * Both branches are built identically, run side by side through the same observable sequence of
+ * turns, and compared chair by chair — chairs, not players, because the seats may have traded and
+ * the table can only see chairs. Each comparison is made through `playerView` for an uninvolved
+ * seat, so it is literally what a third party's client would render.
+ *
+ * The Reveal Rule is what this is really guarding. Left to itself it flips the borrowed pile on both
+ * blocks at once, at whichever chair the source really sits in, which gives the answer away on the
+ * next lap.
+ */
+function runMimeDisguiseSymmetryCheck() {
+  const playerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+
+  const buildScenario = () => {
+    const state = createScenarioState(3)
+    state.players['0'].character = 'The Mime'
+    state.players['0'].hand = [card('clubs_ace.png'), card('clubs_king.png')]
+    state.players['1'].hand = [card('hearts_queen.png'), card('spades_king.png')]
+    state.players['2'].hand = [card('diamonds_king.png')]
+    // Both owe the table a reveal, which is the event whose timing the disguise has to rearrange.
+    state.players['0'].pendingRevealPlayID = 'play-mime'
+    state.players['1'].pendingRevealPlayID = 'play-source'
+    state.table.plays = [
+      {
+        id: 'play-mime',
+        playerID: '0',
+        cards: [card('clubs_02.png')],
+        declaredCardCount: 1,
+        revealedCardIDs: [],
+        rehiddenCardIDs: [],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 1,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+      {
+        id: 'play-source',
+        playerID: '1',
+        cards: [card('diamonds_02.png'), card('spades_03.png')],
+        declaredCardCount: 2,
+        revealedCardIDs: [],
+        rehiddenCardIDs: [],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 2,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+
+    return state
+  }
+
+  /*
+   * The sprite a face-down card is drawn with is the card back, whatever it really is — see
+   * `FrontCardRow`. Describing the drawn sprite rather than the underlying one is the point: in the
+   * branch where the seats swapped the source really has revealed, so their faces are unmasked on
+   * the wire while still being drawn face down. That is a difference a client could read out of its
+   * own state and never one it puts on screen, which is the line this character draws throughout.
+   */
+  const describeRing = (state: BlowCowState) => {
+    const view = playerView({ G: state, playerID: '2' })
+
+    return view.seatOrder.map((seatID) => {
+      return getDisplayedFrontCards(view.table.plays, seatID, view.mimicry ?? null)
+        .map((frontCard) => (frontCard.faceDown ? `${CARD_BACK_SPRITE}(down)` : `${frontCard.card.sprite}(up)`))
+        .join(',')
+    })
+  }
+
+  const swapState = buildScenario()
+  const stayState = buildScenario()
+  const { events } = createEventRecorder()
+
+  assert.equal(mimicMove({
+    G: swapState,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+    random: { Shuffle: identityShuffle },
+  }), undefined)
+  assert.equal(mimicMove({
+    G: stayState,
+    ctx: { currentPlayer: '0', turn: 3 },
+    events,
+    playerID: '0',
+    random: { Shuffle: reverseShuffle },
+  }), undefined)
+  assert.deepEqual(swapState.seatOrder, ['1', '0', '2'])
+  assert.deepEqual(stayState.seatOrder, ['0', '1', '2'])
+
+  // The swap hands the turn over, so its branch begins a turn the other never has to. Both leave
+  // chair 1 acting, which is the only thing the table sees.
+  beginTurn({ G: swapState, ctx: { currentPlayer: '1', turn: 4 }, events })
+
+  assert.deepEqual(describeRing(swapState), describeRing(stayState))
+  assert.ok(describeRing(swapState).every((chair) => !chair.includes('(up)')))
+
+  let turnNumber = 5
+  for (const chairIndex of [1, 2, 0, 1, 2, 0]) {
+    beginTurn({ G: swapState, ctx: { currentPlayer: swapState.seatOrder[chairIndex], turn: turnNumber }, events })
+    beginTurn({ G: stayState, ctx: { currentPlayer: stayState.seatOrder[chairIndex], turn: turnNumber }, events })
+    turnNumber += 1
+
+    assert.deepEqual(
+      describeRing(swapState),
+      describeRing(stayState),
+      `The two branches drew different rings once the turn reached chair ${chairIndex + 1}.`,
+    )
+  }
+
+  // And the reveal really did happen on both, so the comparison above was not two blank tables.
+  assert.ok(describeRing(swapState).some((chair) => chair.includes('(up)')))
+  assert.ok(describeRing(swapState).every((chair) => !chair.includes('(down)')))
+}
+
+function runClownCharacterCheck() {
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Clown'))
+
+  const state = createScenarioState(3)
+  const openerCard = card('hearts_king.png')
+  const clownFirstCard = card('spades_king.png')
+  const clownSecondCard = card('clubs_king.png')
+  state.players['1'].character = 'The Clown'
+  state.players['0'].hand = [openerCard]
+  state.players['1'].hand = [clownFirstCard, clownSecondCard]
+  state.players['2'].hand = [card('diamonds_king.png')]
+
+  const { events, record } = createEventRecorder()
+
+  // Player 0 opens the round, so the encore below has a real BS target to displace.
+  assert.equal(
+    selectTrumpAndPlayMove(
+      { G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0' },
+      { trumpRank: 'K', cardIDs: [openerCard.id] },
+    ),
+    undefined,
+  )
+  assert.equal(state.round.lastNonPassingPlayerID, '0')
+  assert.equal(canEarnEncore(state, '1'), true)
+  // Nobody else earns one, whatever they play.
+  assert.equal(canEarnEncore(state, '2'), false)
+
+  const clownContext = { G: state, ctx: { currentPlayer: '1', turn: 2 }, events, playerID: '1' }
+  record.nextPlayerID = null
+  assert.equal(playMove(clownContext, { cardIDs: [clownFirstCard.id] }), undefined)
+
+  // The whole ability: the cards landed and the turn stayed where it was.
+  assert.equal(record.nextPlayerID, null)
+  assert.equal(state.encore?.playerID, '1')
+  assert.equal(state.encore?.turnNumber, 2)
+  assert.equal(state.players['1'].hasUsedClownEncoreThisRound, true)
+  assert.equal(canEarnEncore(state, '1'), false)
+  // An ordinary play in every other respect.
+  assert.equal(state.round.lastNonPassingPlayerID, '1')
+  assert.equal(state.round.passStreak, 0)
+  assert.equal(getTableCardCount(state.table), 2)
+
+  // Player 0 is no longer the latest non-passing player, and the encore is the only reason Call BS
+  // still points anywhere at all.
+  assert.equal(state.encore?.bsTargetPlayerID, '0')
+  assert.equal(getEncoreBSTargetPlayerID(state, '1'), '0')
+  assert.equal(getEncoreBSTargetPlayerID(state, '2'), null)
+  assert.match(state.tableStatus, /still holds the turn/)
+  assert.match(state.tableStatus, /Call BS/)
+  // The status must not offer the one action the encore takes away.
+  assert.doesNotMatch(state.tableStatus, /may Play/)
+
+  // A second play is that one action, and it is refused with the hand untouched.
+  assert.equal(playMove(clownContext, { cardIDs: [clownSecondCard.id] }), 'INVALID_MOVE')
+  assert.deepEqual(state.players['1'].hand.map((handCard) => handCard.id), [clownSecondCard.id])
+  assert.equal(getTableCardCount(state.table), 2)
+
+  const playArchiveAction = state.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'play' && action.characterUsed === 'The Clown')
+  assert.ok(playArchiveAction)
+  assert.match(playArchiveAction?.detail ?? '', /keeps the turn/)
+
+  // And the second action really is spendable on the remembered target.
+  assert.equal(callBSMove(clownContext, { targetPlayerID: '0' }), undefined)
+  assert.equal(state.bsResolution?.callerPlayerID, '1')
+  assert.equal(state.bsResolution?.targetPlayerID, '0')
+
+  /*
+   * A round of its own for the Pass branch, which is how an encore is declined: there is no separate
+   * end-turn action, so passing after playing is legal and counts as a pass like any other.
+   */
+  const passState = createScenarioState()
+  const passClownCard = card('hearts_queen.png')
+  const passOpponentCard = card('spades_queen.png')
+  passState.players['0'].character = 'The Clown'
+  // A card to spare, so the play below does not empty the hand and hand player 1 a Final Two
+  // Players Rule turn on which Pass is not available in the first place.
+  passState.players['0'].hand = [passClownCard, card('clubs_02.png')]
+  passState.players['1'].hand = [passOpponentCard]
+
+  const passRecorder = createEventRecorder()
+  const passClownContext = {
+    G: passState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: passRecorder.events,
+    playerID: '0',
+  }
+
+  // Opening the round, so there is nothing to challenge — the encore still lands, because Pass alone
+  // is enough to make it worth having.
+  assert.equal(
+    selectTrumpAndPlayMove(passClownContext, { trumpRank: 'Q', cardIDs: [passClownCard.id] }),
+    undefined,
+  )
+  assert.equal(passRecorder.record.nextPlayerID, null)
+  assert.equal(passState.encore?.bsTargetPlayerID, null)
+
+  assert.equal(passMove(passClownContext), undefined)
+  assert.equal(passRecorder.record.nextPlayerID, '1')
+  assert.equal(passState.round.passStreak, 1)
+
+  // The record dies with the turn it belonged to, spent or not.
+  beginTurn({ G: passState, ctx: { currentPlayer: '1', turn: 2 }, events: passRecorder.events })
+  assert.equal(passState.encore, null)
+
+  // Per round, not per match: everyone passing rolls the round over and hands the use back.
+  assert.equal(
+    passMove({ ...passClownContext, ctx: { currentPlayer: '1', turn: 2 }, playerID: '1' }),
+    undefined,
+  )
+  assert.ok(passState.resetResolution)
+  completeResetReveal(passState, passRecorder.events, 2)
+  assert.equal(
+    finalizeResetResolutionMove({
+      G: passState,
+      ctx: { currentPlayer: '1', turn: 2 },
+      events: passRecorder.events,
+      playerID: '1',
+    }, {
+      resolutionID: passState.resetResolution.id,
+    }),
+    undefined,
+  )
+  assert.equal(passState.round.roundNumber, 2)
+  assert.equal(passState.players['0'].hasUsedClownEncoreThisRound, false)
+  assert.equal(canEarnEncore(passState, '0'), true)
+
+  /*
+   * The other half of `isEncoreWorthTaking`, and the combination the ability is really for: a table
+   * the encore's own play just filled leaves Call Reset, which is enough on its own. Pass removed and
+   * the round only just opened, so nothing else is available to be doing the work here.
+   */
+  const resetState = createScenarioState()
+  const resetClownCard = card('hearts_ace.png')
+  resetState.rules.pass = 'removed'
+  resetState.round.maxCardsOnTable = 1
+  resetState.players['0'].character = 'The Clown'
+  resetState.players['0'].hand = [resetClownCard, card('clubs_03.png')]
+  resetState.players['1'].hand = [card('spades_ace.png')]
+
+  const resetRecorder = createEventRecorder()
+  const resetContext = {
+    G: resetState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: resetRecorder.events,
+    playerID: '0',
+  }
+  assert.equal(
+    selectTrumpAndPlayMove(resetContext, { trumpRank: 'A', cardIDs: [resetClownCard.id] }),
+    undefined,
+  )
+  assert.equal(resetRecorder.record.nextPlayerID, null)
+  assert.equal(resetState.encore?.bsTargetPlayerID, null)
+  assert.equal(passMove(resetContext), 'INVALID_MOVE')
+  assert.equal(callResetMove(resetContext), undefined)
+  assert.equal(resetState.resetResolution?.callerPlayerID, '0')
+
+  /*
+   * An encore that buys nothing is refused outright, because a play is the one action it takes away:
+   * granting it here would leave the turn with no legal move at all. Pass removed, nobody to
+   * challenge, and a table nowhere near its cap is the only way all three doors close at once.
+   */
+  const strandedState = createScenarioState()
+  const strandedCard = card('hearts_jack.png')
+  strandedState.rules.pass = 'removed'
+  strandedState.players['0'].character = 'The Clown'
+  strandedState.players['0'].hand = [strandedCard]
+  strandedState.players['1'].hand = [card('spades_jack.png')]
+
+  const strandedRecorder = createEventRecorder()
+  assert.equal(canEarnEncore(strandedState, '0'), true)
+  assert.equal(
+    selectTrumpAndPlayMove({
+      G: strandedState,
+      ctx: { currentPlayer: '0', turn: 1 },
+      events: strandedRecorder.events,
+      playerID: '0',
+    }, {
+      trumpRank: 'J',
+      cardIDs: [strandedCard.id],
+    }),
+    undefined,
+  )
+  assert.equal(strandedState.encore, null)
+  // Nothing was spent either, so the use is still there for a play that can carry it.
+  assert.equal(strandedState.players['0'].hasUsedClownEncoreThisRound, false)
+  assert.equal(strandedRecorder.record.nextPlayerID, '1')
+
+  // A play by anybody else ends the turn exactly as it always did.
+  const believerState = createScenarioState()
+  const believerCard = card('hearts_10.png')
+  believerState.players['0'].hand = [believerCard]
+  believerState.players['1'].hand = [card('spades_08.png')]
+
+  const believerRecorder = createEventRecorder()
+  assert.equal(
+    selectTrumpAndPlayMove({
+      G: believerState,
+      ctx: { currentPlayer: '0', turn: 1 },
+      events: believerRecorder.events,
+      playerID: '0',
+    }, {
+      trumpRank: '10',
+      cardIDs: [believerCard.id],
+    }),
+    undefined,
+  )
+  assert.equal(believerState.encore, null)
+  assert.equal(believerRecorder.record.nextPlayerID, '1')
+}
+
 const checks = [
   ['BS resolution', runBSResolutionCheck],
   ['BS reveal procedure', runBSRevealProcedureCheck],
@@ -6310,7 +7227,9 @@ const checks = [
   ['dreamer direction cheat', runDreamerDirectionCheatCheck],
   ['dreamer sneak play', runDreamerSneakPlayCheck],
   ['dreamer illegal count', runDreamerIllegalCountCheck],
+  ['take back cheat', runTakeBackCheatCheck],
   ['no cheating rule', runNoCheatingRuleCheck],
+  ['emotes', runEmoteCheck],
   ['direction flip tell', runDirectionFlipTellCheck],
   ['accusation rules', runAccusationRulesCheck],
   ['turn ownership guards', runTurnOwnershipCheck],
@@ -6328,6 +7247,9 @@ const checks = [
   ['invisible hand character', runInvisibleHandCharacterCheck],
   ['poker hand evaluation', runPokerHandEvaluationCheck],
   ['gambler character', runGamblerCharacterCheck],
+  ['mime character', runMimeCharacterCheck],
+  ['mime disguise symmetry', runMimeDisguiseSymmetryCheck],
+  ['clown character', runClownCharacterCheck],
 ] as const
 
 for (const [label, runCheck] of checks) {

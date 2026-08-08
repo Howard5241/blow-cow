@@ -22,6 +22,8 @@ export const BLOW_COW_CHARACTER_NAMES = [
   'The Prototype',
   'The Mastermind',
   'The Gambler',
+  'The Mime',
+  'The Clown',
 ] as const
 
 export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
@@ -50,6 +52,8 @@ export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, strin
   'The Prototype': 'Use Defy to destroy one heart card in your hand and one random rule card, without ending your turn. Once per round.',
   'The Mastermind': 'Use Conspire to open another player\'s hand and play out of it instead of your own. Once per round.',
   'The Gambler': 'Reset becomes a showdown: the cards in front of each player are read as a poker hand, and the weakest takes the whole table instead of it being redistributed.',
+  'The Mime': 'Use Mimic to take on the appearance of your next player, and swap seats with them half the time. Once per round.',
+  'The Clown': 'Your first play each round does not end your turn. Take one more action after it, but not another play. Once per round.',
 }
 
 export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
@@ -73,6 +77,8 @@ export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Mastermind',
   'The Invisible Hand',
   'The Gambler',
+  'The Mime',
+  'The Clown',
 ] as const satisfies readonly BlowCowCharacterName[]
 
 export type BlowCowImplementedCharacterName = (typeof BLOW_COW_IMPLEMENTED_CHARACTER_NAMES)[number]

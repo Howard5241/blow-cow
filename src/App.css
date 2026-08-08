@@ -16,6 +16,24 @@
   initial-value: rgb(255 176 84);
 }
 
+@property --table-board-gradient-top {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(22 74 67);
+}
+
+@property --table-board-gradient-middle {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(11 42 39);
+}
+
+@property --table-board-gradient-bottom {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(4 20 19);
+}
+
 .app-shell {
   width: min(1180px, calc(100% - 32px));
   margin: 0 auto;
@@ -835,13 +853,17 @@
   padding: 8px;
   border: 0;
   border-radius: 0;
-  /*
-   * Mono felt. There is no ambient accent tint any more, so the only colour the board ever
-   * takes on is the BS flash below.
-   */
+  --table-board-gradient-top: rgb(22 74 67);
+  --table-board-gradient-middle: rgb(11 42 39);
+  --table-board-gradient-bottom: rgb(4 20 19);
   background:
-    radial-gradient(circle at 50% -10%, rgba(245, 239, 225, 0.055), transparent 46%),
-    linear-gradient(180deg, rgba(13, 21, 19, 0.95), rgba(6, 12, 11, 0.97));
+    radial-gradient(circle at 14% 4%, color-mix(in srgb, var(--table-board-gradient-top) 82%, transparent), transparent 42%),
+    radial-gradient(circle at 86% 92%, color-mix(in srgb, var(--table-board-gradient-middle) 68%, transparent), transparent 52%),
+    linear-gradient(158deg, var(--table-board-gradient-top), var(--table-board-gradient-middle) 49%, var(--table-board-gradient-bottom));
+  transition:
+    --table-board-gradient-top 1400ms cubic-bezier(0.22, 1, 0.36, 1),
+    --table-board-gradient-middle 1400ms cubic-bezier(0.22, 1, 0.36, 1),
+    --table-board-gradient-bottom 1400ms cubic-bezier(0.22, 1, 0.36, 1);
   /*
    * Lives on the board rather than on .player-ring because the hand stage sizes its empty middle
    * from it too, and the two are siblings. It is a plain length, so unlike --seat-block-width it
@@ -2109,6 +2131,75 @@
   justify-content: center;
 }
 
+.seat-emote-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.seat-emote {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: calc(var(--seat-avatar-size) * 1.2);
+  height: calc(var(--seat-avatar-size) * 1.2);
+  object-fit: contain;
+  opacity: 0;
+  pointer-events: none;
+  animation: seat-emote-travel 2800ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--emote-delay, 0ms);
+  --emote-travel-x: 0px;
+  --emote-travel-y: -82px;
+}
+
+/* Emotes travel away from the hub-facing action and callout bubble, so they never compete for it. */
+.seat-block[data-seat-half='left'] .seat-emote {
+  --emote-travel-x: -88px;
+  --emote-travel-y: -12px;
+}
+
+.seat-block[data-seat-half='right'] .seat-emote {
+  --emote-travel-x: 88px;
+  --emote-travel-y: -12px;
+}
+
+.seat-block[data-seat-half='bottom'] .seat-emote {
+  --emote-travel-x: 0px;
+  --emote-travel-y: 88px;
+}
+
+@keyframes seat-emote-travel {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.08);
+  }
+
+  36%,
+  72% {
+    opacity: 1;
+    transform: translate(calc(-50% + var(--emote-travel-x)), calc(-50% + var(--emote-travel-y))) scale(1.12);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0);
+  }
+}
+
+@keyframes seat-emote-reduced {
+  0%,
+  99% {
+    opacity: 1;
+    transform: translate(calc(-50% + var(--emote-travel-x)), calc(-50% + var(--emote-travel-y))) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--emote-travel-x)), calc(-50% + var(--emote-travel-y))) scale(1);
+  }
+}
+
 /* Named so the BS target mark can size itself against the avatar it is stamped on. */
 .seat-block {
   --seat-avatar-size: clamp(46px, 6cqw, 62px);
@@ -2998,6 +3089,62 @@
   font-size: 0.78rem;
 }
 
+.emote-picker-anchor {
+  position: relative;
+}
+
+.emote-toggle {
+  --toolbar-accent: 112, 223, 174;
+}
+
+.emote-toggle-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.emote-picker {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 10px);
+  left: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 46px);
+  gap: 5px;
+  width: max-content;
+  padding: 8px;
+  border: 1px solid rgba(112, 223, 174, 0.42);
+  border-radius: 8px;
+  background: rgba(5, 18, 16, 0.98);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+}
+
+.emote-picker-option {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(245, 239, 225, 0.06);
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+
+.emote-picker-option:hover,
+.emote-picker-option:focus-visible {
+  border-color: rgba(112, 223, 174, 0.72);
+  background: rgba(112, 223, 174, 0.16);
+  outline: none;
+  transform: scale(1.12);
+}
+
+.emote-picker-option img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .character-card-overlay,
 .board-overlay {
   position: absolute;
@@ -3882,6 +4029,11 @@
     transform: translate(-50%, -50%);
   }
 
+  .seat-emote {
+    animation: seat-emote-reduced 1200ms step-end both;
+    animation-delay: var(--emote-delay, 0ms);
+  }
+
   .player-play-callout,
   .seat-leave-effect,
   .win-screen-panel,
@@ -3955,6 +4107,29 @@
   border-color: rgba(118, 184, 255, 0.4);
   box-shadow:
     0 0 0 1px rgba(118, 184, 255, 0.28),
+    0 12px 24px rgba(4, 14, 12, 0.24);
+  outline: none;
+}
+
+/*
+ * The take-back affordance. Only ever rendered on the cheat's own client — every other client
+ * computes `isTakeBackActionable` as false for that seat — so a visible cue here tells the table
+ * nothing. It is hover-only for the same reason the Cat's is: a card sitting at rest must look
+ * exactly like every other card, or the pile itself would announce who is holding a licence.
+ * Amber rather than blue, so a Cat who may also cheat can tell the two clicks apart at a glance.
+ */
+.front-card.take-back-actionable {
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.front-card.take-back-actionable:hover,
+.front-card.take-back-actionable:focus-visible {
+  z-index: 1;
+  transform: translateY(-2px);
+  border-color: rgba(255, 190, 106, 0.44);
+  box-shadow:
+    0 0 0 1px rgba(255, 190, 106, 0.3),
     0 12px 24px rgba(4, 14, 12, 0.24);
   outline: none;
 }
@@ -4124,6 +4299,11 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
+}
+
+/* The player ring normally paints above the strip; lift only the open picker so its grid receives taps. */
+.table-board > .bottom-play-strip.emote-picker-open {
+  z-index: 3;
 }
 
 .hand-stage {
@@ -4686,6 +4866,26 @@
     position: relative;
     width: auto;
     transform: none;
+  }
+
+  .emote-picker {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    width: auto;
+  }
+
+  .emote-picker-option {
+    width: auto;
+    height: auto;
+    aspect-ratio: 1;
+  }
+
+  .seat-emote {
+    --emote-travel-x: 0px !important;
+    --emote-travel-y: -50px !important;
   }
 
   .seat-block.viewing-seat {

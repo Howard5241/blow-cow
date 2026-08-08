@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
  * How long each frame of a multi-frame character card holds. Slow enough to read the art, fast
  * enough that the card reads as one moving picture rather than three cards swapping places.
  */
-const CHARACTER_SPRITE_FRAME_INTERVAL_MS = 300
+const CHARACTER_SPRITE_FRAME_INTERVAL_MS = 100
 
 type CharacterCardSpriteImageProps = {
   alt: string

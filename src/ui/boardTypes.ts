@@ -15,6 +15,12 @@ export type FrontCard = {
   isFlipping: boolean
   isTargeted: boolean
   isCatActionable: boolean
+  /**
+   * The viewer may palm this card back into their hand. Only ever their own face-up cards, and only
+   * while they hold the licence to cheat. It outranks `isCatActionable` on the cards both could
+   * claim, so a Cat who can also cheat takes their own cards back and still flips everyone else's.
+   */
+  isTakeBackActionable: boolean
   /** The BS caller may click this card to flip it, because its owner's block is at the centre. */
   isRevealable: boolean
   /** Face up and of the trump rank proper, so it counts toward the Reverse Rule. */

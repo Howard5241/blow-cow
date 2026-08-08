@@ -131,6 +131,47 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   flush is not a flush and a short hand simply cannot reach the higher ones — nothing is padded to
   five. Ace is high only. Jokers are wild and spent once; The Confused's Jacks stay Jacks. Card count
   is the last tiebreak, and `comparePokerHands` returning 0 is a real tie that the caller settles.
+- The Mime (`mimic` move) copies their next player's block and flips a coin for the two seats, once
+  per round. `G.mimicry` changes nothing the engine reads: it is a snapshot the *client* draws one
+  block from, so hands, plays, points and character all stay where they were. The snapshot is
+  load-bearing rather than incidental — the board subtracts The Mime's own plays from the copied hand
+  count and stacks them onto the copied pile, so the acting block loses cards and gains a pile
+  whichever way the coin fell, while a live mirror would leak the answer. `swapSeatPositions` trades
+  `seatOrder` and both `seatIndex` values together, keeping `seatIndex` equal to the position, which
+  is what keeps every "Seat N" label on the chair rather than the player and so stops the swap
+  renaming anything. The swap is permanent; the drawing is worn for the rest of the round, no turn
+  start ending it, and `clearMimicry` drops it at every site that opens a procedure, on either party
+  leaving, and again at `beginNextRound` as belt and braces — every way a round ends is one of those
+  procedures, so a procedure is always what takes it off. `hasUsedMimicThisRound` is the spent flag.
+  The Mimic history event is the one anonymous event in the game; `buildTurnStatus` drops to a bare
+  table-and-chair line while a disguise stands, because the action space it recites is read off the
+  acting player's own character; and the board seeds The Mime's block with the source's callout, but
+  only when The Mime is not the one on the clock. It is a screen-level illusion and nothing more.
+  The Reveal Rule is the one part that needed machinery rather than a snapshot: both blocks draw the
+  same physical cards, so obeying it literally flips the borrowed pile on both at once, at whichever
+  chair the source really sits in. `mimicry.revealedPlayerIDs` splits it per chair, holding back only
+  `borrowedFaceDownCardIDs` and holding them back on the source's own block too;
+  `mimicry.pendingHandoverPlayerID` discounts the turn a swap hands over, since from outside the ring
+  the turn never moved, and it is the only field `hideSecretState` strips. `getDisplayedFrontCards`
+  in `src/ui/tablePlays.ts` is the single source of truth for what each block draws, read by the seat
+  rows and by the one flip watcher that replaced the two table-keyed ones, so a card can never be
+  animated as flipping while it is drawn the other way up. `mime disguise symmetry` in the check
+  script runs both branches side by side and compares the ring chair by chair through `playerView`.
+  `G.mimicry` still names the disguised seat to anything reading state rather than screen. It hides
+  nothing `playerView` was ever responsible for.
+- The Clown's first play each round leaves the turn where it was. It is the only character with no
+  move of its own: `performPlay` decides it, and `G.encore` is the live record — public, turn-bound,
+  and cleared by `handleTurnStart` exactly as a conspiracy is. `hasUsedClownEncoreThisRound` is spent
+  by the play, not by the action it buys, since an encore cannot be declined. Two things carry the
+  weight. `encore.bsTargetPlayerID` remembers the BS target from *before* the play, because the play
+  makes The Clown the latest non-passing player and `getDefaultBSTargetPlayerID` would otherwise
+  answer "yourself" and close the very action the encore hands back — that fallback lives in the one
+  helper, so `bsTargeting.ts` imports `getEncoreBSTargetPlayerID` rather than mirroring it. And
+  `isEncoreWorthTaking` refuses an encore that would buy nothing: a play is the action it takes away,
+  so a kept turn with no Pass, no BS target and no full table would have no legal move left. There is
+  no decline button — Pass is one, and it counts as an ordinary pass. `performPlay` also clears
+  `round.forcedPlayPlayerID` now, because a lock still standing would take Pass off the encore of a
+  player who has already done what it asked.
 - The Cat owns the direction flip as well as the table-card flip. `resolveToggleDirection` reads
   `isCat`, and its own-turn flip is the only legal one — every other flip is a tamper, cheat licence
   or not. The Contrarian no longer touches the direction at all.
@@ -142,11 +183,25 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   the button. Keep `contrarianTriggered` optional-tolerant when reading it — a match staged before
   this existed restores a punishment record without the field.
 - Cheating is gated by one helper, `canCheat`: The Dreamer while the No Cheating Rule stands, and
-  everybody once it is removed. Every one of the five cheats routes through it, permission and
+  everybody once it is removed. Every one of the six cheats routes through it, permission and
   detection alike, so the licence and the accusation window can never disagree about who is
   answerable. `isDreamer` survives only where the question really is "is this seat The Dreamer" —
   archive labelling, and nothing else. Removing the rule is the one removal that widens the game
   rather than narrowing it, and it leaves The Dreamer an ordinary seat.
+- The take-back (`takeBackCard` move) is the mirror of the sneak play: one of your own face-up cards
+  goes back into your hand, on anybody's turn including your own, unlimited, and in the same silence
+  — archive only, no history, no telemetry, and `tableStatus` deliberately left stale so nothing
+  re-announces it. Face-down cards are refused, because those are still live claims and palming one
+  would answer a BS call by deleting the evidence. It is the one cheat that leaves *nothing* on the
+  table to inspect, which is why `G.takeBackTamper` has to exist for `getAccusableCheat` to read; a
+  play emptied by it is dropped from `table.plays`, since `getLatestPlayForPlayer` and En Passant
+  both walk that array by position. `hideSecretState` strips the record from everyone **except its
+  owner** — the single asymmetry in that function. An opponent holding it would be checking the
+  answer instead of gambling; its owner cannot, and their client is the only one that needs it, to
+  serve `TAKE_BACK_ACTION_LOCK_MS`. That two-second lock over the whole action row and the seat
+  buttons is client-side by construction: a server-enforced deadline would be a wall clock in `G`,
+  which is not replayable. It arms only on the cheat's own turn, and `id` changes per take-back so a
+  run of them re-arms rather than coasting on the first.
 - A direction flip writes no history event at all. It publishes `G.directionFlip`, which names the
   player who made it so each client can lean their block toward the hub, plus an anonymous telemetry
   line for the archive. `directionFlip` is the deliberate opposite of `directionTamper`: the flip
@@ -155,7 +210,7 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   the verdict, and nudging only the illegitimate flippers would say the same thing in reverse.
   `handleTurnStart` clears both together, so the tell dies with its accusation window.
 - The No Cheating Rule card does not list the cheats it covers, and neither description mentions The
-  Dreamer. `RULES.md` is where the five are written down; the card is what every seat can open.
+  Dreamer. `RULES.md` is where the six are written down; the card is what every seat can open.
 - `BlowCowTablePlay.claimedRank` is nullable for exactly one case: a card sneaked onto the table
   before the round had a trump rank. `settleUnclaimedPlays` fills it in wherever `round.trumpRank`
   goes from null to a rank — the trump-selecting play and Manipulate — and counts the lie there,

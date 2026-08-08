@@ -6,6 +6,7 @@ type FrontCardRowProps = {
   enteringCardIDSet: Set<string>
   onCatHideCard: (cardID: string) => void
   onRevealCard: (cardID: string) => void
+  onTakeBackCard: (cardID: string) => void
   /** Names the card's owner, so the reveal prompt says whose hidden play is being opened. */
   seatName: string
   /**
@@ -22,6 +23,7 @@ export function FrontCardRow({
   enteringCardIDSet,
   onCatHideCard,
   onRevealCard,
+  onTakeBackCard,
   registerFrontCard,
   seatName,
 }: FrontCardRowProps) {
@@ -34,12 +36,27 @@ export function FrontCardRow({
   return (
     <div className="front-card-row">
       {cards.map((card) => {
+        const takeBackLabel = `Palm ${getCardLabel(card.sprite)} back into your hand`
         const catHideLabel = `Use The Cat to flip ${getCardLabel(card.sprite)} face down`
         const revealLabel = `Reveal ${seatName}'s hidden card`
-        // The two never overlap: The Cat only acts on face-up cards, the BS reveal only on face-down
-        // ones. Keeping them separate branches keeps each label honest about what the click does.
-        const actionLabel = card.isCatActionable ? catHideLabel : card.isRevealable ? revealLabel : undefined
-        const onAction = card.isCatActionable
+        /*
+         * The reveal never overlaps the other two — it is the only one on face-down cards — but the
+         * take-back and The Cat's flip both want face-up ones, and a Cat who may also cheat owns
+         * cards that qualify for either. The take-back is checked first, which is what settles it:
+         * their own pile is palmed, everyone else's is still flipped.
+         */
+        const actionLabel = card.isTakeBackActionable
+          ? takeBackLabel
+          : card.isCatActionable
+          ? catHideLabel
+          : card.isRevealable
+          ? revealLabel
+          : undefined
+        const onAction = card.isTakeBackActionable
+          ? () => {
+              onTakeBackCard(card.cardID)
+            }
+          : card.isCatActionable
           ? () => {
               onCatHideCard(card.cardID)
             }
@@ -52,7 +69,7 @@ export function FrontCardRow({
         return (
           <div
             aria-label={actionLabel}
-            className={`front-card ${card.faceDown ? 'face-down' : 'face-up'}${card.isDeparted ? ' departed-placeholder' : ''}${card.isFlipping ? ' flipping' : ''}${card.isTargeted ? ' target-card' : ''}${card.isTrumpHighlighted ? ' trump-card' : ''}${enteringCardIDSet.has(card.id) ? ' entering-placeholder' : ''}${card.isCatActionable ? ' cat-actionable' : ''}${card.isRevealable ? ' revealable' : ''}`}
+            className={`front-card ${card.faceDown ? 'face-down' : 'face-up'}${card.isDeparted ? ' departed-placeholder' : ''}${card.isFlipping ? ' flipping' : ''}${card.isTargeted ? ' target-card' : ''}${card.isTrumpHighlighted ? ' trump-card' : ''}${enteringCardIDSet.has(card.id) ? ' entering-placeholder' : ''}${card.isCatActionable ? ' cat-actionable' : ''}${card.isTakeBackActionable ? ' take-back-actionable' : ''}${card.isRevealable ? ' revealable' : ''}`}
             key={card.id}
             onClick={onAction}
             onKeyDown={onAction ? (event) => {
