@@ -14,6 +14,18 @@ import {
   type BlowCowRulesState,
 } from '../src/game/blowCowRules.ts'
 import {
+  BLOW_COW_MAX_STATUSES_PER_PLAYER,
+  BLOW_COW_STATUS_DEFINITIONS,
+  BLOW_COW_STATUS_IDS,
+  DEFAULT_BLOW_COW_STATUS_TURNS,
+  MAX_BLOW_COW_STATUS_TURNS,
+  getOpposedStatusID,
+  getStatusDefinition,
+  normalizeStatusSelection,
+  normalizeStatusTurns,
+  type BlowCowStatusID,
+} from '../src/game/blowCowStatuses.ts'
+import {
   type BlowCowAccuseDreamerArgs,
   type BlowCowAdvanceBSRevealArgs,
   type BlowCowAdvanceResetRevealArgs,
@@ -31,6 +43,7 @@ import {
   type BlowCowDefyArgs,
   type BlowCowEmoteArgs,
   type BlowCowManipulateArgs,
+  addPlayerStatus,
   canBreakRule,
   canConspire,
   canEarnEncore,
@@ -50,6 +63,8 @@ import {
   type BlowCowFinalizeResetResolutionArgs,
   getBreakableRuleIDs,
   getDefaultStandardRankCount,
+  getPlayerStatuses,
+  hasStatus,
   getSeekerCharacterChoices,
   getTableCardCount,
   isCardFaceUpOnTable,
@@ -192,6 +207,7 @@ const beginResetPunishmentMove = BlowCowGame.moves.beginResetPunishment as (
   args: BlowCowBeginResetPunishmentArgs,
 ) => unknown
 const beginTurn = BlowCowGame.turn.onBegin as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
+const endTurn = BlowCowGame.turn.onEnd as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
 
 function identityShuffle<Value>(values: Value[]) {
   return [...values]
@@ -229,6 +245,7 @@ function createScenarioState(numPlayers = 2): BlowCowState {
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
   state.round.forcedPlayPlayerID = null
+  state.round.startedTurnNumber = null
   state.round.maxCardsOnTable = 10
   state.directionTamper = null
   state.directionFlip = null
@@ -263,6 +280,7 @@ function createScenarioState(numPlayers = 2): BlowCowState {
     state.players[playerID].wasPunishedLastRound = false
     state.players[playerID].hasLeft = false
     state.players[playerID].leaveOrder = null
+    state.players[playerID].statuses = []
   }
 
   return state
@@ -5006,6 +5024,31 @@ function runRemovedRuleEnforcementCheck() {
 
   assert.equal(directionState.round.roundNumber, 2)
   assert.equal(directionState.round.direction, 'clockwise')
+
+  // Status Rule: the counter is still there and still shown, it simply never moves again.
+  const frozenStatusState = createScenarioState()
+  frozenStatusState.rules.status = 'removed'
+  frozenStatusState.players['0'].statuses = [{ id: 'tilted', turnsRemaining: 1 }]
+  frozenStatusState.players['0'].hand = [card('clubs_ace.png')]
+  frozenStatusState.players['1'].hand = [card('spades_king.png')]
+
+  const frozenStatusRecorder = createEventRecorder()
+  for (const turn of [1, 2, 3]) {
+    beginTurn({ G: frozenStatusState, ctx: { currentPlayer: '0', turn }, events: frozenStatusRecorder.events })
+    endTurn({ G: frozenStatusState, ctx: { currentPlayer: '0', turn }, events: frozenStatusRecorder.events })
+  }
+
+  assert.deepEqual(getPlayerStatuses(frozenStatusState, '0'), [{ id: 'tilted', turnsRemaining: 1 }])
+  // Permanent, not inert: the status still does what it says.
+  assert.equal(
+    passMove({
+      G: frozenStatusState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: frozenStatusRecorder.events,
+      playerID: '0',
+    }),
+    'INVALID_MOVE',
+  )
 }
 
 /** The Broken: one rule card, torn out once, and only ever one that defines a removed variant. */
@@ -5019,7 +5062,7 @@ function runBrokenCharacterCheck() {
 
   // Only rules that define a removed variant are on the menu, and only ones still standing.
   const choices = getBreakableRuleIDs(state)
-  assert.deepEqual(choices, ['reverse', 'pass', 'joker', 'maxCardsOnTable', 'directionChange', 'passEnding', 'reveal', 'rankChange', 'noCheating'])
+  assert.deepEqual(choices, ['reverse', 'pass', 'joker', 'maxCardsOnTable', 'directionChange', 'passEnding', 'reveal', 'rankChange', 'noCheating', 'status'])
   assert.equal(canBreakRule(state, '0'), true)
   assert.equal(canBreakRule(state, '1'), false)
 
@@ -6688,6 +6731,8 @@ function runMimeCharacterCheck() {
     pointRanks: ['K'],
     handCount: 2,
     wasSeekerPick: false,
+    // Copied like the numbers above it, so the two blocks agree on what the copied seat is under.
+    statuses: [],
     borrowedPlayIDs: ['play-source'],
     hiddenPlayIDs: ['play-mime'],
     // Only the face-down half is held back. A card already face up is public, and hiding it again
@@ -7199,6 +7244,306 @@ function runClownCharacterCheck() {
   assert.equal(believerRecorder.record.nextPlayerID, '1')
 }
 
+function runStatusEffectsCheck() {
+  // The sanitiser is the single gate, so unknown ids, duplicates and a third status all die here.
+  assert.deepEqual(normalizeStatusSelection(['mad', 'blind']), ['mad', 'blind'])
+  assert.deepEqual(normalizeStatusSelection(['mad', 'nonsense', 'blind']), ['mad', 'blind'])
+  assert.deepEqual(normalizeStatusSelection(['mad', 'mad']), ['mad'])
+  assert.deepEqual(normalizeStatusSelection(['mad', 'blind', 'tilted']), ['mad', 'blind'])
+  assert.deepEqual(normalizeStatusSelection('mad'), [])
+  assert.equal(normalizeStatusTurns(4), 4)
+  assert.equal(normalizeStatusTurns(0), 1)
+  assert.equal(normalizeStatusTurns(999), MAX_BLOW_COW_STATUS_TURNS)
+  assert.equal(normalizeStatusTurns(2.5), DEFAULT_BLOW_COW_STATUS_TURNS)
+  assert.equal(normalizeStatusTurns(undefined), DEFAULT_BLOW_COW_STATUS_TURNS)
+
+  // Setup validation refuses rather than silently truncating, so the host is told what was wrong.
+  assert.equal(BlowCowGame.validateSetupData?.({ initialStatuses: ['mad'], initialStatusTurns: 2 }), undefined)
+  assert.equal(BlowCowGame.validateSetupData?.({}), undefined)
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: ['mad', 'blind', 'tilted'] }))
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: ['mad', 'mad'] as BlowCowStatusID[] }))
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: ['nonsense'] as unknown as BlowCowStatusID[] }))
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: 'mad' as unknown as BlowCowStatusID[] }))
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: ['mad'], initialStatusTurns: 0 }))
+  assert.ok(BlowCowGame.validateSetupData?.({ initialStatuses: ['mad'], initialStatusTurns: 1.5 }))
+
+  // The lobby lever reaches every seat, at the counter the host chose.
+  const dealtState = createInitialBlowCowState(3, identityShuffle, {
+    useCharacters: false,
+    initialStatuses: ['mad', 'blind'],
+    initialStatusTurns: 2,
+  })
+  for (const playerID of dealtState.seatOrder) {
+    assert.deepEqual(getPlayerStatuses(dealtState, playerID), [
+      { id: 'mad', turnsRemaining: 2 },
+      { id: 'blind', turnsRemaining: 2 },
+    ])
+  }
+  // Public: nothing about a status is withheld from anybody.
+  const statusPlayerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+  assert.deepEqual(
+    getPlayerStatuses(statusPlayerView({ G: dealtState, playerID: '1' }), '0'),
+    getPlayerStatuses(dealtState, '0'),
+  )
+
+  // Tilted takes Pass and nothing else.
+  const tiltedState = createScenarioState()
+  tiltedState.players['0'].statuses = [{ id: 'tilted', turnsRemaining: 2 }]
+  tiltedState.players['0'].hand = [card('hearts_king.png')]
+  tiltedState.players['1'].hand = [card('spades_king.png')]
+  const tiltedRecorder = createEventRecorder()
+  const tiltedContext = {
+    G: tiltedState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: tiltedRecorder.events,
+    playerID: '0',
+  }
+  assert.equal(passMove(tiltedContext), 'INVALID_MOVE')
+  assert.equal(tiltedState.round.passStreak, 0)
+  assert.equal(
+    selectTrumpAndPlayMove(tiltedContext, { trumpRank: 'K', cardIDs: [tiltedState.players['0'].hand[0].id] }),
+    undefined,
+  )
+
+  // Worried takes Play, in all three of its shapes, and leaves Pass alone.
+  const worriedState = createScenarioState()
+  worriedState.players['0'].character = 'The Drunkard'
+  worriedState.players['0'].statuses = [{ id: 'worried', turnsRemaining: 2 }]
+  const worriedCard = card('hearts_king.png')
+  worriedState.players['0'].hand = [worriedCard]
+  worriedState.players['1'].hand = [card('spades_king.png')]
+  const worriedRecorder = createEventRecorder()
+  const worriedContext = {
+    G: worriedState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: worriedRecorder.events,
+    playerID: '0',
+    random: { Shuffle: identityShuffle },
+  }
+  assert.equal(
+    selectTrumpAndPlayMove(worriedContext, { trumpRank: 'K', cardIDs: [worriedCard.id] }),
+    'INVALID_MOVE',
+  )
+  assert.equal(playRandomMove(worriedContext, { cardCount: 1, trumpRank: 'K' }), 'INVALID_MOVE')
+  worriedState.round.trumpRank = 'K'
+  assert.equal(playMove(worriedContext, { cardIDs: [worriedCard.id] }), 'INVALID_MOVE')
+  assert.equal(worriedState.players['0'].hand.length, 1)
+  assert.equal(passMove(worriedContext), undefined)
+
+  // Mad refuses the truthful play and takes the lie, with the hand untouched by the refusal.
+  const madState = createScenarioState()
+  madState.players['0'].statuses = [{ id: 'mad', turnsRemaining: 2 }]
+  const madTruth = card('hearts_king.png')
+  const madLie = card('clubs_05.png')
+  madState.players['0'].hand = [madTruth, madLie]
+  madState.players['1'].hand = [card('spades_king.png')]
+  madState.round.trumpRank = 'K'
+  const madRecorder = createEventRecorder()
+  const madContext = {
+    G: madState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: madRecorder.events,
+    playerID: '0',
+  }
+  assert.equal(playMove(madContext, { cardIDs: [madTruth.id] }), 'INVALID_MOVE')
+  assert.equal(madState.players['0'].hand.length, 2)
+  assert.equal(getTableCardCount(madState.table), 0)
+  assert.equal(playMove(madContext, { cardIDs: [madLie.id] }), undefined)
+  assert.equal(getTableCardCount(madState.table), 1)
+
+  // Nervous is the same rule read the other way.
+  const nervousState = createScenarioState()
+  nervousState.players['0'].statuses = [{ id: 'nervous', turnsRemaining: 2 }]
+  const nervousTruth = card('hearts_king.png')
+  const nervousLie = card('clubs_05.png')
+  nervousState.players['0'].hand = [nervousTruth, nervousLie]
+  nervousState.players['1'].hand = [card('spades_king.png')]
+  nervousState.round.trumpRank = 'K'
+  const nervousRecorder = createEventRecorder()
+  const nervousContext = {
+    G: nervousState,
+    ctx: { currentPlayer: '0', turn: 1 },
+    events: nervousRecorder.events,
+    playerID: '0',
+  }
+  assert.equal(playMove(nervousContext, { cardIDs: [nervousLie.id] }), 'INVALID_MOVE')
+  assert.equal(nervousState.players['0'].hand.length, 2)
+  assert.equal(playMove(nervousContext, { cardIDs: [nervousTruth.id] }), undefined)
+  assert.equal(getTableCardCount(nervousState.table), 1)
+
+  /*
+   * Broken opens the random play to a player who is not The Drunkard, forces the count down to one,
+   * and is not credited to The Drunkard in the archive.
+   */
+  const brokenState = createScenarioState()
+  brokenState.players['0'].statuses = [{ id: 'broken', turnsRemaining: 2 }]
+  brokenState.players['0'].hand = [card('hearts_king.png'), card('clubs_05.png')]
+  brokenState.players['1'].hand = [card('spades_king.png')]
+  const brokenRecorder = createEventRecorder()
+  assert.equal(
+    playRandomMove({
+      G: brokenState,
+      ctx: { currentPlayer: '0', turn: 1 },
+      events: brokenRecorder.events,
+      playerID: '0',
+      random: { Shuffle: identityShuffle },
+    }, { cardCount: 2, trumpRank: 'K' }),
+    undefined,
+  )
+  assert.equal(getTableCardCount(brokenState.table), 1)
+  assert.equal(brokenState.players['0'].hand.length, 1)
+  // The Drunkard's leave penalty must not follow a play the status chose.
+  assert.equal(brokenState.players['0'].hasUsedManualPlay, true)
+  const brokenPlayAction = brokenState.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .find((action) => action.kind === 'play')
+  assert.ok(brokenPlayAction)
+  assert.equal(brokenPlayAction.characterUsed, null)
+  // A seat with neither the character nor the status is still refused.
+  assert.equal(
+    playRandomMove({
+      G: brokenState,
+      ctx: { currentPlayer: '1', turn: 2 },
+      events: brokenRecorder.events,
+      playerID: '1',
+      random: { Shuffle: identityShuffle },
+    }, { cardCount: 1, trumpRank: 'Q' }),
+    'INVALID_MOVE',
+  )
+
+  // The counter spends on its owner's turn ending and on nothing else.
+  const tickState = createScenarioState()
+  tickState.players['0'].statuses = [{ id: 'tilted', turnsRemaining: 2 }]
+  tickState.players['0'].hand = [card('hearts_king.png')]
+  tickState.players['1'].hand = [card('spades_king.png')]
+  const tickRecorder = createEventRecorder()
+
+  // A turn that never opened cannot end: this is the `startMatch` hand-off, and it spends nothing.
+  endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
+  assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 2)
+
+  beginTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
+  endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
+  assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 1)
+
+  // Somebody else's turn is not this player's, so it costs them nothing.
+  beginTurn({ G: tickState, ctx: { currentPlayer: '1', turn: 2 }, events: tickRecorder.events })
+  endTurn({ G: tickState, ctx: { currentPlayer: '1', turn: 2 }, events: tickRecorder.events })
+  assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 1)
+
+  // And the last turn wears it off entirely, which gives Pass straight back.
+  beginTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 3 }, events: tickRecorder.events })
+  endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 3 }, events: tickRecorder.events })
+  assert.deepEqual(getPlayerStatuses(tickState, '0'), [])
+  assert.equal(
+    passMove({
+      G: tickState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: tickRecorder.events,
+      playerID: '0',
+    }),
+    undefined,
+  )
+
+  /*
+   * Statuses are counted in turns, not rounds, so a round boundary leaves them where they are — the
+   * one thing `beginNextRound` clears here is the turn marker the tick reads.
+   */
+  const roundState = createScenarioState()
+  roundState.players['0'].statuses = [{ id: 'blind', turnsRemaining: 3 }]
+  roundState.players['0'].hand = [card('clubs_ace.png')]
+  roundState.players['1'].hand = [card('spades_king.png')]
+  roundState.round.trumpRank = 'J'
+  roundState.round.passStreak = 1
+  roundState.round.lastNonPassingPlayerID = '1'
+  const roundRecorder = createEventRecorder()
+  assert.equal(
+    passMove({
+      G: roundState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: roundRecorder.events,
+      playerID: '0',
+    }),
+    undefined,
+  )
+  assert.ok(roundState.resetResolution)
+  completeResetReveal(roundState, roundRecorder.events, 4)
+  assert.equal(
+    finalizeResetResolutionMove({
+      G: roundState,
+      ctx: { currentPlayer: '0', turn: 4 },
+      events: roundRecorder.events,
+      playerID: '0',
+    }, {
+      resolutionID: roundState.resetResolution.id,
+    }),
+    undefined,
+  )
+  assert.equal(roundState.round.roundNumber, 2)
+  assert.deepEqual(getPlayerStatuses(roundState, '0'), [{ id: 'blind', turnsRemaining: 3 }])
+  assert.equal(roundState.round.startedTurnNumber, null)
+
+  // `addPlayerStatus` refreshes rather than stacking, and refuses a third.
+  const capState = createScenarioState()
+  assert.equal(addPlayerStatus(capState, '0', 'mad', 2), true)
+  assert.equal(addPlayerStatus(capState, '0', 'mad', 5), true)
+  assert.deepEqual(getPlayerStatuses(capState, '0'), [{ id: 'mad', turnsRemaining: 5 }])
+  assert.equal(addPlayerStatus(capState, '0', 'blind', 1), true)
+  assert.equal(addPlayerStatus(capState, '0', 'tilted', 1), false)
+  assert.equal(getPlayerStatuses(capState, '0').length, BLOW_COW_MAX_STATUSES_PER_PLAYER)
+  assert.equal(hasStatus(capState, '0', 'blind'), true)
+  assert.equal(hasStatus(capState, '0', 'tilted'), false)
+
+  /*
+   * The undocumented opposition: Tilted and Worried never sit together, and holding one is what
+   * makes a player immune to the other. Refused below the cap, so it is a real immunity rather than
+   * a seat that happened to be full, and symmetrical whichever lands first.
+   */
+  assert.equal(getOpposedStatusID('tilted'), 'worried')
+  assert.equal(getOpposedStatusID('worried'), 'tilted')
+  assert.equal(getOpposedStatusID('mad'), null)
+
+  const immuneState = createScenarioState()
+  assert.equal(addPlayerStatus(immuneState, '0', 'tilted', 3), true)
+  assert.equal(addPlayerStatus(immuneState, '0', 'worried', 3), false)
+  assert.deepEqual(getPlayerStatuses(immuneState, '0'), [{ id: 'tilted', turnsRemaining: 3 }])
+  // Refusing the second one must not stop an unrelated status from taking the free slot.
+  assert.equal(addPlayerStatus(immuneState, '0', 'blind', 3), true)
+  assert.equal(getPlayerStatuses(immuneState, '0').length, 2)
+
+  assert.equal(addPlayerStatus(immuneState, '1', 'worried', 3), true)
+  assert.equal(addPlayerStatus(immuneState, '1', 'tilted', 3), false)
+  assert.deepEqual(getPlayerStatuses(immuneState, '1'), [{ id: 'worried', turnsRemaining: 3 }])
+  // The immunity dies with the status that granted it.
+  immuneState.players['1'].statuses = []
+  assert.equal(addPlayerStatus(immuneState, '1', 'tilted', 3), true)
+
+  // The lobby deal goes through the same door, so picking both silently yields whichever came first.
+  const opposedDealState = createInitialBlowCowState(2, identityShuffle, {
+    useCharacters: false,
+    initialStatuses: ['tilted', 'worried'],
+    initialStatusTurns: 3,
+  })
+  for (const playerID of opposedDealState.seatOrder) {
+    assert.deepEqual(getPlayerStatuses(opposedDealState, playerID), [{ id: 'tilted', turnsRemaining: 3 }])
+  }
+  // Setup validation still accepts the pair: the refusal is a game rule, not a malformed selection.
+  assert.equal(BlowCowGame.validateSetupData?.({ initialStatuses: ['tilted', 'worried'] }), undefined)
+
+  // The tick is the Status Rule, and it is a rule that can be torn up mid-match.
+  assert.equal(canRuleTakeStatus('status', 'removed'), true)
+  assert.deepEqual(getRuleStatusOptions('status'), ['active', 'removed'])
+
+  // Every status ships the copy the seat tooltip and the lobby chip both read.
+  assert.equal(BLOW_COW_STATUS_DEFINITIONS.length, BLOW_COW_STATUS_IDS.length)
+  for (const statusID of BLOW_COW_STATUS_IDS) {
+    const definition = getStatusDefinition(statusID)
+    assert.ok(definition.title.length > 0)
+    assert.ok(definition.description.length > 0)
+    assert.equal(definition.sprite, `${statusID}.png`)
+  }
+}
+
 const checks = [
   ['BS resolution', runBSResolutionCheck],
   ['BS reveal procedure', runBSRevealProcedureCheck],
@@ -7250,6 +7595,7 @@ const checks = [
   ['mime character', runMimeCharacterCheck],
   ['mime disguise symmetry', runMimeDisguiseSymmetryCheck],
   ['clown character', runClownCharacterCheck],
+  ['status effects', runStatusEffectsCheck],
 ] as const
 
 for (const [label, runCheck] of checks) {

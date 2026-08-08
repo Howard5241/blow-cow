@@ -218,6 +218,44 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   the play callout is already suppressed for a sneak, a BS call needs a live trump, and a sneak is
   never a pending reveal. A new reader of `claimedRank` should still handle null rather than assume
   those three hold.
+- Status effects live in `src/game/blowCowStatuses.ts`: temporary, public, per-player modifiers
+  serialized as data, at most `BLOW_COW_MAX_STATUSES_PER_PLAYER` per seat, each carrying a counter.
+  `normalizeStatusSelection` and `normalizeStatusTurns` are the single sanitisers, the way
+  `normalizeRulesSelection` is for rule cards. Every enforcement site asks `hasStatus`, never
+  `getPlayerStatuses` — that helper is the one reader of the optional `player.statuses` field, and
+  keeping the question in one place is what stops what a status forbids and what the seat block draws
+  from disagreeing. `addPlayerStatus` is the one door in, and it enforces the cap.
+- Tilted and Worried are mutually exclusive: holding one makes the player immune to the other. It
+  lives in `getOpposedStatusID` as a two-way map, is enforced in `addPlayerStatus` **before** the cap
+  so an immunity and a full seat stay distinguishable, and is deliberately unannounced — no rule
+  card, no history event, no lobby warning. `startMatchState` deals the lobby's selection one status
+  at a time through `addPlayerStatus` rather than assigning the array, so the opposition applies to
+  the testing lever too.
+- The status counter ticks on **`turn.onEnd`**, the only hook hanging off it and the only one in the
+  game. `advanceTurn` covers just play and pass; a turn also ends through nine direct `events.endTurn`
+  calls, and `onEnd` is where all of them meet. `G.round.startedTurnNumber`, stamped by
+  `handleTurnStart`, is the guard: `startMatch` flips `gameStatus` to `active` and *then* ends the
+  staging turn, so a turn that never opened must not spend a counter. `beginNextRound` deliberately
+  leaves statuses alone — they are counted in turns, not rounds.
+- The tick is the Status Rule, and `handleTurnEnd` is its one enforcement site. Removed, the counters
+  stay on screen and stop moving, so every status becomes permanent — the one removal that makes an
+  effect stronger rather than weaker. It is read at the tick rather than where a status is handed
+  out, because the rule can be torn up mid-match and freezing whatever counters are standing at that
+  moment is the whole effect.
+- Each status is enforced at exactly one server site: Tilted in the `pass` move, Worried in
+  `validateCommonPlay` (which is the gate in front of all three play moves, and deliberately not in
+  front of the cheats), Mad and Nervous in `performPlay` right after `wasHonest` is computed —
+  restoring the hand on refusal, the way the missing-rank branch above them does — and Broken inside
+  `resolveDrunkardRandomPlay`, which it opens to a non-Drunkard and forces down to one card. Blind is
+  the exception: it is a pure display effect in `BlowCowBoard.tsx`, swapping face-up table cards for
+  `unknown.png` and lifted during BS and Reset reveals. Nothing secret is trusted to the client by
+  it — those cards are already public to every other seat.
+- `BlowCowMimicry` copies the source's `statuses` along with their hand count and points, because a
+  disguise that showed The Mime's own status column would be two identical blocks differing in the
+  one place the illusion has to hold.
+- Nothing in the game inflicts a status yet. The only source is the lobby's Initial Statuses panel,
+  which starts every player under the same set — a testing lever, carried by `initialStatuses` and
+  `initialStatusTurns` on `BlowCowSetupData` and dealt out by `startMatchState`.
 - Removing a rule takes any ability built on it with it: Pass removes The Foreigner's ability, Joker
   removes The Confused's, Reveal removes The Spy's, and a Dreamer cheat against a removed rule stops
   being a cheat. That is a consequence, not a special case — see the interaction list in `RULES.md`.
@@ -238,7 +276,13 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   illustrations carry no text, so the Rules panel renders the title and description itself.
 - Sprite folders live at the repo root, not in `public/`, and are loaded via `import.meta.glob`:
   `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`,
-  `rule_card_sprites/`.
+  `rule_card_sprites/`, `status_sprites/`.
+- `src/ui/SeatStatusColumn.tsx` draws a seat's statuses beside its avatar. It is absolutely
+  positioned inside `.seat-block-top` because the block's height feeds the ring radii, and its one
+  tooltip covers the whole stack rather than one bubble per badge. Placement follows the same
+  hub-facing `[data-seat-half]` rules `.seat-target-actions` uses, which is what keeps it on screen
+  at every seat angle with no measurement; the action bubble stands down while the column is hovered,
+  since both want that side.
 - Character sprite filename matching tolerates suffixes after the name, such as `The Contrarian 2.png`,
   because there a suffix only ever means a newer revision of the same art. The one exception is a run
   numbered from `1` — `The Prototype 1/2/3.png` — which is an animation, since a revision is never
@@ -264,7 +308,8 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
 
 ## Code Organization
 
-- `src/game/` — rules, helpers, character definitions, rule card definitions, poker evaluation.
+- `src/game/` — rules, helpers, character definitions, rule card definitions, status definitions,
+  poker evaluation.
 - `src/ui/` — board UI and sprite helpers.
 - `src/App.tsx`, `src/config.ts` — lobby flow and client configuration.
 - `server/server.cjs` — local server runtime, including the custom `/games/:name/:id/rejoin` route,

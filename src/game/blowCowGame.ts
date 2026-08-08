@@ -18,6 +18,17 @@ import {
   type BlowCowRuleID,
   type BlowCowRulesState,
 } from './blowCowRules.ts'
+import {
+  BLOW_COW_MAX_STATUSES_PER_PLAYER,
+  DEFAULT_BLOW_COW_STATUS_TURNS,
+  MAX_BLOW_COW_STATUS_TURNS,
+  formatStatusTitles,
+  getOpposedStatusID,
+  isBlowCowStatusID,
+  normalizeStatusSelection,
+  normalizeStatusTurns,
+  type BlowCowStatusID,
+} from './blowCowStatuses.ts'
 import { comparePokerHands, evaluatePokerHand } from './blowCowPoker.ts'
 
 export const BLOW_COW_GAME_NAME = 'blow-cow'
@@ -97,6 +108,16 @@ export type BlowCowTablePlay = {
   wasTrumpSelection: boolean
 }
 
+/**
+ * A status effect a player is currently under. Public in every sense — the counter is drawn on the
+ * seat block for everyone, which is the point of it.
+ */
+export type BlowCowPlayerStatus = {
+  id: BlowCowStatusID
+  /** Ticks down by 1 at the end of this player's own turn. The status is dropped when it hits 0. */
+  turnsRemaining: number
+}
+
 export type BlowCowPlayerState = {
   id: string
   seatIndex: number
@@ -152,6 +173,12 @@ export type BlowCowPlayerState = {
   leaveOrder: number | null
   /** The leave-triggered ability that moved this player's points, or null. Set once, never cleared. */
   leaveEffect: BlowCowLeaveEffect | null
+  /**
+   * The status effects this player is under, at most `BLOW_COW_MAX_STATUSES_PER_PLAYER` of them.
+   * Optional in the type as well as in practice: a match staged before statuses existed restores from
+   * `data/matches/` without the field, and nobody in it was ever afflicted.
+   */
+  statuses?: BlowCowPlayerStatus[]
 }
 
 /**
@@ -208,6 +235,15 @@ export type BlowCowRoundState = {
    * restores from `data/matches/` without the field, and nobody in it was ever forced to play.
    */
   forcedPlayPlayerID?: string | null
+  /**
+   * The turn number `handleTurnStart` last actually opened, and the guard the status tick reads: a
+   * turn that never began never ends, so it cannot spend a status counter. `startMatch` handing play
+   * to the first seat is the case this exists for.
+   *
+   * Optional for the same reason as the field above it — a match restored from before statuses
+   * existed has no turn on record, and its first real turn start writes one.
+   */
+  startedTurnNumber?: number | null
   maxCardsOnTable: number
 }
 
@@ -402,6 +438,12 @@ export type BlowCowMimicry = {
    */
   handCount: number
   wasSeekerPick: boolean
+  /**
+   * The source's statuses as they stood. Copied rather than read live, and copied at all, because a
+   * disguise that showed The Mime's own status column would be two identical blocks differing in the
+   * one place the illusion is supposed to be airtight. Optional for the usual restore reason.
+   */
+  statuses?: BlowCowPlayerStatus[]
   /** The source's plays as they stood, worn in place of The Mime's own. */
   borrowedPlayIDs: string[]
   /** The Mime's own plays as they stood, hidden underneath the borrowed ones. */
@@ -639,6 +681,12 @@ export type BlowCowSetupData = {
   useCharacters?: boolean
   characterPool?: BlowCowImplementedCharacterName[]
   rules?: Partial<BlowCowRulesState>
+  /**
+   * Statuses every player starts the match under, and how many turns they last. A testing lever
+   * rather than a game mode: nothing else in the game hands out a status yet.
+   */
+  initialStatuses?: BlowCowStatusID[]
+  initialStatusTurns?: number
 }
 
 export type BlowCowState = {
@@ -655,6 +703,14 @@ export type BlowCowState = {
    * unconditionally, and this only drives what the panel displays.
    */
   rules: BlowCowRulesState
+  /*
+   * The staged status selection, carried from the lobby through staging to `startMatchState`, which
+   * is what actually deals it out. Public and optional, like every field added after the first
+   * release — a match staged before statuses existed restores without them, and nobody in it is
+   * afflicted.
+   */
+  initialStatuses?: BlowCowStatusID[]
+  initialStatusTurns?: number
   seatOrder: string[]
   players: Record<string, BlowCowPlayerState>
   round: BlowCowRoundState
@@ -1312,6 +1368,7 @@ function createEmptyPlayerState(playerID: string, seatIndex: number): BlowCowPla
     leaveEffect: null,
     seekerPickedCharacter: null,
     brokenRemovedRuleID: null,
+    statuses: [],
   }
 }
 
@@ -1550,6 +1607,20 @@ function resolveRules(setupData: BlowCowSetupData | undefined) {
   return normalizeRulesSelection(setupData?.rules)
 }
 
+function resolveInitialStatuses(setupData: BlowCowSetupData | undefined) {
+  return normalizeStatusSelection(setupData?.initialStatuses)
+}
+
+function resolveInitialStatusTurns(setupData: BlowCowSetupData | undefined) {
+  return normalizeStatusTurns(setupData?.initialStatusTurns)
+}
+
+function formatInitialStatusesSummary(statusIDs: readonly BlowCowStatusID[], turns: number) {
+  return statusIDs.length === 0
+    ? 'started everyone with no statuses'
+    : `started everyone with ${formatStatusTitles(statusIDs)} for ${turns} turn(s)`
+}
+
 function formatRulesSummary(rules: BlowCowRulesState) {
   if (isDefaultRulesSelection(rules)) {
     return 'left every rule card active'
@@ -1580,6 +1651,34 @@ export function validateBlowCowSetupData(setupData: BlowCowSetupData | undefined
       if (!canRuleTakeStatus(ruleID, status)) {
         return `${ruleID} does not support the ${status} status.`
       }
+    }
+  }
+
+  if (setupData?.initialStatuses !== undefined) {
+    if (!Array.isArray(setupData.initialStatuses)) {
+      return 'Choose a valid starting status selection.'
+    }
+
+    if (setupData.initialStatuses.some((statusID) => !isBlowCowStatusID(statusID))) {
+      return 'Starting status selection contains an unknown status.'
+    }
+
+    if (new Set(setupData.initialStatuses).size !== setupData.initialStatuses.length) {
+      return 'Starting status selection cannot contain duplicate statuses.'
+    }
+
+    if (setupData.initialStatuses.length > BLOW_COW_MAX_STATUSES_PER_PLAYER) {
+      return `A player can hold at most ${BLOW_COW_MAX_STATUSES_PER_PLAYER} statuses at a time.`
+    }
+  }
+
+  if (setupData?.initialStatusTurns !== undefined) {
+    if (
+      !Number.isInteger(setupData.initialStatusTurns)
+      || setupData.initialStatusTurns < 1
+      || setupData.initialStatusTurns > MAX_BLOW_COW_STATUS_TURNS
+    ) {
+      return `Starting statuses must last between 1 and ${MAX_BLOW_COW_STATUS_TURNS} turns.`
     }
   }
 
@@ -1672,8 +1771,13 @@ export function isTrumpCard(
   return card.rank === trumpRank
 }
 
-/** `isTrumpCard` with the match's Joker Rule status already applied. Prefer this inside the engine. */
-function isTrumpCardInMatch(
+/**
+ * `isTrumpCard` with the match's Joker Rule status already applied. Prefer this inside the engine.
+ *
+ * Exported for the board's Mad and Nervous mirror, which has to ask the same question of a selection
+ * before it is played. The board's answer stops at the cards; the server adds the cheat modifiers.
+ */
+export function isTrumpCardInMatch(
   state: BlowCowState,
   card: BlowCowCard,
   trumpRank: BlowCowRank | null,
@@ -2058,6 +2162,81 @@ export function isRuleRemoved(state: BlowCowState, ruleID: BlowCowRuleID) {
 
 export function isBroken(state: BlowCowState, playerID: string) {
   return state.players[playerID]?.character === 'The Broken'
+}
+
+/**
+ * Every status a player is under. Optional-chained for the same reason `isRuleRemoved` is: a match
+ * staged before statuses existed restores with no `statuses` at all, and the honest answer for it is
+ * that nobody is afflicted.
+ *
+ * This is the only reader of the raw field. Enforcement sites ask `hasStatus` instead, so what a
+ * status forbids and what the seat block draws can never disagree.
+ */
+export function getPlayerStatuses(state: BlowCowState, playerID: string): BlowCowPlayerStatus[] {
+  return state.players[playerID]?.statuses ?? []
+}
+
+export function hasStatus(state: BlowCowState, playerID: string, statusID: BlowCowStatusID) {
+  return getPlayerStatuses(state, playerID).some((status) => status.id === statusID)
+}
+
+/**
+ * The one door in. Re-afflicting a status the player already has refreshes its counter rather than
+ * stacking a second copy, and the cap is enforced here rather than left to the caller.
+ *
+ * Nothing in the game calls this outside setup yet — it exists so the character or rule card that
+ * eventually hands statuses out has somewhere to hand them to.
+ */
+export function addPlayerStatus(
+  state: BlowCowState,
+  playerID: string,
+  statusID: BlowCowStatusID,
+  turns: number,
+) {
+  const player = state.players[playerID]
+  if (!player) {
+    return false
+  }
+
+  const statuses = player.statuses ?? []
+  const turnsRemaining = normalizeStatusTurns(turns)
+  const existing = statuses.find((status) => status.id === statusID)
+
+  if (existing) {
+    existing.turnsRemaining = turnsRemaining
+    player.statuses = statuses
+    return true
+  }
+
+  /*
+   * Immunity, and the reason this refusal is checked before the cap rather than after: a player
+   * already holding the opposing status is not full, they are immune, and the two have to be told
+   * apart by anything that ever reports why an application failed. Nothing announces it — see
+   * `getOpposedStatusID`.
+   */
+  const opposedStatusID = getOpposedStatusID(statusID)
+  if (opposedStatusID && statuses.some((status) => status.id === opposedStatusID)) {
+    return false
+  }
+
+  if (statuses.length >= BLOW_COW_MAX_STATUSES_PER_PLAYER) {
+    return false
+  }
+
+  player.statuses = [...statuses, { id: statusID, turnsRemaining }]
+  return true
+}
+
+/** One turn off every status this player holds, dropping the ones that run out. */
+function tickPlayerStatuses(state: BlowCowState, playerID: string) {
+  const player = state.players[playerID]
+  if (!player?.statuses?.length) {
+    return
+  }
+
+  player.statuses = player.statuses
+    .map((status) => ({ ...status, turnsRemaining: status.turnsRemaining - 1 }))
+    .filter((status) => status.turnsRemaining > 0)
 }
 
 /**
@@ -2992,6 +3171,9 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
   state.round.forcedPlayPlayerID = null
+  // Statuses are deliberately not touched anywhere in here. They are counted in turns, not rounds, so
+  // one handed out near a boundary is meant to survive it; only their turn marker is round-scoped.
+  state.round.startedTurnNumber = null
   state.round.status = 'awaitingTrumpSelection'
   state.table.plays = []
   state.bsResolution = null
@@ -3324,6 +3506,9 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
 
   const currentPlayerID = ctx.currentPlayer
   G.players[currentPlayerID].turnStartingDirection = G.round.direction
+  // Stamped before anything below can end the turn again, because this is what tells `handleTurnEnd`
+  // that a turn genuinely opened and so has a status counter to spend.
+  G.round.startedTurnNumber = ctx.turn
   // The window on a direction tamper is the turn it happened in, so a new turn closes it. The tell
   // goes with it: every connected client has played the nudge by now, and a player who reconnects
   // later is not owed a replay of something they were meant to catch live.
@@ -3388,6 +3573,39 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   G.tableStatus = buildTurnStatus(G, currentPlayerID)
 }
 
+/**
+ * The status tick, and the only thing that hangs off `turn.onEnd`.
+ *
+ * It lives on the framework hook rather than in `advanceTurn` because a turn ends eleven different
+ * ways here — a play, a pass, a BS or Reset resolution, an accusation, a Mimic seat swap, Manipulate,
+ * a player leaving with an empty hand — and only two of them go through `advanceTurn`. `onEnd` is the
+ * one place all of them meet.
+ *
+ * The `startedTurnNumber` guard is what keeps it honest. `startMatch` flips `gameStatus` to `active`
+ * and *then* ends the staging turn to hand play to the first seat, so a gameStatus check alone would
+ * charge that seat a turn they never took.
+ */
+function handleTurnEnd({ G, ctx }: BlowCowHookContext) {
+  if (G.gameStatus !== 'active') {
+    return
+  }
+
+  /*
+   * Without the Status Rule the counters stay on screen and simply stop moving, so every status a
+   * player is given is permanent. Read here rather than where a status is handed out, because the
+   * rule can be torn up mid-match and a counter frozen at the moment of removal is the whole effect.
+   */
+  if (isRuleRemoved(G, 'status')) {
+    return
+  }
+
+  if (G.round.startedTurnNumber !== ctx.turn) {
+    return
+  }
+
+  tickPlayerStatuses(G, ctx.currentPlayer)
+}
+
 function advanceTurn(state: BlowCowState, events: BlowCowEventsAPI, currentPlayerID: string, turnNumber: number) {
   const activePlayerIDs = getActivePlayerIDs(state)
   if (activePlayerIDs.length <= 1) {
@@ -3414,6 +3632,15 @@ function validateCommonPlay(
   }
 
   if (state.gameStatus !== 'active' || isProcedureRunning(state) || isFinalTwoResolutionTurn(state, playerID)) {
+    return false
+  }
+
+  /*
+   * Worried takes the Play action away, and this is the gate in front of all three moves that are
+   * one — `play`, `selectTrumpAndPlay` and `playRandom`. It deliberately does not reach `sneakPlay`
+   * or `takeBackCard`: those are cheats, not the action.
+   */
+  if (hasStatus(state, playerID, 'worried')) {
     return false
   }
 
@@ -3513,9 +3740,29 @@ function performPlay(
     && !usedRepeatTrump
     && !usedExtraCardCount
     && !usedExceededTableLimit
+
+  /*
+   * Mad and Nervous judge the play by the same `wasHonest` the game judges every other play by, cheat
+   * modifiers included: a Mad player who overfills the table has lied, and a Nervous one may not.
+   *
+   * Checked here rather than in `validateCommonPlay` because honesty cannot be read until the cards
+   * are out of the hand and the cheat flags are settled, so the refusal puts them back the same way
+   * the missing-rank branch above does. Neither status forces a play — a Mad player holding nothing
+   * but trump cards simply has no legal play, and Pass, Call BS and Call Reset are all still open.
+   */
+  if ((hasStatus(G, playerID, 'mad') && wasHonest) || (hasStatus(G, playerID, 'nervous') && !wasHonest)) {
+    addCardsToPlayerHand(G, handSourcePlayerID, selectedCards, 'other', ctx.turn)
+    return INVALID_MOVE
+  }
+
   playerMatchStats.playCount += 1
   playerMatchStats.cardsPlayed += selectedCards.length
-  if (playMode === 'manual') {
+  /*
+   * A random play the Broken status forced still counts as this player having played by hand, because
+   * the alternative is charging a Drunkard The Drunkard's leave penalty for a choice a status took
+   * away from them.
+   */
+  if (playMode === 'manual' || hasStatus(G, playerID, 'broken')) {
     G.players[playerID].hasUsedManualPlay = true
   }
   if (!wasHonest) {
@@ -3589,7 +3836,9 @@ function performPlay(
     detail: playDetail,
     characterUsed: conspiracy
       ? 'The Mastermind'
-      : playMode === 'random'
+      // The character, not the play mode: the Broken status routes through the same random play and
+      // is nobody's ability.
+      : playMode === 'random' && isDrunkard(G, playerID)
       ? 'The Drunkard'
       // Still `isDreamer`, not `canCheat`: the field names the character behind the play, and once
       // the No Cheating Rule is gone the licence is nobody's character in particular.
@@ -3621,19 +3870,29 @@ function performPlay(
   advanceTurn(G, events, playerID, ctx.turn)
 }
 
+/**
+ * A play whose cards nobody chose. The Drunkard's ability, and — since the Broken status takes the
+ * choice of card away rather than the action — the only route a Broken player has to the table.
+ *
+ * The two differ in exactly one thing: The Drunkard names how many cards to draw, and Broken always
+ * sends one. The trump rank stays the player's own decision either way.
+ */
 function resolveDrunkardRandomPlay(
   context: BlowCowMoveContext,
   args?: BlowCowPlayRandomArgs,
 ) {
   const { G, ctx, playerID, random } = context
+  const isBrokenStatusPlay = hasStatus(G, playerID, 'broken')
 
   // Guarded before the shuffle, not only inside `performPlay`, so an out-of-turn attempt cannot
   // burn a draw from the randomness plugin and shift every later shuffle in the match.
-  if (ctx.currentPlayer !== playerID || !isDrunkard(G, playerID)) {
+  if (ctx.currentPlayer !== playerID || !(isDrunkard(G, playerID) || isBrokenStatusPlay)) {
     return INVALID_MOVE
   }
 
-  const cardCount = args?.cardCount ?? 0
+  // Forced rather than validated, so a Broken client asking for two cards gets one instead of a
+  // refusal it has no way to act on.
+  const cardCount = isBrokenStatusPlay ? 1 : (args?.cardCount ?? 0)
   if (!Number.isInteger(cardCount) || cardCount <= 0) {
     return INVALID_MOVE
   }
@@ -4164,6 +4423,7 @@ function resolveMimic(context: BlowCowMoveContext) {
     pointRanks: source.scoredSets.map((scoredSet) => scoredSet.rank),
     handCount: source.hand.length,
     wasSeekerPick: source.seekerPickedCharacter !== null,
+    statuses: getPlayerStatuses(G, source.id).map((status) => ({ ...status })),
     borrowedPlayIDs: borrowedPlays.map((play) => play.id),
     hiddenPlayIDs: G.table.plays.filter((play) => play.playerID === playerID).map((play) => play.id),
     borrowedFaceDownCardIDs: borrowedPlays.flatMap((play) => getFaceDownCardsForPlay(play)).map((card) => card.id),
@@ -5348,6 +5608,8 @@ function createStagedBlowCowState(
   const useCharacters = resolveUseCharacters(setupData)
   const characterPool = useCharacters ? resolveCharacterPool(setupData) : []
   const rules = resolveRules(setupData)
+  const initialStatuses = resolveInitialStatuses(setupData)
+  const initialStatusTurns = resolveInitialStatusTurns(setupData)
   const seatOrder = createSeatOrder(normalizedPlayerCount)
   const hostPlayerID = seatOrder[0] ?? '0'
   const history: BlowCowHistoryEvent[] = []
@@ -5360,6 +5622,8 @@ function createStagedBlowCowState(
     useCharacters,
     characterPool,
     rules,
+    initialStatuses,
+    initialStatusTurns,
     seatOrder,
     players: Object.fromEntries(
       seatOrder.map((playerID, seatIndex) => [playerID, createEmptyPlayerState(playerID, seatIndex)]),
@@ -5375,6 +5639,7 @@ function createStagedBlowCowState(
       passStreak: 0,
       lastNonPassingPlayerID: null,
       forcedPlayPlayerID: null,
+      startedTurnNumber: null,
       maxCardsOnTable: getMaxCardsOnTable(normalizedPlayerCount),
     },
     table: {
@@ -5403,7 +5668,7 @@ function createStagedBlowCowState(
     state,
     'system',
     'Room staged',
-    `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, ${formatRulesSummary(rules)}, and is waiting for the host to start the match.`,
+    `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, ${formatRulesSummary(rules)}, ${formatInitialStatusesSummary(initialStatuses, initialStatusTurns)}, and is waiting for the host to start the match.`,
     null,
     0,
   )
@@ -5447,6 +5712,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
   state.round.forcedPlayPlayerID = null
+  state.round.startedTurnNumber = null
   state.round.maxCardsOnTable = getMaxCardsOnTable(shuffledSeatOrder.length)
   state.tableStatus = INITIAL_TABLE_STATUS
   state.telemetry = {
@@ -5479,6 +5745,16 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
     player.leaveEffect = null
     player.seekerPickedCharacter = null
     player.brokenRemovedRuleID = null
+    /*
+     * The lobby's testing lever, and the only source of a status in the game today. Dealt through
+     * `addPlayerStatus` one at a time rather than assigned wholesale, so the opposition between
+     * Tilted and Worried applies here too: a host who picks both gets whichever came first, with no
+     * warning, exactly as an ability handing out the second one would find.
+     */
+    player.statuses = []
+    for (const statusID of state.initialStatuses ?? []) {
+      addPlayerStatus(state, playerID, statusID, state.initialStatusTurns ?? DEFAULT_BLOW_COW_STATUS_TURNS)
+    }
   }
 
   state.round.startingPlayerID = getDefaultStartingPlayerID(state, shuffledSeatOrder[0] ?? state.hostPlayerID) ?? state.hostPlayerID
@@ -5488,7 +5764,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
     state,
     'system',
     'Match initialized',
-    `Shuffled ${shuffledSeatOrder.length} seat(s), selected ${state.deckConfig.selectedRanks.length} standard rank(s) (${state.deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${state.speedMultiplier}x, dealt opening hands, ${state.useCharacters ? 'assigned character cards' : 'left character cards disabled'}, and ${formatPlayerLabel(state, state.round.startingPlayerID)} will act first.`,
+    `Shuffled ${shuffledSeatOrder.length} seat(s), selected ${state.deckConfig.selectedRanks.length} standard rank(s) (${state.deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${state.speedMultiplier}x, dealt opening hands, ${state.useCharacters ? 'assigned character cards' : 'left character cards disabled'}, ${formatInitialStatusesSummary(state.initialStatuses ?? [], state.initialStatusTurns ?? DEFAULT_BLOW_COW_STATUS_TURNS)}, and ${formatPlayerLabel(state, state.round.startingPlayerID)} will act first.`,
     null,
     turnNumber,
   )
@@ -5574,6 +5850,9 @@ export const BlowCowGame = {
     activePlayers: { all: NULL_STAGE },
     onBegin: (context: BlowCowHookContext) => {
       handleTurnStart(context)
+    },
+    onEnd: (context: BlowCowHookContext) => {
+      handleTurnEnd(context)
     },
   },
   moves: {
@@ -5695,6 +5974,12 @@ export const BlowCowGame = {
        * Streamer's penalty unavoidable. That is the cost of the removal, not a special case.
        */
       if (isRuleRemoved(G, 'pass')) {
+        return INVALID_MOVE
+      }
+
+      // Tilted takes Pass off this seat for as long as it lasts, and takes The Foreigner's pass card
+      // with it for the same reason removing the Pass Rule does: there is no pass to hang it on.
+      if (hasStatus(G, playerID, 'tilted')) {
         return INVALID_MOVE
       }
 

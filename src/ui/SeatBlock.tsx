@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react'
 import { FrontCardRow } from './FrontCardRow.tsx'
+import { SeatStatusColumn } from './SeatStatusColumn.tsx'
 import {
   BLOCK_HOVER_ICON_SPRITE,
   BS_TARGET_ICON_SPRITE,
@@ -226,6 +227,12 @@ export function SeatBlock({
             <img alt="" src={seat.characterSprite} />
           </button>
         ) : null}
+
+        {/*
+          * Absolutely placed beside the avatar rather than added to this row's flow, because the
+          * block's height feeds the ring radii and a taller block would move every seat.
+          */}
+        <SeatStatusColumn statuses={seat.statuses} />
       </div>
 
       <div className="seat-block-identity">

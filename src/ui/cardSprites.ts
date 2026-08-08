@@ -18,6 +18,12 @@ const spriteMap = createSpriteMap(spriteModules)
 const rectSpriteMap = createSpriteMap(rectSpriteModules)
 
 export const CARD_BACK_FILENAME = 'back01.png'
+/**
+ * A card that is face up on the table but unreadable to this viewer, which today means the Blind
+ * status. Deliberately not the card back: the card is still face up, and drawing a back would say a
+ * card had been turned over rather than that the viewer cannot make it out.
+ */
+export const UNKNOWN_CARD_FILENAME = 'unknown.png'
 
 const rankLabels: Record<string, string> = {
   '02': '2',
@@ -50,6 +56,10 @@ export function getFrontCardSprite(filename: string) {
 export function getCardLabel(filename: string) {
   if (filename === CARD_BACK_FILENAME) {
     return 'Face-down card'
+  }
+
+  if (filename === UNKNOWN_CARD_FILENAME) {
+    return 'Unreadable card'
   }
 
   if (filename === 'Joker1.png' || filename === 'Joker2.png') {

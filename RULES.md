@@ -90,6 +90,7 @@
 
 ### Play
 - Put down at most 2 cards face down on the table in front of you.
+- A status can take this action away or constrain what it may claim. See `Statuses`.
 - Claim that the card or cards you played are of the trump rank.
 - You may not play cards if doing so would make the number of cards on the table exceed `MaxCardsOnTable`.
 - `Play` is not available when there are already at least `MaxCardsOnTable` cards on the table.
@@ -101,6 +102,7 @@
 
 ### Pass
 - End your turn without playing cards or calling anything.
+- A status can take this action away. See `Statuses`.
 - If there are `n` consecutive passes, the round ends immediately.
 - When a round ends this way, each player takes back the card(s) in front of them and adds them back to their hand.
 - The player who passed last becomes the starting player of the next round.
@@ -317,6 +319,7 @@
 | Call Reset Rule | no | yes |
 | Rank Change Rule | yes | no |
 | No Cheating Rule | yes | no |
+| Status Rule | yes | no |
 
 ### Removed Rule Cards
 - `Reverse Rule`: the cards on the table never reverse a punishment. Whoever the default names takes
@@ -335,6 +338,9 @@
   the same, the direction tell is the same, and each player still gets one accusation per round.
   The card itself says only the first sentence — spelling the cheats out on a card everybody can
   read would hand new players a checklist and take the discovery out of it.
+- `Status Rule`: status counters are still shown but never go down, so every status a player is given
+  lasts for the rest of the match. Removing it mid-match freezes whatever counters are standing at
+  that moment; it does not clear anything and it does not hand anybody a status.
 
 #### Character Interactions With Removed Rules
 A removed rule takes any ability built on top of it with it. This is a consequence of the removal,
@@ -363,6 +369,10 @@ not a special case:
   The Cat is the one character it partly cuts across — their own-turn flip is still the only
   legal one, and it is still the only flip that leaves nothing for `Accuse` to catch, but reaching
   into somebody else's turn now makes them a cheat like anyone else.
+- `Status Rule` removed: this is the one removal that makes an effect stronger rather than weaker.
+  Nothing loses an ability; every status simply stops expiring, so a `Tilted` handed out on turn
+  three is still on that player at the end of the match. It also means the removal is worth reading
+  as a timing decision — a rule torn up mid-match freezes the counters that happen to be standing.
 
 ### Upgraded Rule Cards
 - `Max Cards On Table Rule+`: `MaxCardsOnTable` is doubled for every player count.
@@ -383,6 +393,52 @@ not a special case:
   round.
 
 None of the upgraded variants above are enforced yet.
+
+## Statuses
+A status is a temporary condition on a single player that removes or constrains one action. Statuses
+are public: every player can see who is under what, and for how much longer.
+
+- A player holds at most **2** statuses at a time.
+- Every status carries a counter. It goes down by 1 at the end of that player's own turn, and the
+  status wears off when it reaches 0. Another player's turn ending costs nothing. This is the
+  `Status Rule`; without it the counters never move and every status is permanent.
+- Statuses are counted in turns, not rounds. A status handed out near the end of a round carries over
+  into the next one.
+- No status ever forces an action. A status that makes `Play` impossible simply leaves the player
+  with their other actions.
+
+| Status | Effect |
+| --- | --- |
+| Tilted | Cannot take the `Pass` action. |
+| Worried | Cannot take the `Play` action. |
+| Mad | Must lie. A `Play` cannot be truthful, but you are never forced to play. |
+| Nervous | Must be truthful. A `Play` cannot be a lie, but you are never forced to play. |
+| Blind | Cannot see any face-up card on the table. |
+| Broken | `Play` sends one random card from your hand. You still choose the trump rank. |
+
+Notes on the edges:
+
+- Truthfulness for `Mad` and `Nervous` is the same judgement `Call BS` makes: every played card must
+  be of the claimed rank, and no rule may have been broken to make the play. A cheat that breaks a
+  rule is therefore a lie for these two as well.
+- `Mad` on a player holding only trump-rank cards leaves them no legal `Play`. So does holding `Mad`
+  and `Nervous` at once. Both are legal positions, not stalemates: `Pass`, `Call BS` and
+  `Call Reset` are unaffected.
+- `Tilted` and `Worried` never sit on the same player. Holding either one makes that player immune to
+  the other, so the status already in place wins and the second is simply never applied. This is
+  deliberately unannounced: no card says it, nothing in the game reports the refusal, and the lobby
+  will let a host pick both and hand out only the first. It is refused ahead of the two-status cap,
+  so it is a real immunity rather than a player who happened to be full.
+- `Tilted` removes `Pass`, and with it The Foreigner's pass-card pickup, for exactly the reason
+  removing the `Pass Rule` does.
+- `Worried` removes the `Play` action. It does not stop a player from cheating cards onto the table.
+- `Blind` is lifted while a `Call BS` or `Call Reset` reveal is running, so a blind caller can still
+  resolve the challenge they started.
+- `Broken` takes the choice of card, not the action. The player still chooses the trump rank when the
+  round has none, and the play is not The Drunkard's.
+
+Nothing in the game inflicts a status yet. The only source is the host's testing panel in the lobby,
+which starts every player with the same statuses at the same counter.
 
 ## Final Ranking
 - First place goes to the player with the fewest points.

@@ -36,6 +36,14 @@ import {
   type BlowCowRuleStatus,
   type BlowCowRulesState,
 } from './game/blowCowRules.ts'
+import {
+  BLOW_COW_MAX_STATUSES_PER_PLAYER,
+  BLOW_COW_STATUS_DEFINITIONS,
+  DEFAULT_BLOW_COW_STATUS_TURNS,
+  MAX_BLOW_COW_STATUS_TURNS,
+  type BlowCowStatusID,
+} from './game/blowCowStatuses.ts'
+import { getStatusSprite } from './ui/statusSprites.ts'
 import { getRoomClearBlockReason, hasRoomGameEnded } from './lobbyRooms.ts'
 import { BlowCowBoard } from './ui/BlowCowBoard.tsx'
 import { RuleCardDeck } from './ui/RuleCardDeck.tsx'
@@ -278,9 +286,13 @@ function App() {
     () => [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES],
   )
   const [selectedRuleStatuses, setSelectedRuleStatuses] = useState<BlowCowRulesState>(createDefaultRulesState)
-  // The rule cards are twelve illustrated tiles. Inline they made the left column several screens
+  // The rule cards are a deck of illustrated tiles. Inline they made the left column several screens
   // tall, so they live behind a button in a centred overlay, the same one the match uses.
   const [isHouseRulesOpen, setIsHouseRulesOpen] = useState(false)
+  // A testing lever rather than a game mode: the same statuses go on every seat at match start, since
+  // nothing in the game hands one out yet.
+  const [selectedInitialStatuses, setSelectedInitialStatuses] = useState<BlowCowStatusID[]>([])
+  const [initialStatusTurns, setInitialStatusTurns] = useState(DEFAULT_BLOW_COW_STATUS_TURNS)
   const [matches, setMatches] = useState<LobbyMatch[]>([])
   const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(readStoredActiveRoom)
   // A room that came from storage has to be proven to still exist; one this session just joined does
@@ -314,6 +326,10 @@ function App() {
     ...(useCharacters && !isUsingDefaultCharacterPool ? { characterPool: effectiveCharacterPool } : {}),
     // Omitted while every rule is active, the same way the full character pool is.
     ...(isDefaultRulesSelection(selectedRuleStatuses) ? {} : { rules: selectedRuleStatuses }),
+    // Omitted entirely while nothing is selected, so an ordinary room's setup data is unchanged.
+    ...(selectedInitialStatuses.length > 0
+      ? { initialStatuses: selectedInitialStatuses, initialStatusTurns }
+      : {}),
   }
   const changedRuleDefinitions = BLOW_COW_RULE_DEFINITIONS
     .filter((definition) => selectedRuleStatuses[definition.id] !== 'active')
@@ -667,6 +683,23 @@ function App() {
     })
   }
 
+  /*
+   * The cap is enforced here as well as on the chips, because the server's sanitiser truncates
+   * silently and a selection that quietly lost its third entry would be worse than one that could
+   * never grow a third.
+   */
+  const toggleInitialStatus = (statusID: BlowCowStatusID) => {
+    setSelectedInitialStatuses((previousStatuses) => {
+      if (previousStatuses.includes(statusID)) {
+        return previousStatuses.filter((entry) => entry !== statusID)
+      }
+
+      return previousStatuses.length >= BLOW_COW_MAX_STATUSES_PER_PLAYER
+        ? previousStatuses
+        : [...previousStatuses, statusID]
+    })
+  }
+
   const setRuleStatus = (ruleID: BlowCowRuleID, status: BlowCowRuleStatus) => {
     setSelectedRuleStatuses((previousRuleStatuses) => ({ ...previousRuleStatuses, [ruleID]: status }))
   }
@@ -954,6 +987,75 @@ function App() {
                   Open Rule Cards
                 </button>
               </div>
+            </div>
+
+            {/*
+              * A testing lever, and labelled as one. Nothing in the game inflicts a status yet, so
+              * this is the only way to see one on the table.
+              */}
+            <div className="manual-rank-panel">
+              <div className="manual-rank-header">
+                <div>
+                  <p className="panel-kicker">Testing</p>
+                  <h3>Start Every Player With Statuses</h3>
+                  <p className="character-pool-copy">
+                    Statuses tick down at the end of their owner's turn and wear off at zero. A player
+                    holds at most {BLOW_COW_MAX_STATUSES_PER_PLAYER} at a time.
+                  </p>
+                </div>
+                <span className="rank-selection-count">
+                  {selectedInitialStatuses.length}/{BLOW_COW_MAX_STATUSES_PER_PLAYER} selected
+                </span>
+              </div>
+
+              <div className="character-chip-grid">
+                {BLOW_COW_STATUS_DEFINITIONS.map((definition) => {
+                  const isSelected = selectedInitialStatuses.includes(definition.id)
+                  const isAtCap = !isSelected
+                    && selectedInitialStatuses.length >= BLOW_COW_MAX_STATUSES_PER_PLAYER
+
+                  return (
+                    <button
+                      aria-pressed={isSelected}
+                      aria-describedby={`status-chip-tooltip-${definition.id}`}
+                      className={`character-chip status-chip ${isSelected ? 'selected' : ''}`}
+                      disabled={isBusy || isAtCap}
+                      key={definition.id}
+                      onClick={() => {
+                        toggleInitialStatus(definition.id)
+                      }}
+                      type="button"
+                    >
+                      <img alt="" className="status-chip-sprite" src={getStatusSprite(definition.id)} />
+                      {definition.title}
+                      <span
+                        className="character-chip-tooltip"
+                        id={`status-chip-tooltip-${definition.id}`}
+                        role="tooltip"
+                      >
+                        {definition.description}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              <label className="status-turns-field">
+                <span>Turns</span>
+                <input
+                  disabled={isBusy || selectedInitialStatuses.length === 0}
+                  max={MAX_BLOW_COW_STATUS_TURNS}
+                  min={1}
+                  onChange={(event) => {
+                    const nextTurns = Number.parseInt(event.target.value, 10)
+                    setInitialStatusTurns(Number.isNaN(nextTurns)
+                      ? DEFAULT_BLOW_COW_STATUS_TURNS
+                      : Math.min(MAX_BLOW_COW_STATUS_TURNS, Math.max(1, nextTurns)))
+                  }}
+                  type="number"
+                  value={initialStatusTurns}
+                />
+              </label>
             </div>
 
             <fieldset className="deck-mode-group">

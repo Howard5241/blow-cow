@@ -125,8 +125,8 @@ export function RulesOverlay({
 
 /**
  * The Broken's start-of-game choice. Built on the same deck as the read-only Rules panel rather than
- * a list of names, because the decision is "which of these twelve cards do I tear up" and the cards
- * carry the copy that answers it.
+ * a list of names, because the decision is "which of these cards do I tear up" and the cards carry
+ * the copy that answers it.
  *
  * Mounted only on The Broken's own client. Like The Seeker's picker it is dismissible and has no
  * deadline: the match runs on behind it, and a choice that expired would punish an unlucky player

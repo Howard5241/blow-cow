@@ -45,7 +45,7 @@ main.app-shell
 | Lobby Grid | `section` | `lobby-grid` | Splits setup/create and join/browse into two panels. | Main working area. |
 | Player Setup Panel | `article` | `panel stack-gap` | Holds the display-name field and create-room form. | Left column of Lobby Grid. |
 | Display Name Field | `label` + `input` | `field` | Sets the local player name. | First control in Player Setup Panel. |
-| Create Room Form | `form` | `stack-gap` | Groups seats, speed, character-card mode, optional character pool selection, rank mode, optional manual ranks, and the create action. | Below Display Name Field. |
+| Create Room Form | `form` | `stack-gap` | Groups seats, speed, character-card mode, optional character pool selection, house rules, starting statuses, rank mode, optional manual ranks, and the create action. | Below Display Name Field. |
 | Seats Selector | `label` + `select` | `field` | Chooses room size. | First selector in Create Room Form. |
 | Game Speed Selector | `label` + `select` | `field` | Chooses the room speed multiplier. | After Seats Selector. |
 | Character Cards Group | `fieldset` | `deck-mode-group` | Lets the room creator enable or disable character cards for the match. | After Game Speed Selector. |
@@ -65,6 +65,10 @@ main.app-shell
 | Rule Card Deck | shared component | `rule-card-grid`, `rule-card-pager` | The same paged deck of illustrated rule cards the in-match Rules panel uses, four to a page. | Body of House Rules Overlay. |
 | Rule Status Options | `div` | `rule-status-options` | Groups the status buttons a rule supports. | Footer of each rule card in the deck. |
 | Rule Status Option | `button` | `rule-status-option`, `selected` | Selects one status. Only the statuses that rule defines are rendered, so a rule that cannot be removed shows no `Removed` button at all. | Repeated inside Rule Status Options. |
+| Initial Statuses Panel | `div` | `manual-rank-panel` | Testing lever that starts every player under the same statuses. Nothing in the game inflicts one yet, so this is the only source. | Below House Rules Panel, always shown. |
+| Initial Status Count | `span` | `rank-selection-count` | Shows `n/2 selected`, the per-player cap. | Right side of Initial Statuses Panel header. |
+| Status Chip | `button` | `character-chip status-chip` | Toggles one status on or off and shows its sprite beside its name. Unselected chips are disabled once two are picked, so the cap can never be exceeded rather than being silently truncated by the server. Its effect text is carried by the shared Character Chip Tooltip. | Repeated inside the panel's Character Chip Grid. |
+| Status Turns Field | `label` + `input[type=number]` | `status-turns-field` | Sets the starting counter shared by every selected status, from 1 to 20. Disabled while nothing is selected. | Below the status chips. |
 | Standard Ranks Group | `fieldset` | `deck-mode-group` | Switches between default and manual rank selection. | After Game Speed Selector. |
 | Rank Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Default` or `Manual` rank mode. | Repeated inside Standard Ranks Group. |
 | Rank Mode Tooltip | `span` | `deck-mode-tooltip` | Shows the mode description on hover or focus. | Nested inside each Rank Mode Option. |

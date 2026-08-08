@@ -15,8 +15,9 @@ const RULE_STATUS_TAGS = {
 } as const
 
 /*
- * Cards per page. Twelve rules split evenly into three pages of a single four-column row, which is
- * what keeps the panel shorter than the viewport instead of scrolling.
+ * Cards per page, and load-bearing: four is one four-column row, which is what keeps the panel
+ * shorter than the viewport instead of scrolling. A second row overflows `board-overlay-panel` and
+ * brings back the scrollbar the paging exists to avoid, so this does not grow with the rule count.
  */
 const RULE_CARDS_PER_PAGE = 4
 

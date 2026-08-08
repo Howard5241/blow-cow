@@ -17,9 +17,12 @@ import {
   getManipulationTargetPlayerIDs,
   getMimicryTargetPlayerID,
   getSeekerCharacterChoices,
+  getPlayerStatuses,
   getTableCardCount,
+  hasStatus,
   isDefyDestroyableCard,
   isRuleRemoved,
+  isTrumpCardInMatch,
   sortCards,
   type BlowCowAccusation,
   type BlowCowAccuseDreamerArgs,
@@ -54,9 +57,17 @@ import {
   type BlowCowState,
 } from '../game/blowCowGame.ts'
 import type { BlowCowRuleID } from '../game/blowCowRules.ts'
+import { getStatusDefinition, type BlowCowStatusID } from '../game/blowCowStatuses.ts'
 import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.ts'
+import { getStatusSprite } from './statusSprites.ts'
 import { getCharacterCardSprite, getCharacterCardSpriteFrames } from './characterCardSprites.ts'
-import { CARD_BACK_FILENAME, getCardLabel, getCardSprite, getFrontCardSprite } from './cardSprites.ts'
+import {
+  CARD_BACK_FILENAME,
+  UNKNOWN_CARD_FILENAME,
+  getCardLabel,
+  getCardSprite,
+  getFrontCardSprite,
+} from './cardSprites.ts'
 import { getAvatarSprite } from './avatarSprites.ts'
 import { EMOTE_SPRITES, getEmoteSprite } from './emoteSprites.ts'
 import { CharacterCardSpriteImage } from './CharacterCardSpriteImage.tsx'
@@ -98,6 +109,7 @@ import type {
   MatchPlayer,
   PointsFlashDirection,
   SeatRow,
+  SeatStatus,
 } from './boardTypes.ts'
 
 /** Shared by all four action-button render branches so the icon markup is written once. */
@@ -108,6 +120,25 @@ function ActionButtonContent({ icon, label }: { icon: string; label: string }) {
       <span className="action-button-label">{label}</span>
     </>
   )
+}
+
+/**
+ * Statuses as `G` stores them, turned into what a seat block draws. The copy comes from the status
+ * definitions rather than from `G`, so the wording is written down once and the wire carries an id
+ * and a counter and nothing else.
+ */
+function toSeatStatuses(statuses: readonly { id: BlowCowStatusID; turnsRemaining: number }[]): SeatStatus[] {
+  return statuses.map((status) => {
+    const definition = getStatusDefinition(status.id)
+
+    return {
+      id: status.id,
+      title: definition.title,
+      description: definition.description,
+      sprite: getStatusSprite(status.id),
+      turnsRemaining: status.turnsRemaining,
+    }
+  })
 }
 
 type HandCard = {
@@ -1947,6 +1978,18 @@ export function BlowCowBoard({
       && actionableBSTargetSeatID
       && G.players[actionableBSTargetSeatID].hand.length === 0,
   )
+  /*
+   * The viewer's own statuses, mirroring the server guards so a button greys with a reason instead of
+   * being pressed into an `INVALID_MOVE`. The server is still the authority for every one of them.
+   */
+  const viewerStatusIDs = new Set<BlowCowStatusID>(
+    currentSeatID ? getPlayerStatuses(G, currentSeatID).map((status) => status.id) : [],
+  )
+  const isTilted = viewerStatusIDs.has('tilted')
+  const isWorried = viewerStatusIDs.has('worried')
+  const isMad = viewerStatusIDs.has('mad')
+  const isNervous = viewerStatusIDs.has('nervous')
+  const isBrokenStatus = viewerStatusIDs.has('broken')
   const isDreamer = currentPlayerState?.character === 'The Dreamer'
   /*
    * Mirrors the server's `canCheat`. With the No Cheating Rule gone the licence stops belonging to a
@@ -2022,23 +2065,48 @@ export function BlowCowBoard({
   const isRepeatingPreviousTrump = !isRuleRemoved(G, 'rankChange')
     && selectedTrumpRank === G.round.previousTrumpRank
   const canRepeatPreviousTrump = canCheat && isRepeatingPreviousTrump
+  /*
+   * The Mad and Nervous mirror. It judges the selection by its cards alone, where the server also
+   * folds in the cheat modifiers, so a cheat that turns a truthful-looking play into a lie is caught
+   * server-side rather than here. That is the safe direction to be wrong in: a play this lets through
+   * is refused, never a play this refuses that would have been legal.
+   */
+  const claimedRankForSelection = currentTrump ?? selectedTrumpRank
+  // Off the raw hand rather than the hand strip, which carries sprites only. The character is the
+  // mover's even under a conspiracy, exactly as it is on the server.
+  const selectedHandCards = handSourcePlayerState?.hand.filter((card) => selectedCardIDs.includes(card.id)) ?? []
+  const isSelectionTruthful = selectedHandCards.length > 0
+    && selectedHandCards.every((card) => isTrumpCardInMatch(G, card, claimedRankForSelection, currentPlayerState?.character))
+  // Broken chooses the card itself, so nothing the player selected is being judged.
+  const violatesTruthStatus = !isBrokenStatus
+    && ((isMad && isSelectionTruthful) || (isNervous && !isSelectionTruthful))
+  // Broken keeps the button, because it still sends a play — just not the selected one. Every other
+  // gate below is about the selection, so Broken skips them too.
   const canSelectTrumpAndPlay = isInteractiveTurn
     && !isFinalTwoResolutionTurn
+    && !isWorried
     && currentTrump === null
-    && selectedCards.length > 0
-    && (canCheat || selectedCards.length <= 2)
     && (!isRepeatingPreviousTrump || canRepeatPreviousTrump)
-    && (canCheat || hasTableRoomForSelection)
+    && (isBrokenStatus
+      ? handCards.length > 0
+      : selectedCards.length > 0
+        && !violatesTruthStatus
+        && (canCheat || selectedCards.length <= 2)
+        && (canCheat || hasTableRoomForSelection))
   // `openEncore` gates the two play buttons and nothing else in the row: an encore takes away the
   // play it followed, not the turn. Select Trump needs no gate — any play that earns an encore has
   // already left the round with a trump rank.
   const canPlayCards = isInteractiveTurn
     && !isFinalTwoResolutionTurn
+    && !isWorried
     && !openEncore
     && currentTrump !== null
-    && selectedCards.length > 0
-    && (canCheat || selectedCards.length <= 2)
-    && (canCheat || hasTableRoomForSelection)
+    && (isBrokenStatus
+      ? handCards.length > 0 && (isTableLimitRemoved || totalCardsOnTable < maxCardsOnTable)
+      : selectedCards.length > 0
+        && !violatesTruthStatus
+        && (canCheat || selectedCards.length <= 2)
+        && (canCheat || hasTableRoomForSelection))
   const maxRandomPlayCardCount = Math.min(
     2,
     handCards.length,
@@ -2051,6 +2119,7 @@ export function BlowCowBoard({
   const canPlayRandomCards = isInteractiveTurn
     && isDrunkard
     && !isFinalTwoResolutionTurn
+    && !isWorried
     && !openEncore
     && maxRandomPlayCardCount > 0
     && (currentTrump !== null || !isRepeatingPreviousTrump)
@@ -2089,7 +2158,7 @@ export function BlowCowBoard({
     && !currentPlayerState?.hasLeft
   // An open conspiracy owes the table a play, so every other way out of the turn is closed. The
   // borrowed hand still feeds the two play buttons, which is why only these three are gated.
-  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !openConspiracy && !isForcedToPlay
+  const canPass = isInteractiveTurn && !isFinalTwoResolutionTurn && !isPassRemoved && !isTilted && !openConspiracy && !isForcedToPlay
   const selectedPlayCallout = currentTrump && selectedCards.length > 0
     ? buildPlayCalloutText(currentTrump, selectedCards.length)
     : null
@@ -2757,6 +2826,19 @@ export function BlowCowBoard({
     }
   }, [])
 
+  /*
+   * Blind, and the one status that changes nothing but what this client draws. The cards are already
+   * public to every other seat, so nothing secret is being trusted to the browser — the sprite is
+   * simply swapped for `unknown.png` on the way to the board.
+   *
+   * Lifted while a BS or Reset reveal is running. Those procedures are the caller turning the table
+   * over one card at a time, and a blind caller who could not read what they revealed would have no
+   * way to resolve a challenge they started.
+   */
+  const isViewerBlind = Boolean(currentSeatID && hasStatus(G, currentSeatID, 'blind'))
+    && !isBSSequenceActive
+    && !isResetSequenceActive
+
   const seatRows: SeatRow[] = G.seatOrder.map((seatID) => {
     const player = G.players[seatID]
     const disguise = wornMimicry?.playerID === seatID ? wornMimicry : null
@@ -2784,7 +2866,9 @@ export function BlowCowBoard({
       return {
         id: overlayCardID,
         cardID: card.id,
-        sprite: card.sprite,
+        // Only the face-up half is rewritten, so `faceDown` is untouched and the flip watcher built
+        // on `getDisplayedFrontCards` never sees a card change sides because somebody went blind.
+        sprite: isViewerBlind && !faceDown ? UNKNOWN_CARD_FILENAME : card.sprite,
         faceDown,
         isDeparted: departedPunishmentCardIDSet.has(overlayCardID) || departedResetCardIDSet.has(overlayCardID),
         isFlipping: revealFlippingCardIDSet.has(overlayCardID),
@@ -2794,8 +2878,9 @@ export function BlowCowBoard({
         // Only the caller can flip, and only in the block currently pulled to the centre.
         isRevealable: isRevealCaller && seatID === focusedSeatID && faceDown,
         // A masked card is rewritten to rank Joker before it reaches the client, so an
-        // unflipped card can never light up here.
-        isTrumpHighlighted: Boolean(bsResolution) && !faceDown && G.round.trumpRank !== null
+        // unflipped card can never light up here. Blind puts it out too — a highlight would read the
+        // trump straight through the blindfold.
+        isTrumpHighlighted: !isViewerBlind && Boolean(bsResolution) && !faceDown && G.round.trumpRank !== null
           && countsTowardReverseRule(card, G.round.trumpRank, G.players[play.playerID].character),
       }
     })
@@ -2828,6 +2913,8 @@ export function BlowCowBoard({
       name: getSeatDisplayName(identitySeatID, currentSeatID, playerName, playersFromRoom),
       pointRanks: disguise ? disguise.pointRanks : player.scoredSets.map((scoredSet) => scoredSet.rank),
       points: disguise ? disguise.points : player.points,
+      // Copied like every other number on a disguised block, so the two never differ here.
+      statuses: toSeatStatuses(disguise ? disguise.statuses ?? [] : getPlayerStatuses(G, seatID)),
       wasSeekerPick: disguise ? disguise.wasSeekerPick : player.seekerPickedCharacter !== null,
     }
   })
@@ -3160,6 +3247,17 @@ export function BlowCowBoard({
   }
 
   const sendSelectionToTable = (nextTrump: BlowCowRank | null) => {
+    /*
+     * Broken takes the choice of card away but not the action, so Play still sends a play — one
+     * random card, through the same move The Drunkard uses. The rank is still the player's, which is
+     * why this branches on the selection rather than replacing the button.
+     */
+    if (isBrokenStatus) {
+      moves.playRandom({ cardCount: 1, trumpRank: nextTrump } satisfies BlowCowPlayRandomArgs)
+      setSelectedCardIDs([])
+      return
+    }
+
     if (selectedCards.length === 0 || (!canCheat && selectedCards.length > 2)) {
       return
     }
@@ -3986,9 +4084,26 @@ export function BlowCowBoard({
     '--front-card-entry-y': `${card.moveY}px`,
   } as CSSProperties)
 
+  /*
+   * The status half of both play tooltips, written once because Worried, Mad, Nervous and Broken say
+   * the same thing whether a trump is being chosen or already exists. Null when no status has
+   * anything to say, so the existing chains below stay in charge of everything else.
+   */
+  const playStatusDescription = isWorried
+    ? 'Worried: you cannot take the Play action while this status lasts.'
+    : isBrokenStatus
+    ? 'Broken: one random card from your hand goes down. Your selection is ignored, but the trump rank is still yours.'
+    : isMad && isSelectionTruthful
+    ? 'Mad: you must lie. Select at least one card that is not the claimed rank, or take a different action.'
+    : isNervous && !isSelectionTruthful && selectedCards.length > 0
+    ? 'Nervous: you must be truthful. Every selected card has to be the claimed rank, or take a different action.'
+    : null
+
   const selectTrumpAction = {
     description: isResolutionSequenceActive
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+      : playStatusDescription
+      ? playStatusDescription
       : openConspiracy
       ? `Choose ${selectedTrumpRank} as trump and play up to 2 cards out of ${conspireTargetLabel}'s hand. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump === null
@@ -4005,7 +4120,11 @@ export function BlowCowBoard({
     key: 'select-trump',
     // Just `Play`, like its counterpart. The rank selector sitting beside it is what says a trump is
     // being chosen, so naming that in the label too only made the widest button in the row wider.
-    label: selectedTrumpPlayCallout
+    // A Broken player is not playing what they picked, and a button that quietly discards a selection
+    // reads as a bug, so it says so.
+    label: isBrokenStatus
+      ? 'Play 1 Random'
+      : selectedTrumpPlayCallout
       ? `Play "${selectedTrumpPlayCallout}"`
       : 'Play',
     onClick: () => {
@@ -4018,6 +4137,8 @@ export function BlowCowBoard({
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
       : openEncore
       ? 'The Clown kept the turn after that play, and the action it bought cannot be another play. Take a different one.'
+      : playStatusDescription
+      ? playStatusDescription
       : openConspiracy
       ? `Play the selected cards out of ${conspireTargetLabel}'s hand and claim they are ${currentTrump}. They lose the cards; the play is yours, and so is any BS call it draws.`
       : currentTrump
@@ -4028,7 +4149,9 @@ export function BlowCowBoard({
     disabled: !canPlayCards,
     icon: PLAY_ICON_SPRITE,
     key: 'play',
-    label: selectedPlayCallout ? `Play \"${selectedPlayCallout}\"` : 'Play',
+    label: isBrokenStatus
+      ? 'Play 1 Random'
+      : selectedPlayCallout ? `Play \"${selectedPlayCallout}\"` : 'Play',
     onClick: () => {
       sendSelectionToTable(null)
     },
@@ -4039,6 +4162,8 @@ export function BlowCowBoard({
       ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
       : openEncore
       ? 'The Clown kept the turn after that play, and the action it bought cannot be another play. Take a different one.'
+      : isWorried
+      ? 'Worried: you cannot take the Play action while this status lasts.'
       : currentTrump === null
       ? isRepeatingPreviousTrump
         ? `${selectedTrumpRank} was the previous round trump and cannot be selected again. Play Random still has to choose a new trump first.`
@@ -4188,6 +4313,8 @@ export function BlowCowBoard({
         ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
         : isPassRemoved
         ? 'The Pass Rule was removed from this match, so Pass is not an available action.'
+        : isTilted
+        ? 'Tilted: you cannot take the Pass action while this status lasts.'
         : isForcedToPlay
         ? 'The Invisible Hand opened this round for you, so you must play this turn and may not pass.'
         : isFinalTwoResolutionTurn

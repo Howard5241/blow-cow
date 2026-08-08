@@ -80,6 +80,12 @@ main.app-shell.table-mode
             img.seat-bs-target-mark?
             span.seat-bs-verdict-label?
             button.seat-character-badge?
+            div.seat-status-column?
+              span.seat-status-badge*
+                img
+                span.seat-status-count
+              span.seat-status-tooltip
+                span.seat-status-tooltip-row*
           div.seat-block-identity
             strong.seat-block-name
             div.seat-block-meta
@@ -222,6 +228,9 @@ main.app-shell.table-mode
 | Seat Avatar | `img` | `seat-avatar-image` | Shows the seat's avatar sprite. | Inside Seat Block Top. |
 | Seat Emote | `img` | `seat-emote` | Starts over its owner's avatar, grows and travels into the block's outer-side slot, then shrinks back into the avatar. Several new emotes can animate independently. | Inside the absolute Seat Emote Layer in Seat Block Top. |
 | Seat Character Badge | `button` | `seat-character-badge` | Opens the enlarged character-card overlay for that seat. | Corner of Seat Block Top when character cards are enabled. |
+| Seat Status Column | `div` | `seat-status-column` | The status effects this seat is under, at most two, stacked vertically. Absolutely placed so it cannot change the block's height, which the ring radii are measured from. A disguised block shows the copied seat's statuses, like every other number on it. | Conditional child of Seat Block Top, pinned to the right of the avatar. Hoverable and focusable; it swallows click and Enter so reading a status never selects the seat. |
+| Seat Status Badge | `span` | `seat-status-badge` | One status sprite, with `seat-status-count` — the turns left before it wears off — pinned to its bottom-right corner. | Repeated inside Seat Status Column, once per status. |
+| Seat Status Tooltip | `span` | `seat-status-tooltip` | One panel listing every status on the seat: sprite, name, turns left, and what the status does. Opens on hovering or focusing the whole column, not one badge. Always points at the hub, like Seat Target Actions, so it cannot run off the edge of the screen. While it is open, Seat Target Actions stands down, since both want that side. | Conditional child of Seat Status Column. |
 | Seat Identity | `div` | `seat-block-identity` | Holds the player name, state tags, and the action callout. | Second block inside Seat Block. |
 | Player Name Anchor | `strong` | `seat-block-name`, `data-punishment-target-name` | Displays the player name and anchors punishment-card travel. | Inside Seat Identity. |
 | Seat / State Tag | `span` | `seat-tag` | Shows the seat number and the connection state (`Connected`, `Offline`, or `Left`). The seat number belongs to the chair rather than to whoever is sitting in it, so a Mimic swap never moves one. There is no BS-target tag; the live target is shown only through the `target-seat` block highlight and the outlined front cards. | Repeated inside Seat Identity. |
@@ -288,6 +297,8 @@ main.app-shell.table-mode
 - The board rotates through four dark felt gradients at round boundaries. The palette order is shuffled from the match id and then cycled, so every client sees the same colour and adjacent rounds never repeat; the transition is three typed CSS custom properties, not a timer or per-frame React update.
 - `board-bs-flash` is keyed on `G.bsResolution.id`, so a new call restarts its animation and the element unmounts when the resolution clears. That needs no state and no timeout.
 - There is no announcement banner. Neither procedure narrates itself in prose: the focused block, the flipped cards, and the BS verdict label carry the whole story, which is also what keeps the middle of the felt clear for the focused Seat Block to travel into. The transient fail message is rendered at board level and floats over the felt rather than sitting in the hub's column, so appearing and clearing never reflows the trump badge or the direction control.
+- The Seat Status Column is the only readout that is drawn from a per-player list rather than a number, and the only one whose tooltip covers several things at once — hence one panel for the stack instead of one bubble per badge. It takes the same hub-facing placement as Seat Target Actions and Player Action Callout, which is what keeps it on screen at every seat angle without any measurement; the collision between the two is resolved by the action bubble hiding while the column is hovered, since the column is what the pointer is actually on.
+- The Blind status is a display effect and lives entirely in the board. Every face-up Front Card is drawn with `unknown.png` for a blind viewer, and the `trump-card` glow is suppressed with it, since a highlight would read the trump straight through the blindfold. `faceDown` is deliberately untouched, so the flip watcher never sees a card change sides because somebody went blind. It is lifted while a BS or Reset procedure is running. Nothing secret is being trusted to the client here: a face-up table card is already public to every other seat.
 - Player Action Callout sits outside its block, on the same hub-facing side as Seat Target Actions. That is what keeps a bubble on a far-right seat from running off the board and being clipped by the board's `overflow: hidden`. It is layered below the action bubble, so the buttons win if the two ever coincide.
 - Callouts are per seat and never expire on a timer. A seat's line is cleared only when that player starts a turn, says something else, or a round ends — so an exchange like an accusation and its denial stays legible with both bubbles up at once, and what everyone last said is still readable while a slow turn plays out. `showPlayerCallout` writes into a `Record<seatID, …>`; two small effects keyed on `ctx.currentPlayer`/`ctx.turn` and on `G.round.roundNumber` do the clearing.
 - Every callout's wording is picked from the id of whatever caused it rather than at random, so all clients agree. That matters far more now than it did with a 3.6-second bubble: a pass line can stay on screen for the rest of the round.

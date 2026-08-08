@@ -22,6 +22,7 @@ export const BLOW_COW_RULE_IDS = [
   'callReset',
   'rankChange',
   'noCheating',
+  'status',
 ] as const
 
 export type BlowCowRuleID = (typeof BLOW_COW_RULE_IDS)[number]
@@ -144,6 +145,14 @@ export const BLOW_COW_RULE_DEFINITIONS: readonly BlowCowRuleDefinition[] = [
       'Nobody may break the rules of the game. Only a player permitted to cheat may be accused of cheating.',
     removedDescription:
       'Anyone may cheat, and anyone may be accused of it.',
+  },
+  {
+    id: 'status',
+    title: 'Status Rule',
+    description:
+      'Every status carries a counter. It goes down by 1 at the end of its owner\'s turn, and the status wears off when the counter reaches 0.',
+    removedDescription:
+      'Counters are still shown but never go down, so every status a player is given lasts for the rest of the match.',
   },
 ]
 

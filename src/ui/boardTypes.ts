@@ -27,6 +27,15 @@ export type FrontCard = {
   isTrumpHighlighted: boolean
 }
 
+/** One status effect as a seat block draws it: a sprite, a counter, and the copy its tooltip reads. */
+export type SeatStatus = {
+  id: string
+  title: string
+  description: string
+  sprite: string
+  turnsRemaining: number
+}
+
 export type SeatRow = {
   id: string
   seatIndex: number
@@ -48,6 +57,11 @@ export type SeatRow = {
   name: string
   pointRanks: string[]
   points: number
+  /**
+   * The statuses this block is under. Under a Mimic disguise these are the copied seat's, like every
+   * other number on the block, rather than the player really sitting there.
+   */
+  statuses: SeatStatus[]
   /** This seat started as The Seeker and traded that card in for the one it shows now. */
   wasSeekerPick: boolean
 }
