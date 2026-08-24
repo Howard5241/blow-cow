@@ -1,0 +1,94 @@
+name: CI
+
+# Runs on every push to any branch, on pull requests, and on demand from the
+# Actions tab. Pushing a branch and then opening a PR from it will trigger two
+# runs; drop the `pull_request` trigger if that becomes noisy.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the run already in flight obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck, gameplay checks, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # The check script and the server run TypeScript straight through Node's
+      # --experimental-strip-types, which needs Node 22.6 or newer. Pinned to 24
+      # so CI runs the same major version as local development.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `npm ci` installs exactly what package-lock.json pins, so a run can
+      # never pick up a newer dependency than the one committed.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc -b
+
+      # The only automated test harness in this repo: 54 targeted checks over
+      # the rules engine, character abilities, rule cards, status effects, and
+      # the playerView hidden-state guarantees.
+      - name: Run gameplay checks
+        run: npm run check:gameplay
+
+      # `npm run build` re-runs `tsc -b` before Vite. That is incremental and
+      # nearly free here, and keeping the typecheck as its own step above means
+      # a type error is reported as a type error rather than a build failure.
+      - name: Build
+        run: npm run build
+
+      # Kept for inspection when a build regresses. Not required by any later
+      # step, so the run is still green without it.
+      - name: Upload build output
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: warn
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ESLint currently reports 3 pre-existing errors and 14 warnings in
+      # BlowCowBoard.tsx and App.tsx. They are surfaced here for visibility but
+      # deliberately not allowed to fail the run, because a job that is red on
+      # every commit stops carrying any signal. Remove `continue-on-error` once
+      # those are cleaned up.
+      - name: Run ESLint
+        continue-on-error: true
+        run: npm run lint
