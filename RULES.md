@@ -51,8 +51,17 @@
 - If the chosen starting player leaves this way, the next eligible player becomes the starting player instead.
 
 ## Turn Structure
+- A turn does not begin on its own. When the previous player's turn ends, the player whose turn it is
+  presses `Take Turn`, and until they do they may take no action at all.
+- `Take Turn` is not an action either. It costs nothing, cannot be declined, and cannot be taken by
+  anyone else. Only the actions that belong to the turn wait on it: cheats, which are defined by
+  being taken out of turn, are unaffected, and so is `Accuse`.
 - At the beginning of each player's turn, that player reveals what they played on their previous turn by flipping those card(s) face up.
-- This reveal is mandatory and is not an action.
+- This reveal is mandatory and is not an action. It happens immediately after `Take Turn` and before
+  anything else: the player's block is pulled to the centre of the table, they turn each owed card
+  face up by hand, and they press `Continue` to send the block back and get on with the turn.
+- The whole table waits while a reveal is being performed, exactly as it does for a `Call BS`,
+  `Call Reset`, or `Accuse` procedure.
 - On each turn, a player must choose exactly one action.
 - `The Clown` is the exception: their first `Play` of each round does not end their turn, and they
   then take one more action out of the same action space, minus `Play`. The play counts in every
@@ -190,7 +199,12 @@
   copied pile.
 - It ends when the round ends, when either of the two players leaves the game, or the moment a
   `Call BS`, `Call Reset`, or `Accuse` procedure begins — whichever comes first. Since every way a
-  round can end is one of those, the procedure is always what takes it off.
+  round can end is one of those, the procedure is always what takes it off. The forced reveal a turn
+  opens with is the one procedure that leaves it standing: it is not raised by anybody, and a
+  disguise that came off every turn would not be a disguise.
+- A play of `The Mime`'s own that the disguise is no longer drawing is turned face up at `Take Turn`
+  with no procedure at all. There is nothing on screen for them to press, and nothing anybody could
+  see change either way.
 - The Reveal Rule runs per seat while the copy stands, rather than per play. Each of the two seats
   turns the copied card or cards face up when the turn reaches it, so the pile opens on one seat and
   then the other instead of on both at once.
@@ -227,6 +241,12 @@
 ### Reveal Rule
 - At the beginning of each player's turn, the player reveals what they played on their last turn by flipping the card(s) face up.
 - This is not an action.
+- It is performed by hand rather than happening on its own: after `Take Turn` the player's block is
+  pulled to the centre of the table, they turn each owed card over themselves, and `Continue` ends
+  it. Nothing about it is a choice — which cards are owed is fixed before the first one is pressed,
+  and the turn cannot go on until all of them are face up.
+- `The Spy` owes one card of the pair rather than both, and which one is still drawn at random. It is
+  simply the only card their client will accept a press on.
 
 ### No Cheating Rule
 - Nobody may break the rules of the game.
@@ -283,6 +303,18 @@
 - Removed 4-of-a-kind sets are not returned to any player's hand under any circumstance.
 - Those removed sets remain on the table in a permanent scored area that is separate from the active round table.
 - Scored 4-of-a-kind sets do not count toward any active table interaction, including `MaxCardsOnTable`, `Call Reset`, the Reverse Rule, or any other effect that checks cards currently on the round table.
+- `The Thinker` is the one character whose points move without any card changing hands. At the end of
+  every turn they take, their total `n` is replaced: `0` if `n` is above 12, `n / 2` if `n` is even,
+  and `3n + 1` if `n` is odd. The wipe is checked first, so a total above 12 never takes a parity
+  branch.
+- This happens however the turn ended — a play, a pass, a `Call BS` or `Call Reset` resolving, an
+  accusation, `Manipulate`, `Mimic` — because it is the end of the turn and not any one action that
+  triggers it. It is not an action, cannot be declined, and has no limit.
+- Because lower points are better, halving and the wipe are the reward and `3n + 1` is what holding an
+  odd total costs. A total of `0` is the one value that does not move, since it is even and halves to
+  itself.
+- It stops once `The Thinker` has left the game, so whatever the leave rules settled on is their final
+  total.
 
 ## Rule Cards
 - Every rule above is also a card, so that a rule can be shown to players and, eventually, changed by
@@ -331,7 +363,8 @@
   still unlocks at the original `MaxCardsOnTable` value.
 - `Direction Change Rule`: `Direction` never changes on its own between rounds.
 - `Pass Ending Rule`: consecutive passes never end a round.
-- `Reveal Rule`: played cards stay face down. Nothing is revealed at the start of a turn.
+- `Reveal Rule`: played cards stay face down. Nothing is revealed at the start of a turn, so `Take
+  Turn` opens straight onto the action space with no procedure in between.
 - `Rank Change Rule`: the same trump rank may be chosen in consecutive rounds.
 - `No Cheating Rule`: anyone may cheat, and anyone may be accused of it. Every player gains all five
   cheats listed under the rule above. Nothing else changes: the windows are the same, the silence is

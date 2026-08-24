@@ -27,7 +27,8 @@ export const MIMIC_ICON_SPRITE = iconMap['mimic_icon.png'] ?? ''
 export const BLOCK_HOVER_ICON_SPRITE = iconMap['block_hover_icon.png'] ?? ''
 export const BS_TARGET_ICON_SPRITE = iconMap['BS_target_icon.png'] ?? ''
 export const X_ICON_SPRITE = iconMap['x_icon.png'] ?? ''
-// The three toolbar controls above the action row. Each carries its own accent colour in CSS.
+// The four toolbar controls above the action row. Each carries its own accent colour in CSS.
+export const EMOTE_ICON_SPRITE = iconMap['emote_icon.png'] ?? ''
 export const RULES_ICON_SPRITE = iconMap['rules_icon.png'] ?? ''
 export const HISTORY_ICON_SPRITE = iconMap['history_icon.png'] ?? ''
 export const LEAVE_ROOM_ICON_SPRITE = iconMap['leave_room_icon.png'] ?? ''

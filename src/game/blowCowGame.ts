@@ -44,6 +44,11 @@ export const BLOW_COW_SPEED_MULTIPLIERS = [0.5, DEFAULT_BLOW_COW_SPEED_MULTIPLIE
  * it back to drop any sprite the server would refuse, so the picker can never offer an unsendable one.
  */
 export const BLOW_COW_EMOTE_COUNT = 26
+/**
+ * The total above which The Thinker's points are wiped instead of stepped. Checked before parity,
+ * the order the card writes the three branches in, so a total over it never takes a parity branch.
+ */
+export const BLOW_COW_THINKER_WIPE_THRESHOLD = 12
 const INVALID_MOVE = 'INVALID_MOVE' as const
 /**
  * boardgame.io's `Stage.NULL`, which is the literal `null`: a player who is active but in no stage.
@@ -410,6 +415,50 @@ export type BlowCowEncore = {
 }
 
 /**
+ * One forced reveal: the play its owner must turn face up before their turn is theirs to spend.
+ *
+ * `cardIDs` is the whole of the rule written down — exactly which cards this opens, fixed at the
+ * moment Take Turn is pressed. For The Spy that is one card the server drew, so their ability stays
+ * random rather than quietly becoming a choice; for everybody else it is every face-down card of the
+ * play, Cat-rehidden ones included. Publishing ids leaks nothing: `hideSecretState` masks faces and
+ * never ids, and these cards are a second away from being face up in front of the whole table.
+ */
+export type BlowCowTurnReveal = {
+  playID: string
+  cardIDs: string[]
+  /** The whole play turns over, which is what `revealedAtTurn` records once the walk completes. */
+  isFullReveal: boolean
+}
+
+/**
+ * The gate every turn now opens with. A turn arriving no longer hands its owner the action row: this
+ * record stands in front of it until they press Take Turn, and then stays up through the reveal the
+ * Reveal Rule owes, if it owes one.
+ *
+ * Two states and no more, because it is null whenever neither applies. Untaken, it refuses that one
+ * seat's turn actions and nothing else — the cheats are defined by being out of turn and stay open,
+ * since a table cannot be made to wait on a button nobody has pressed yet. Taken with a live
+ * `reveal`, it is a procedure like a BS walk: `isProcedureRunning` counts it, and the whole table
+ * holds while its owner turns their own cards over.
+ *
+ * Optional for the same restore reason as `conspiracy`. A match staged before the gate existed comes
+ * back without the field, and `handleTurnStart` writes one the moment the next turn opens.
+ */
+export type BlowCowTurnOpening = {
+  id: string
+  /** The player on the clock. Always `ctx.currentPlayer` at the moment the turn opened. */
+  playerID: string
+  turnNumber: number
+  /** Whether Take Turn has been pressed. Nothing but that move moves it. */
+  isTaken: boolean
+  /**
+   * The reveal that follows the press, or null when nothing is owed. Decided at the press rather
+   * than at the turn's start, so a card palmed off the table in between is never one this asks for.
+   */
+  reveal: BlowCowTurnReveal | null
+}
+
+/**
  * A live disguise: The Mime is wearing their next player's block, and the two may or may not have
  * traded chairs behind it. Everything here is a frozen copy taken the moment Mimic landed, because
  * the whole point is that the two blocks read the same afterwards — see `resolveMimic` for why a
@@ -608,6 +657,7 @@ export type BlowCowArchiveTurnActionKind =
   | 'conspire'
   | 'manipulate'
   | 'mimic'
+  | 'recalculatePoints'
   | 'hideTableCard'
   | 'takeBackCard'
   | 'gainOutsideCard'
@@ -751,6 +801,11 @@ export type BlowCowState = {
    * staged before The Clown existed.
    */
   encore?: BlowCowEncore | null
+  /*
+   * Optional for the same restore reason as `conspiracy`. A match staged before turns had to be
+   * taken restores without the field, and the next `handleTurnStart` writes one.
+   */
+  turnOpening?: BlowCowTurnOpening | null
   history: BlowCowHistoryEvent[]
   telemetry: BlowCowTelemetryState
   archive: BlowCowArchiveState
@@ -827,6 +882,19 @@ export type BlowCowBeginAccusationPunishmentArgs = {
 
 export type BlowCowFinalizeAccusationArgs = {
   accusationID: string
+}
+
+export type BlowCowTakeTurnArgs = {
+  openingID: string
+}
+
+export type BlowCowRevealTurnCardArgs = {
+  openingID: string
+  cardID: string
+}
+
+export type BlowCowFinalizeTurnRevealArgs = {
+  openingID: string
 }
 
 export type BlowCowRevealBSCardArgs = {
@@ -2632,12 +2700,40 @@ function getAccusableCheat(
 }
 
 /**
- * Whether a procedure currently owns the table. The three are mutually exclusive by construction:
- * each one's opening move refuses while either of the others is live, so nothing can start on top
- * of a resolution someone is still walking through by hand.
+ * The forced reveal a turn opens with, once its owner has taken the turn and while they still owe
+ * the table cards. Read as a procedure below; see `BlowCowTurnOpening` for why the untaken half of
+ * the same record deliberately is not one.
+ */
+export function isTurnRevealRunning(state: BlowCowState) {
+  return Boolean(state.turnOpening?.isTaken && state.turnOpening.reveal)
+}
+
+/**
+ * Whether a procedure currently owns the table. The three raised ones are mutually exclusive by
+ * construction: each one's opening move refuses while either of the others is live, so nothing can
+ * start on top of a resolution someone is still walking through by hand. The turn reveal joins them
+ * from the other direction — it is nobody's choice, but it is walked through by hand just the same,
+ * and every move that refuses during a BS walk has the same reason to refuse during this one.
  */
 export function isProcedureRunning(state: BlowCowState) {
-  return state.bsResolution !== null || state.resetResolution !== null || state.accusation !== null
+  return state.bsResolution !== null
+    || state.resetResolution !== null
+    || state.accusation !== null
+    || isTurnRevealRunning(state)
+}
+
+/**
+ * The turn has opened and its owner has not pressed Take Turn yet, so none of their turn actions are
+ * theirs to make. This is what makes the Reveal Rule's walk unskippable: a play made before the
+ * press would leave behind the reveal the turn owes.
+ *
+ * Deliberately narrower than `isProcedureRunning`. It blocks one seat, and only the actions bound to
+ * the turn — a cheat is defined by being out of turn, and nothing that is not turn-bound (`Accuse`,
+ * The Seeker's pick, The Broken's removal) should wait on a button somebody else has to press.
+ */
+export function isAwaitingTurnTake(state: BlowCowState, playerID: string) {
+  const opening = state.turnOpening
+  return Boolean(opening && !opening.isTaken && opening.playerID === playerID)
 }
 
 export function getDreamerCheatDescription(cheatKind: BlowCowDreamerCheatKind) {
@@ -2984,6 +3080,13 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
       : `${callLabel} Every card on the table is face up.`
   }
 
+  // Below the three raised procedures because it is the smallest of the four and the only one that
+  // nobody chose to start. It says nothing about what is being turned over — that is the table's to
+  // watch, and a Spy's single card would otherwise be announced as such before it landed.
+  if (isTurnRevealRunning(state) && state.turnOpening) {
+    return `${formatPlayerLabel(state, state.turnOpening.playerID)} is revealing what they played last turn.`
+  }
+
   const playerLabel = formatPlayerLabel(state, currentPlayerID)
   const trumpRank = state.round.trumpRank
   const tableCardCount = getTableCardCount(state.table)
@@ -3230,74 +3333,6 @@ function resolveRoundStartLeaves(state: BlowCowState, turnNumber: number) {
   return nextStartingPlayerID
 }
 
-function revealPendingPlayAtTurnStart(
-  state: BlowCowState,
-  currentPlayerID: string,
-  turnNumber: number,
-  shuffle?: BlowCowShuffle,
-) {
-  const pendingPlay = getPendingRevealPlay(state, currentPlayerID)
-  if (!pendingPlay) {
-    return
-  }
-
-  /*
-   * Without the Reveal Rule nothing is flipped at the start of a turn, so the pointer is dropped
-   * rather than acted on and the play stays face down until a BS call or a Reset opens it. The Spy
-   * goes with it: their ability only ever chose how much of this reveal happened.
-   */
-  if (isRuleRemoved(state, 'reveal')) {
-    state.players[currentPlayerID].pendingRevealPlayID = null
-    return
-  }
-
-  const hiddenCards = getHiddenCardsForPlay(pendingPlay)
-  if (state.players[currentPlayerID].character === 'The Spy' && hiddenCards.length >= 2) {
-    const revealedCard = shuffleCards(hiddenCards, shuffle)[0] ?? hiddenCards[0]
-    pendingPlay.revealedCardIDs = [...new Set([...(pendingPlay.revealedCardIDs ?? []), revealedCard.id])]
-    state.players[currentPlayerID].pendingRevealPlayID = null
-    const remainingHiddenCardCount = getHiddenCardsForPlay(pendingPlay).length
-    appendHistoryEvent(
-      state,
-      'action',
-      `${formatPlayerLabel(state, currentPlayerID)} revealed 1 card(s)`,
-      `The Spy revealed ${formatCardLabel(revealedCard)} after claiming ${pendingPlay.claimedRank}. ${remainingHiddenCardCount} card(s) remained hidden.`,
-      currentPlayerID,
-      turnNumber,
-    )
-    appendArchiveTurnAction(state, currentPlayerID, turnNumber, {
-      kind: 'revealPendingPlay',
-      detail: `The Spy revealed ${formatCardLabel(revealedCard)} after claiming ${pendingPlay.claimedRank}.`,
-      characterUsed: 'The Spy',
-      revealedPlayerID: currentPlayerID,
-      cards: [revealedCard],
-      claimedRank: pendingPlay.claimedRank,
-      remainingHiddenCardCount,
-    })
-    return
-  }
-
-  pendingPlay.revealedAtTurn = turnNumber
-  pendingPlay.rehiddenCardIDs = []
-  state.players[currentPlayerID].pendingRevealPlayID = null
-  appendHistoryEvent(
-    state,
-    'action',
-    `${formatPlayerLabel(state, currentPlayerID)} revealed ${pendingPlay.cards.length} card(s)`,
-    `Revealed ${pendingPlay.cards.map((card) => formatCardLabel(card)).join(', ')} after claiming ${pendingPlay.claimedRank}.`,
-    currentPlayerID,
-    turnNumber,
-  )
-  appendArchiveTurnAction(state, currentPlayerID, turnNumber, {
-    kind: 'revealPendingPlay',
-    detail: `Revealed ${pendingPlay.cards.length} card(s) after claiming ${pendingPlay.claimedRank}.`,
-    revealedPlayerID: currentPlayerID,
-    cards: pendingPlay.cards,
-    claimedRank: pendingPlay.claimedRank,
-    remainingHiddenCardCount: 0,
-  })
-}
-
 /**
  * Applies the point change, records it for the board and the results table, and logs it. The three
  * always happen together, so no branch below can move a total without leaving a trace of why.
@@ -3499,7 +3534,7 @@ function resolveRoundStart(state: BlowCowState, events: BlowCowEventsAPI, turnNu
   return nextStartingPlayerID ?? activePlayerIDs[0] ?? null
 }
 
-function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
+function handleTurnStart({ G, ctx, events }: BlowCowHookContext) {
   if (G.gameStatus !== 'active') {
     return
   }
@@ -3523,6 +3558,12 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   // An encore never outlives the turn that earned it, whether it was spent or simply not taken up.
   // This is the clearing site that matters; `beginNextRound` is belt and braces behind it.
   G.encore = null
+  /*
+   * Whatever the last turn left standing. A turn that ended before its owner ever took it is the
+   * ordinary case — every turn ends nine ways that are not a play or a pass — and one still holding
+   * a half-walked reveal belongs to a match restored mid-flight.
+   */
+  G.turnOpening = null
   advanceMimicryReveal(G, currentPlayerID)
   /*
    * Manipulate's lock covers exactly one turn: the one it forced. Any turn that is not the forced
@@ -3534,7 +3575,6 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   }
   G.players[currentPlayerID].matchStats.turnsInGame += 1
   ensureArchiveTurn(G, currentPlayerID, ctx.turn)
-  revealPendingPlayAtTurnStart(G, currentPlayerID, ctx.turn, random?.Shuffle)
   appendTelemetryEvent(
     G,
     'turn',
@@ -3570,18 +3610,89 @@ function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   }
 
   updateRoundCapacity(G)
+  /*
+   * Written last, and only for a turn that is actually going to be played: a seat that emptied its
+   * hand leaves above without ever being handed one of these, so nothing is left waiting on a player
+   * who is no longer in the game. What the turn owes the Reveal Rule is decided at the press rather
+   * than here — see `openTurnReveal`.
+   */
+  G.turnOpening = {
+    id: `turn-open-r${G.round.roundNumber}-t${ctx.turn}-p${currentPlayerID}`,
+    playerID: currentPlayerID,
+    turnNumber: ctx.turn,
+    isTaken: false,
+    reveal: null,
+  }
   G.tableStatus = buildTurnStatus(G, currentPlayerID)
 }
 
 /**
- * The status tick, and the only thing that hangs off `turn.onEnd`.
+ * The Thinker's total after one step: the wipe first, then parity, in the order the card writes them.
  *
- * It lives on the framework hook rather than in `advanceTurn` because a turn ends eleven different
+ * Lower points win, so `n / 2` and the wipe are the reward and `3n + 1` is what an odd total costs.
+ * Zero is the one fixed point — it is even, so it halves to itself — which is why a seat that has yet
+ * to score is never disturbed. Parity is read with `% 2` rather than a sign-blind test so a negative
+ * total, which only a leave effect can produce, still steps the way the card reads.
+ */
+function getThinkerPoints(points: number) {
+  if (points > BLOW_COW_THINKER_WIPE_THRESHOLD) {
+    return 0
+  }
+
+  if (points % 2 === 0) {
+    return points / 2
+  }
+
+  return points * 3 + 1
+}
+
+/**
+ * The Thinker's recalculation. Passive, so there is no move and nothing to decline: the total simply
+ * steps at the end of every turn they take, however that turn ended.
+ *
+ * A player who has left is skipped. They take no further turns, so the only end this could reach is
+ * the one immediately after `markPlayerLeft` ran, and `applyLeaveCharacterEffect` is meant to have
+ * the last word on a final total rather than being stepped on by a free extra step.
+ */
+function applyThinkerRecalculation(state: BlowCowState, playerID: string, turnNumber: number) {
+  const player = getPlayerState(state, playerID)
+  if (player.character !== 'The Thinker' || player.hasLeft) {
+    return
+  }
+
+  const previousPoints = player.points
+  const nextPoints = getThinkerPoints(previousPoints)
+  // Zero halving to zero is the one no-op, and announcing it every turn would bury the log in a line
+  // that says nothing happened.
+  if (nextPoints === previousPoints) {
+    return
+  }
+
+  player.points = nextPoints
+  appendHistoryEvent(
+    state,
+    'point',
+    `${formatPlayerLabel(state, playerID)} recalculated to ${nextPoints} point(s)`,
+    `Ended the turn on ${previousPoints} point(s), which became ${nextPoints}.`,
+    playerID,
+    turnNumber,
+  )
+  appendArchiveTurnAction(state, playerID, turnNumber, {
+    kind: 'recalculatePoints',
+    detail: `Points went from ${previousPoints} to ${nextPoints} at the end of the turn.`,
+    characterUsed: 'The Thinker',
+  })
+}
+
+/**
+ * The two end-of-turn passives, and the only things that hang off `turn.onEnd`.
+ *
+ * They live on the framework hook rather than in `advanceTurn` because a turn ends eleven different
  * ways here — a play, a pass, a BS or Reset resolution, an accusation, a Mimic seat swap, Manipulate,
  * a player leaving with an empty hand — and only two of them go through `advanceTurn`. `onEnd` is the
  * one place all of them meet.
  *
- * The `startedTurnNumber` guard is what keeps it honest. `startMatch` flips `gameStatus` to `active`
+ * The `startedTurnNumber` guard is what keeps both honest. `startMatch` flips `gameStatus` to `active`
  * and *then* ends the staging turn to hand play to the first seat, so a gameStatus check alone would
  * charge that seat a turn they never took.
  */
@@ -3590,16 +3701,19 @@ function handleTurnEnd({ G, ctx }: BlowCowHookContext) {
     return
   }
 
+  if (G.round.startedTurnNumber !== ctx.turn) {
+    return
+  }
+
+  applyThinkerRecalculation(G, ctx.currentPlayer, ctx.turn)
+
   /*
    * Without the Status Rule the counters stay on screen and simply stop moving, so every status a
    * player is given is permanent. Read here rather than where a status is handed out, because the
    * rule can be torn up mid-match and a counter frozen at the moment of removal is the whole effect.
+   * The rule covers the tick alone — The Thinker above is a character, not a status.
    */
   if (isRuleRemoved(G, 'status')) {
-    return
-  }
-
-  if (G.round.startedTurnNumber !== ctx.turn) {
     return
   }
 
@@ -3632,6 +3746,11 @@ function validateCommonPlay(
   }
 
   if (state.gameStatus !== 'active' || isProcedureRunning(state) || isFinalTwoResolutionTurn(state, playerID)) {
+    return false
+  }
+
+  // The turn has to be taken before it can be spent. See `isAwaitingTurnTake`.
+  if (isAwaitingTurnTake(state, playerID)) {
     return false
   }
 
@@ -4101,7 +4220,7 @@ function resolveCatHideCard(
   args?: BlowCowCatHideCardArgs,
 ) {
   const { G, ctx, playerID } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4254,7 +4373,7 @@ function resolveDefy(
   args?: BlowCowDefyArgs,
 ) {
   const { G, ctx, playerID, random } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4328,7 +4447,7 @@ function resolveConspire(
   args?: BlowCowConspireArgs,
 ) {
   const { G, ctx, playerID } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4396,7 +4515,7 @@ function resolveConspire(
  */
 function resolveMimic(context: BlowCowMoveContext) {
   const { G, ctx, events, playerID, random } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4510,7 +4629,7 @@ function resolveManipulate(
   args?: BlowCowManipulateArgs,
 ) {
   const { G, ctx, events, playerID } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4736,7 +4855,7 @@ function returnCardsAfterAllPass(context: BlowCowMoveContext) {
 function resolveBS(context: BlowCowMoveContext, args?: BlowCowCallBSArgs) {
   const { G, ctx, playerID } = context
   // Call BS is still strictly a turn action, unlike Accuse.
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID)) {
     return INVALID_MOVE
   }
 
@@ -4992,6 +5111,209 @@ function finalizeAccusation(context: BlowCowMoveContext, args?: BlowCowFinalizeA
   if (nextStartingPlayerID) {
     events.endTurn({ next: nextStartingPlayerID })
   }
+}
+
+/**
+ * Turns one card of the turn reveal face up, in place. Shared by the walk's own move and by the
+ * automatic paths in `openTurnReveal`, so a reveal nobody can press writes exactly what a pressed
+ * one would have.
+ */
+function flipTurnRevealCard(play: BlowCowTablePlay, cardID: string) {
+  play.revealedCardIDs = [...new Set([...(play.revealedCardIDs ?? []), cardID])]
+  // A Cat-rehidden card stays face down until it leaves that set too, so flipping must clear both.
+  play.rehiddenCardIDs = (play.rehiddenCardIDs ?? []).filter((rehiddenCardID) => rehiddenCardID !== cardID)
+}
+
+/**
+ * Writes what the Reveal Rule owed once every card of it is face up: the record on the play, the log
+ * line, and the archive entry. The Spy's half deliberately stops at `revealedCardIDs` — their play is
+ * not finished being hidden, which is the whole of the ability.
+ */
+function completeTurnReveal(
+  state: BlowCowState,
+  playerID: string,
+  play: BlowCowTablePlay,
+  reveal: BlowCowTurnReveal,
+  turnNumber: number,
+) {
+  if (!reveal.isFullReveal) {
+    const revealedCards = play.cards.filter((card) => reveal.cardIDs.includes(card.id))
+    const revealedLabels = revealedCards.map((card) => formatCardLabel(card)).join(', ')
+    const remainingHiddenCardCount = getHiddenCardsForPlay(play).length
+
+    appendHistoryEvent(
+      state,
+      'action',
+      `${formatPlayerLabel(state, playerID)} revealed ${revealedCards.length} card(s)`,
+      `The Spy revealed ${revealedLabels} after claiming ${play.claimedRank}. ${remainingHiddenCardCount} card(s) remained hidden.`,
+      playerID,
+      turnNumber,
+    )
+    appendArchiveTurnAction(state, playerID, turnNumber, {
+      kind: 'revealPendingPlay',
+      detail: `The Spy revealed ${revealedLabels} after claiming ${play.claimedRank}.`,
+      characterUsed: 'The Spy',
+      revealedPlayerID: playerID,
+      cards: revealedCards,
+      claimedRank: play.claimedRank,
+      remainingHiddenCardCount,
+    })
+    return
+  }
+
+  play.revealedAtTurn = turnNumber
+  play.rehiddenCardIDs = []
+  appendHistoryEvent(
+    state,
+    'action',
+    `${formatPlayerLabel(state, playerID)} revealed ${play.cards.length} card(s)`,
+    `Revealed ${play.cards.map((card) => formatCardLabel(card)).join(', ')} after claiming ${play.claimedRank}.`,
+    playerID,
+    turnNumber,
+  )
+  appendArchiveTurnAction(state, playerID, turnNumber, {
+    kind: 'revealPendingPlay',
+    detail: `Revealed ${play.cards.length} card(s) after claiming ${play.claimedRank}.`,
+    revealedPlayerID: playerID,
+    cards: play.cards,
+    claimedRank: play.claimedRank,
+    remainingHiddenCardCount: 0,
+  })
+}
+
+/**
+ * What the Reveal Rule owes this turn, worked out the moment Take Turn is pressed.
+ *
+ * Returns the walk the player has to perform by hand, or null when there is nothing for them to
+ * press — having already written whatever the rule owed in that case, so the two paths differ in
+ * ceremony and in nothing else. Null covers four situations: no pending play, the rule removed (the
+ * pointer is dropped rather than acted on, and The Spy goes with it, since their ability only ever
+ * chose how much of this reveal happened), a pile that is somehow already face up, and a play The
+ * Mime's disguise is not drawing — a card that is not on screen is not one a client can be asked to
+ * click, and revealing it changes nothing anybody can see either way.
+ */
+function openTurnReveal(context: BlowCowMoveContext, opening: BlowCowTurnOpening) {
+  const { G, random } = context
+  const playerID = opening.playerID
+  const player = getPlayerState(G, playerID)
+  const play = getPendingRevealPlay(G, playerID)
+
+  player.pendingRevealPlayID = null
+
+  if (!play || isRuleRemoved(G, 'reveal')) {
+    return null
+  }
+
+  const hiddenCards = getHiddenCardsForPlay(play)
+  // Drawn here rather than left to the player: the card is meant to be random, so making it the one
+  // card they may press keeps the ability what its text says instead of turning it into a choice.
+  const reveal: BlowCowTurnReveal = player.character === 'The Spy' && hiddenCards.length >= 2
+    ? {
+        playID: play.id,
+        cardIDs: [(shuffleCards(hiddenCards, random?.Shuffle)[0] ?? hiddenCards[0]).id],
+        isFullReveal: false,
+      }
+    : {
+        playID: play.id,
+        cardIDs: getFaceDownCardsForPlay(play).map((card) => card.id),
+        isFullReveal: true,
+      }
+
+  const isDrawnOnOwnBlock = !(G.mimicry?.playerID === playerID && G.mimicry.hiddenPlayIDs.includes(play.id))
+  if (reveal.cardIDs.length > 0 && isDrawnOnOwnBlock) {
+    return reveal
+  }
+
+  for (const cardID of reveal.cardIDs) {
+    flipTurnRevealCard(play, cardID)
+  }
+
+  completeTurnReveal(G, playerID, play, reveal, opening.turnNumber)
+  return null
+}
+
+/**
+ * Opens the turn. Until this lands the player's own turn actions are refused, and after it either
+ * the turn is theirs outright or the Reveal Rule holds it for one more procedure.
+ */
+function resolveTakeTurn(context: BlowCowMoveContext, args?: BlowCowTakeTurnArgs) {
+  const { G, ctx, playerID } = context
+  const opening = G.turnOpening
+
+  if (G.gameStatus !== 'active' || !args || !opening || opening.id !== args.openingID) {
+    return INVALID_MOVE
+  }
+
+  if (opening.isTaken || opening.playerID !== playerID || ctx.currentPlayer !== playerID) {
+    return INVALID_MOVE
+  }
+
+  opening.isTaken = true
+  opening.reveal = openTurnReveal(context, opening)
+
+  // Nothing owed, so the gate does not linger as a record with nothing left in it.
+  if (!opening.reveal) {
+    G.turnOpening = null
+  }
+
+  G.tableStatus = buildTurnStatus(G, playerID)
+}
+
+/**
+ * The live half of the turn reveal, and the counterpart of `getDrivableResolution` below: only the
+ * player the turn belongs to drives it, and there is no timeout fallback for the same reason.
+ */
+function getDrivableTurnReveal(context: BlowCowMoveContext, openingID: string) {
+  const opening = context.G.turnOpening
+
+  if (context.G.gameStatus !== 'active' || !opening || opening.id !== openingID || !opening.isTaken) {
+    return null
+  }
+
+  return opening.reveal && context.playerID === opening.playerID ? opening : null
+}
+
+/**
+ * Flips one of the cards this turn owes. Refuses anything outside `reveal.cardIDs`, which is what
+ * stops a Spy's client from flipping the other card of the pair.
+ */
+function revealTurnCard(context: BlowCowMoveContext, args?: BlowCowRevealTurnCardArgs) {
+  const { G } = context
+  const opening = args ? getDrivableTurnReveal(context, args.openingID) : null
+
+  if (!args || !opening?.reveal || !opening.reveal.cardIDs.includes(args.cardID)) {
+    return INVALID_MOVE
+  }
+
+  const play = G.table.plays.find((tablePlay) => tablePlay.id === opening.reveal?.playID)
+  if (!play || isCardFaceUpOnTable(play, args.cardID)) {
+    return INVALID_MOVE
+  }
+
+  flipTurnRevealCard(play, args.cardID)
+}
+
+/**
+ * Confirms the reveal and hands the turn over. Only legal once every owed card is face up, so the
+ * Continue button is server-authoritative rather than trusted from the player's client.
+ */
+function finalizeTurnReveal(context: BlowCowMoveContext, args?: BlowCowFinalizeTurnRevealArgs) {
+  const { G } = context
+  const opening = args ? getDrivableTurnReveal(context, args.openingID) : null
+  const reveal = opening?.reveal
+
+  if (!opening || !reveal) {
+    return INVALID_MOVE
+  }
+
+  const play = G.table.plays.find((tablePlay) => tablePlay.id === reveal.playID)
+  if (!play || reveal.cardIDs.some((cardID) => !isCardFaceUpOnTable(play, cardID))) {
+    return INVALID_MOVE
+  }
+
+  completeTurnReveal(G, opening.playerID, play, reveal, opening.turnNumber)
+  G.turnOpening = null
+  G.tableStatus = buildTurnStatus(G, opening.playerID)
 }
 
 /**
@@ -5271,7 +5593,7 @@ function finalizeBSResolution(
 
 function resolveReset(context: BlowCowMoveContext) {
   const { G, ctx, playerID } = context
-  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || getTableCardCount(G.table) < G.round.maxCardsOnTable) {
+  if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID) || getTableCardCount(G.table) < G.round.maxCardsOnTable) {
     return INVALID_MOVE
   }
 
@@ -5654,6 +5976,7 @@ function createStagedBlowCowState(
     conspiracy: null,
     mimicry: null,
     encore: null,
+    turnOpening: null,
     emotes: [],
     emoteSequence: 0,
     history,
@@ -5700,6 +6023,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.conspiracy = null
   state.mimicry = null
   state.encore = null
+  state.turnOpening = null
   state.emotes = []
   state.emoteSequence = 0
   state.round.roundNumber = 1
@@ -5890,6 +6214,23 @@ export const BlowCowGame = {
 
       events.endTurn({ next: nextStartingPlayerID })
     },
+    takeTurn: {
+      /*
+       * The Spy's card is drawn here, and it is the one card their client is then allowed to press.
+       * A locally predicted draw would light up the wrong card for a beat and then swap, which reads
+       * as the ability choosing and changing its mind.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext, args: BlowCowTakeTurnArgs) => {
+        return resolveTakeTurn(context, args)
+      },
+    },
+    revealTurnCard: (context: BlowCowMoveContext, args: BlowCowRevealTurnCardArgs) => {
+      return revealTurnCard(context, args)
+    },
+    finalizeTurnReveal: (context: BlowCowMoveContext, args: BlowCowFinalizeTurnRevealArgs) => {
+      return finalizeTurnReveal(context, args)
+    },
     selectTrumpAndPlay: {
       redact: true,
       move: (context: BlowCowMoveContext, args: BlowCowSelectTrumpAndPlayArgs) => {
@@ -5964,7 +6305,7 @@ export const BlowCowGame = {
     },
     pass: (context: BlowCowMoveContext, args?: BlowCowPassArgs) => {
       const { G, ctx, playerID, events } = context
-      if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isFinalTwoResolutionTurn(G, playerID)) {
+      if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID) || isFinalTwoResolutionTurn(G, playerID)) {
         return INVALID_MOVE
       }
 

@@ -20,6 +20,7 @@ main.app-shell
   section.lobby-grid
     article.panel.stack-gap      (player setup + create room)
     article.panel.stack-gap      (join by code + room list)
+  aside.character-preview?             (hovered character's card art)
   div.board-overlay.lobby-overlay?     (house rules editor)
     section.board-overlay-panel.rules-overlay-panel
       div.board-overlay-header
@@ -53,8 +54,8 @@ main.app-shell
 | Character Pool Panel | `div` | `manual-rank-panel` | Shows the active character-card pool when characters are enabled. | Conditional below Character Cards Group. |
 | Character Pool Count | `span` | `rank-selection-count` | Shows how many eligible characters are currently in the pool. | Right side of Character Pool Panel header. |
 | Character Chip Grid | `div` | `character-chip-grid` | Holds the character-pool buttons. | Main area inside Character Pool Panel. |
-| Character Chip | `button` | `character-chip` | Toggles one implemented character in or out of the pool and shows its ability tooltip on hover or focus. | Repeated inside Character Chip Grid. |
-| Character Chip Tooltip | `span` | `character-chip-tooltip` | Shows the selected character's ability, plus the J requirement when The Confused is unavailable. | Nested inside each Character Chip. |
+| Character Chip | `button` | `character-chip` | Toggles one implemented character in or out of the pool, and opens the Character Preview on hover or focus. Carries no tooltip of its own. | Repeated inside Character Chip Grid. |
+| Character Preview | `aside` | `character-preview` | Shows the hovered or focused character's full-size card art, pinned to the right of the viewport. Animated when that character's art ships more than one frame. | Rendered at the end of App Shell while a chip is hovered or focused. |
 | Character Pool Hint | `p` | `character-pool-hint` | Explains why `The Confused` is unavailable without `J` in a manual deck. | Conditional below Character Chip Grid. |
 | House Rules Panel | `div` | `manual-rank-panel` | Collapsed entry point for the rule cards. | Below Character Pool Panel, always shown. |
 | Changed Rule Count | `span` | `rank-selection-count` | Shows how many rule cards are not `Active`. | Right side of House Rules Panel header. |
@@ -105,6 +106,19 @@ main.app-shell
 - A rule card only offers the statuses it defines. `removedDescription` and `upgradedDescription` in `src/game/blowCowRules.ts` are what make a variant exist, so an undescribed variant cannot be selected here and cannot reach the server.
 - The rule cards live behind a button rather than inline. A dozen-odd illustrated tiles made the left column several screens tall, and the overlay is the same `rules-overlay-panel` the match uses, so a host sees the cards exactly as the players will.
 - `Removed` is enforced during the match. `Upgraded` is not yet — the card's `+` title and upgraded description are shown to players, but the game still plays the rule as written, which is what the overlay's subtitle says.
+- Character abilities are shown only as card art. The sprites already print each character's name and
+  ability, so `src/game/blowCowCharacters.ts` holds no description table and the chips carry no
+  tooltip; `Characters.csv` and `RULES.md` are where the wording is authored. The `character card art`
+  check in `scripts/check-blowcow-gameplay.ts` is what stops an implemented character shipping with no
+  art, which would now leave it with nothing a player can read.
+- The preview is `position: fixed` and `pointer-events: none`, so it follows the viewport rather than
+  the scroll and never intercepts a click meant for the Join panel it overlaps. It cannot be hovered
+  either, which is what stops it holding itself open. Below 980px the lobby is one column, so it
+  centres instead of pinning right rather than shrinking into a corner too small to read.
+- Each chip clears the preview only when it is still the one showing, because moving between two chips
+  fires the new chip's `mouseenter` before the old chip's `mouseleave`.
+- A disabled chip fires no pointer events, so `The Confused` has no preview while `J` is out of a
+  manual deck. The Character Pool Hint below the grid is what explains it in that state.
 - In manual-rank mode, `The Confused` is unavailable until `J` is part of the selected deck.
 - Room-code join and quick join both reclaim an offline seat instead of taking a new one when the local display name exactly matches that offline player.
 - Offline claimed seats are labeled directly in the room list so players can see when a name-based reclaim is possible.

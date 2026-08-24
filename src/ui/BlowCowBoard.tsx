@@ -20,6 +20,7 @@ import {
   getPlayerStatuses,
   getTableCardCount,
   hasStatus,
+  isCardFaceUpOnTable,
   isDefyDestroyableCard,
   isRuleRemoved,
   isTrumpCardInMatch,
@@ -35,9 +36,12 @@ import {
   type BlowCowCatHideCardArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowFinalizeTurnRevealArgs,
   type BlowCowAdvanceResetRevealArgs,
   type BlowCowRevealBSCardArgs,
   type BlowCowRevealResetCardArgs,
+  type BlowCowRevealTurnCardArgs,
+  type BlowCowTakeTurnArgs,
   type BlowCowBeginResetPunishmentArgs,
   type BlowCowFinalizeResetResolutionArgs,
   type BlowCowPassArgs,
@@ -76,6 +80,7 @@ import { PlayerRing } from './PlayerRing.tsx'
 import {
   CONSPIRE_ICON_SPRITE,
   DEFY_ICON_SPRITE,
+  EMOTE_ICON_SPRITE,
   HISTORY_ICON_SPRITE,
   LEAVE_ROOM_ICON_SPRITE,
   MANIPULATE_ICON_SPRITE,
@@ -338,6 +343,11 @@ const TAKE_BACK_ACTION_LOCK_MS = 2000
  */
 const TAKE_BACK_LOCK_DESCRIPTION = 'You just took a card back. Your hands are off the table for a moment.'
 /**
+ * Read on the block buttons, which stay hoverable while the strip is covered. The cover itself says
+ * the same thing in one word, so this is the long form nobody has to go looking for.
+ */
+const TAKE_TURN_PENDING_DESCRIPTION = 'Press Take Turn first. The turn is not open until you do.'
+/**
  * Comfortably past the `seat-emote-travel` animation in App.css and the stagger a batch of emotes is
  * dealt out under, so this only ever fires for an emote whose `onAnimationEnd` never came.
  */
@@ -500,6 +510,9 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     sneakPlay: (args: BlowCowSneakPlayArgs) => void
     startMatch: () => void
     selectTrumpAndPlay: (args: BlowCowSelectTrumpAndPlayArgs) => void
+    takeTurn: (args: BlowCowTakeTurnArgs) => void
+    revealTurnCard: (args: BlowCowRevealTurnCardArgs) => void
+    finalizeTurnReveal: (args: BlowCowFinalizeTurnRevealArgs) => void
     toggleDirection: () => void
   }
 }
@@ -1039,15 +1052,42 @@ export function BlowCowBoard({
   const isRevealCaller = isBSCaller
     || Boolean(G.resetResolution && currentSeatID === G.resetResolution.callerPlayerID)
   /*
+   * The gate every turn opens with, and the forced reveal behind it. Two halves of one record and
+   * they are read separately everywhere: the untaken half covers one player's own strip and refuses
+   * their turn actions, while the taken half with a live reveal is a procedure that holds the whole
+   * table, exactly as the server reads it in `isProcedureRunning`.
+   */
+  const turnOpening = G.turnOpening ?? null
+  const turnReveal = turnOpening?.isTaken ? turnOpening.reveal ?? null : null
+  const isViewerAwaitingTurnTake = Boolean(turnOpening && !turnOpening.isTaken && turnOpening.playerID === currentSeatID)
+  /** Only the player the turn belongs to may flip its cards, so nobody else renders the affordances. */
+  const isTurnRevealDriver = Boolean(turnReveal && turnOpening && currentSeatID === turnOpening.playerID)
+  const turnRevealPlay = turnReveal
+    ? G.table.plays.find((play) => play.id === turnReveal.playID) ?? null
+    : null
+  /*
+   * Continue unlocks once every card this turn owed is face up — the cards named by the reveal, not
+   * everything the seat has face down, because The Spy owes exactly one of a pair. The server
+   * enforces the same rule; this just decides whether to render the button.
+   */
+  const isTurnRevealComplete = Boolean(turnReveal && turnRevealPlay
+    && turnReveal.cardIDs.every((cardID) => isCardFaceUpOnTable(turnRevealPlay, cardID)))
+  /*
    * The seat pulled to the centre of the table. Suppressed during either lead-in so the BS call
    * trail still measures blocks at their ring positions, and during the BS punishment travel for
    * the same reason. The Reset gather/deal sequences measure too, but they only start once the
    * reveal is complete, which is exactly when this goes null.
+   *
+   * The turn reveal is last and needs no lead-in of its own: nothing is drawn between the press and
+   * the block travelling, and no measuring sequence can be running, because the server refuses every
+   * move that could start one while the walk stands.
    */
   const focusedSeatID = G.bsResolution && !isBSLeadInActive && !G.bsResolution.isPunishing
     ? G.bsResolution.revealOrder[G.bsResolution.revealStepIndex] ?? null
     : G.resetResolution && !isResetLeadInActive
     ? G.resetResolution.revealOrder[G.resetResolution.revealStepIndex] ?? null
+    : turnReveal && turnOpening
+    ? turnOpening.playerID
     : null
   // Continue unlocks only once the focused player has nothing left face down. The server enforces
   // the same rule; this just decides whether to render the button.
@@ -1911,8 +1951,20 @@ export function BlowCowBoard({
   const isBSSequenceActive = bsResolution !== null
   const isResetSequenceActive = resetResolution !== null
   const isAccusationActive = accusation !== null
-  const isResolutionSequenceActive = isBSSequenceActive || isResetSequenceActive || isAccusationActive
-  const resolutionSequenceLabel = isBSSequenceActive ? 'BS' : isAccusationActive ? 'accusation' : 'Reset'
+  // The turn reveal joins the three the same way `isProcedureRunning` counts it on the server: it is
+  // nobody's choice, but it holds the table until the seat on the clock has walked it through.
+  const isTurnRevealSequenceActive = turnReveal !== null
+  const isResolutionSequenceActive = isBSSequenceActive
+    || isResetSequenceActive
+    || isAccusationActive
+    || isTurnRevealSequenceActive
+  const resolutionSequenceLabel = isBSSequenceActive
+    ? 'BS'
+    : isAccusationActive
+    ? 'accusation'
+    : isTurnRevealSequenceActive
+    ? 'reveal'
+    : 'Reset'
   const actingPlayerID = ctx.currentPlayer
   const currentPlayerState = currentSeatID ? (G.players[currentSeatID] ?? null) : null
   const handSourcePlayerState = handSourceSeatID ? (G.players[handSourceSeatID] ?? null) : null
@@ -1933,7 +1985,12 @@ export function BlowCowBoard({
       && isActive
       && G.gameStatus === 'active',
   )
-  const isInteractiveTurn = isCurrentPlayersTurn && !isResolutionSequenceActive
+  /*
+   * The turn is open but not yet taken, so the strip is covered and nothing on it is the viewer's to
+   * press. Mirrors the server's `isAwaitingTurnTake`, which is the authority.
+   */
+  const isTakeTurnPromptOpen = isCurrentPlayersTurn && isViewerAwaitingTurnTake
+  const isInteractiveTurn = isCurrentPlayersTurn && !isResolutionSequenceActive && !isViewerAwaitingTurnTake
   const isGrandmaster = currentPlayerState?.character === 'The Grandmaster'
   const isCat = currentPlayerState?.character === 'The Cat'
   const isContrarian = currentPlayerState?.character === 'The Contrarian'
@@ -2839,6 +2896,9 @@ export function BlowCowBoard({
     && !isBSSequenceActive
     && !isResetSequenceActive
 
+  /** Exactly the cards this turn owes, so no other face-down card of the seat's lights up. */
+  const turnRevealCardIDSet = new Set(turnReveal?.cardIDs ?? [])
+
   const seatRows: SeatRow[] = G.seatOrder.map((seatID) => {
     const player = G.players[seatID]
     const disguise = wornMimicry?.playerID === seatID ? wornMimicry : null
@@ -2875,8 +2935,17 @@ export function BlowCowBoard({
         isTargeted: !isResetSequenceActive && play.id === targetPlayID,
         isCatActionable: canUseCat && !faceDown && !isTakeBackActionable,
         isTakeBackActionable,
-        // Only the caller can flip, and only in the block currently pulled to the centre.
-        isRevealable: isRevealCaller && seatID === focusedSeatID && faceDown,
+        /*
+         * Only the caller can flip, and only in the block currently pulled to the centre. The turn
+         * reveal is the same affordance turned on its owner: they flip their own cards, and only the
+         * ones the reveal names — The Spy owes exactly one card of a pair, and the other stays shut.
+         */
+        isRevealable: (isRevealCaller && seatID === focusedSeatID && faceDown)
+          || (isTurnRevealDriver
+            && seatID === focusedSeatID
+            && faceDown
+            && play.id === turnReveal?.playID
+            && turnRevealCardIDSet.has(card.id)),
         // A masked card is rewritten to rank Joker before it reaches the client, so an
         // unflipped card can never light up here. Blind puts it out too — a highlight would read the
         // trump straight through the blindfold.
@@ -3418,6 +3487,10 @@ export function BlowCowBoard({
       return 'You can only call BS on your own turn.'
     }
 
+    if (isViewerAwaitingTurnTake) {
+      return TAKE_TURN_PENDING_DESCRIPTION
+    }
+
     if (openConspiracy) {
       return `You opened ${conspireTargetLabel}'s hand, so the only thing left this turn is a play out of it.`
     }
@@ -3535,6 +3608,10 @@ export function BlowCowBoard({
       return 'Conspire only works on your own turn.'
     }
 
+    if (isViewerAwaitingTurnTake) {
+      return TAKE_TURN_PENDING_DESCRIPTION
+    }
+
     if (hasUsedConspireThisRound) {
       return 'You already used Conspire this round. It comes back at the start of the next one.'
     }
@@ -3582,6 +3659,10 @@ export function BlowCowBoard({
 
     if (!isCurrentPlayersTurn) {
       return 'Manipulate only works on your own turn.'
+    }
+
+    if (isViewerAwaitingTurnTake) {
+      return TAKE_TURN_PENDING_DESCRIPTION
     }
 
     if (G.round.startingPlayerID !== currentSeatID) {
@@ -3710,9 +3791,30 @@ export function BlowCowBoard({
     moves.takeBackCard({ cardID })
   }
 
-  // Both procedures share the click target and the Continue button, so these route to whichever
-  // resolution is live. The two can never overlap: each one blocks the other's move.
+  const handleTakeTurn = () => {
+    if (!isTakeTurnPromptOpen || !turnOpening) {
+      return
+    }
+
+    moves.takeTurn({ openingID: turnOpening.id })
+  }
+
+  const handleFinalizeTurnReveal = () => {
+    if (!isTurnRevealDriver || !isTurnRevealComplete || !turnOpening) {
+      return
+    }
+
+    moves.finalizeTurnReveal({ openingID: turnOpening.id })
+  }
+
+  // All three procedures share the click target and the Continue button, so these route to whichever
+  // one is live. They can never overlap: each one blocks the others' moves.
   const handleRevealCard = (cardID: string) => {
+    if (isTurnRevealDriver && turnOpening) {
+      moves.revealTurnCard({ openingID: turnOpening.id, cardID })
+      return
+    }
+
     if (!isRevealCaller || !focusedSeatID) {
       return
     }
@@ -3964,6 +4066,27 @@ export function BlowCowBoard({
           type="button"
         >
           Punish
+        </button>
+      )
+    }
+
+    /*
+     * The turn reveal's own Continue. Kept separate from the one below rather than folded into
+     * `canAdvanceReveal`, because it waits on the cards this turn owes rather than on everything the
+     * seat has face down — The Spy finishes with a card still shut.
+     */
+    if (isTurnRevealDriver && isTurnRevealComplete && seat.id === focusedSeatID) {
+      return (
+        <button
+          className="seat-reveal-action-button"
+          onClick={(event) => {
+            event.stopPropagation()
+            handleFinalizeTurnReveal()
+          }}
+          title="Finish the reveal and take your turn."
+          type="button"
+        >
+          Continue
         </button>
       )
     }
@@ -5066,7 +5189,7 @@ export function BlowCowBoard({
         />
       </PlayerRing>
 
-      <section className={`bottom-play-strip${isEmotePickerOpen ? ' emote-picker-open' : ''}`}>
+      <section className={`bottom-play-strip${isEmotePickerOpen ? ' emote-picker-open' : ''}${isTakeTurnPromptOpen ? ' take-turn-open' : ''}`}>
         <div className={`hand-stage${isInteractiveTurn ? ' active-turn' : ''}${isPunishmentFlashActive ? ' punishment-flash' : ''}`}>
           <div className="hand-play-row">
           <div className="hand-scroll-viewport">
@@ -5181,7 +5304,11 @@ export function BlowCowBoard({
                     title={canEmote ? 'Choose an emote' : 'Only active players can emote.'}
                     type="button"
                   >
-                    {EMOTE_SPRITES[0] ? <img alt="" aria-hidden="true" className="emote-toggle-icon" src={EMOTE_SPRITES[0].url} /> : null}
+                    <span
+                      aria-hidden="true"
+                      className="toolbar-button-icon"
+                      style={{ '--toolbar-icon-sprite': `url(${EMOTE_ICON_SPRITE})` } as CSSProperties}
+                    />
                     Emote
                   </button>
 
@@ -5378,6 +5505,28 @@ export function BlowCowBoard({
           </div>
           </div>
         </div>
+
+        {/*
+          * The curtain a turn now opens behind. It covers the whole strip rather than disabling the
+          * controls under it, because a turn that has not been taken is not a turn with some actions
+          * missing — it has not started. A sibling of the hand stage rather than a child of it, since
+          * `.hand-stage` isolates its own stacking context and the cover has to sit over the viewing
+          * player's block, which the ring drops into this strip from above.
+          */}
+        {isTakeTurnPromptOpen ? (
+          <div className="take-turn-cover">
+            <button
+              autoFocus
+              className="take-turn-button"
+              onClick={handleTakeTurn}
+              title="Open your turn."
+              type="button"
+            >
+              <span aria-hidden="true" className="take-turn-button-glint" />
+              <span className="take-turn-button-label">Take Turn</span>
+            </button>
+          </div>
+        ) : null}
       </section>
 
       </>

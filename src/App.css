@@ -489,6 +489,11 @@
   background: linear-gradient(135deg, #ffdd86, #ffba4a);
 }
 
+/*
+ * Now carried only by the status chips. The character chips dropped theirs for the full-size card
+ * preview below: their art already carries the name and the ability, and a description repeated in
+ * a 280px bubble was the smaller, worse copy of it.
+ */
 .character-chip-tooltip {
   position: absolute;
   z-index: 2;
@@ -519,6 +524,54 @@
   opacity: 1;
   transform: translate(-50%, 0);
   visibility: visible;
+}
+
+/*
+ * The hovered character's card, pinned to the right of the viewport rather than anchored to the chip
+ * that opened it. Portrait art with its own text baked in only reads near full height, and the chip
+ * grid sits in the narrow left column, so there is nowhere beside a chip for a card this size to go.
+ *
+ * Fixed and `pointer-events: none` together are what make it safe to park over the Join panel: it
+ * follows the viewport rather than the scroll, and it never intercepts a click meant for what is
+ * underneath. It also cannot be reached by the pointer, so nothing can hover it and hold it open.
+ */
+.character-preview {
+  position: fixed;
+  z-index: 12;
+  top: 50%;
+  right: clamp(16px, 3vw, 64px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * Height is the binding dimension on a normal desktop viewport and the width cap is the guard for
+   * a short, wide one. The art is portrait, so sizing it off the height is what makes it fill the
+   * side of the screen rather than sitting in a column of its own.
+   */
+  width: min(46vw, 620px);
+  height: min(86vh, 1000px);
+  pointer-events: none;
+  transform: translateY(-50%);
+  animation: character-preview-in 140ms ease-out;
+}
+
+.character-preview-card {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 24px 48px rgba(0, 0, 0, 0.5));
+}
+
+@keyframes character-preview-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
 }
 
 /* A status chip is a character chip that carries its sprite, since the art is what the table shows. */
@@ -1577,6 +1630,31 @@
 @media (max-width: 980px) {
   .lobby-grid {
     grid-template-columns: 1fr;
+  }
+
+  /*
+   * One column, so there is no right side to hold the card clear of. It moves to the middle of the
+   * viewport instead of shrinking into a corner: the art is the only place the ability is written
+   * now, so a preview too small to read would be no preview at all. Still `pointer-events: none`,
+   * so on a touch device the card a tap opens never blocks the next tap.
+   */
+  .character-preview {
+    right: 50%;
+    width: min(72vw, 420px);
+    height: min(70vh, 760px);
+    transform: translate(50%, -50%);
+  }
+
+  @keyframes character-preview-in {
+    from {
+      opacity: 0;
+      transform: translate(50%, -50%) scale(0.96);
+    }
+
+    to {
+      opacity: 1;
+      transform: translate(50%, -50%) scale(1);
+    }
   }
 }
 
@@ -3283,12 +3361,6 @@
   --toolbar-accent: 112, 223, 174;
 }
 
-.emote-toggle-icon {
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-}
-
 .emote-picker {
   position: absolute;
   z-index: 20;
@@ -4131,6 +4203,11 @@
     transition: none;
   }
 
+  /* The card still appears, it simply stops sliding in from the edge to do it. */
+  .character-preview {
+    animation: none;
+  }
+
   /*
    * The card stops moving entirely. The glare and the foil stay, because they are lighting rather
    * than motion, and they no longer travel once the tilt is pinned flat.
@@ -4165,8 +4242,29 @@
   .rules-overlay-panel,
   .rule-card-grid,
   .rule-card,
+  .take-turn-cover,
+  .take-turn-button-glint,
   .history-entry p.history-entry-omen {
     animation: none;
+  }
+
+  /*
+   * The prompt still has to read as a prompt with the twinkle gone, so it is pinned to the bright
+   * half of the keyframe — the same treatment `.seat-block.accused-cheat-seat` gets below.
+   */
+  .take-turn-button {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.2),
+      0 0 0 3px rgba(255, 221, 134, 0.26),
+      0 0 32px rgba(255, 206, 92, 0.5),
+      0 16px 34px rgba(0, 0, 0, 0.5);
+  }
+
+  .take-turn-button-glint {
+    opacity: 0;
   }
 
   /*
@@ -4483,6 +4581,7 @@
 }
 
 .bottom-play-strip {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
@@ -4491,6 +4590,143 @@
 /* The player ring normally paints above the strip; lift only the open picker so its grid receives taps. */
 .table-board > .bottom-play-strip.emote-picker-open {
   z-index: 3;
+}
+
+/*
+ * The same lift for the take-turn curtain, and for a stronger reason: the viewing player's block is
+ * dropped out of the ring into this strip, so without it the block would paint through the curtain
+ * and sit over the button in the middle of it.
+ */
+.table-board > .bottom-play-strip.take-turn-open {
+  z-index: 3;
+}
+
+/*
+ * What a turn now opens behind. It covers the strip whole rather than disabling the controls beneath
+ * it, because a turn that has not been taken has not started — there is no half of it to offer. Only
+ * ever mounted on the client whose turn it is.
+ */
+.take-turn-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  /* So the button's `cqw` type scale reads the strip's width rather than the viewport's. */
+  container-type: inline-size;
+  display: grid;
+  place-items: center;
+  border-radius: 24px;
+  background: rgba(4, 15, 14, 0.88);
+  backdrop-filter: blur(3px);
+  animation: take-turn-cover-in 420ms ease both;
+}
+
+/*
+ * Sized against the strip rather than in fixed pixels: it is the only thing on that surface while it
+ * is up, so it takes most of the width and enough of the height to read as a curtain with one way
+ * through it. The caps keep it from swelling past the panel on a wide board.
+ */
+.take-turn-button {
+  position: relative;
+  overflow: hidden;
+  width: min(62%, 620px);
+  min-height: min(56%, 132px);
+  padding: 26px 48px;
+  border: 2px solid rgba(255, 221, 134, 0.55);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 221, 134, 0.3), rgba(12, 26, 23, 0.94));
+  color: #fff6df;
+  font-size: clamp(1.5rem, 3.2cqw, 2.4rem);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  /*
+   * Fade in first, then twinkle forever. The delay on the second keyframe is the first one's whole
+   * duration, so the glow never fights the entrance.
+   */
+  animation:
+    take-turn-button-in 460ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    take-turn-button-twinkle 1900ms ease-in-out 460ms infinite;
+}
+
+.take-turn-button:hover,
+.take-turn-button:focus-visible {
+  border-color: rgba(255, 244, 205, 0.95);
+  outline: none;
+}
+
+.take-turn-button-label {
+  position: relative;
+  z-index: 1;
+}
+
+/* The light that runs across the face, so the prompt reads as flashing rather than only breathing. */
+.take-turn-button-glint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent, rgba(255, 250, 224, 0.5), transparent);
+  animation: take-turn-button-glint 1900ms ease-in-out 460ms infinite;
+}
+
+@keyframes take-turn-cover-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes take-turn-button-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes take-turn-button-twinkle {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 0 0 1px rgba(255, 221, 134, 0.2),
+      0 16px 34px rgba(0, 0, 0, 0.5);
+  }
+
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.2),
+      0 0 0 4px rgba(255, 221, 134, 0.26),
+      0 0 38px rgba(255, 206, 92, 0.58),
+      0 16px 34px rgba(0, 0, 0, 0.5);
+  }
+}
+
+@keyframes take-turn-button-glint {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+
+  30% {
+    opacity: 0.9;
+  }
+
+  70%,
+  100% {
+    transform: translateX(400%);
+    opacity: 0;
+  }
 }
 
 .hand-stage {

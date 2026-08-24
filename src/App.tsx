@@ -23,7 +23,6 @@ import {
   type BlowCowSetupData,
 } from './game/blowCowGame.ts'
 import {
-  BLOW_COW_CHARACTER_DESCRIPTIONS,
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   type BlowCowImplementedCharacterName,
 } from './game/blowCowCharacters.ts'
@@ -44,8 +43,10 @@ import {
   type BlowCowStatusID,
 } from './game/blowCowStatuses.ts'
 import { getStatusSprite } from './ui/statusSprites.ts'
+import { getCharacterCardSpriteFrames } from './ui/characterCardSprites.ts'
 import { getRoomClearBlockReason, hasRoomGameEnded } from './lobbyRooms.ts'
 import { BlowCowBoard } from './ui/BlowCowBoard.tsx'
+import { CharacterCardSpriteImage } from './ui/CharacterCardSpriteImage.tsx'
 import { RuleCardDeck } from './ui/RuleCardDeck.tsx'
 import './App.css'
 
@@ -285,6 +286,12 @@ function App() {
   const [selectedCharacterPool, setSelectedCharacterPool] = useState<BlowCowImplementedCharacterName[]>(
     () => [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES],
   )
+  /*
+   * The chip the pointer or keyboard focus is currently on, which is the whole of the preview. The
+   * card art carries the character's name and ability, so showing it at a readable size is what the
+   * chips say about themselves — there is no description text behind them any more.
+   */
+  const [previewCharacterName, setPreviewCharacterName] = useState<BlowCowImplementedCharacterName | null>(null)
   const [selectedRuleStatuses, setSelectedRuleStatuses] = useState<BlowCowRulesState>(createDefaultRulesState)
   // The rule cards are a deck of illustrated tiles. Inline they made the left column several screens
   // tall, so they live behind a button in a centred overlay, the same one the match uses.
@@ -916,28 +923,36 @@ function App() {
                   {BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.map((characterName) => {
                     const isSelected = effectiveCharacterPool.includes(characterName)
                     const isConfusedLocked = characterName === 'The Confused' && !isConfusedAvailableInManualDeck
-                    const tooltip = `${BLOW_COW_CHARACTER_DESCRIPTIONS[characterName]}${isConfusedLocked ? ' Requires J to be in the manual deck.' : ''}`
 
                     return (
                       <button
                         aria-pressed={isSelected}
-                        aria-describedby={`character-chip-tooltip-${characterName.replaceAll(' ', '-').toLowerCase()}`}
                         className={`character-chip ${isSelected ? 'selected' : ''}`}
                         disabled={isBusy || isConfusedLocked}
                         key={characterName}
+                        onBlur={() => {
+                          setPreviewCharacterName((previous) => (previous === characterName ? null : previous))
+                        }}
                         onClick={() => {
                           toggleCharacterPoolCharacter(characterName)
+                        }}
+                        /*
+                         * Cleared against this chip's own name rather than unconditionally, because
+                         * moving between two chips fires the new chip's enter before the old one's
+                         * leave and a blind clear would blank the preview that just opened.
+                         */
+                        onFocus={() => {
+                          setPreviewCharacterName(characterName)
+                        }}
+                        onMouseEnter={() => {
+                          setPreviewCharacterName(characterName)
+                        }}
+                        onMouseLeave={() => {
+                          setPreviewCharacterName((previous) => (previous === characterName ? null : previous))
                         }}
                         type="button"
                       >
                         {characterName}
-                        <span
-                          className="character-chip-tooltip"
-                          id={`character-chip-tooltip-${characterName.replaceAll(' ', '-').toLowerCase()}`}
-                          role="tooltip"
-                        >
-                          {tooltip}
-                        </span>
                       </button>
                     )
                   })}
@@ -1245,6 +1260,23 @@ function App() {
           </div>
         </article>
       </section>
+
+      {/*
+        * The hovered character's card, held clear of the page on the right rather than beside the
+        * chip that opened it. The art is portrait and carries its own name and ability text, so it
+        * only reads at close to full height — a tooltip-sized copy would be unreadable, which is why
+        * the descriptions the chips used to carry are gone. `pointer-events: none` in the stylesheet
+        * keeps the Join panel underneath fully usable while it stands.
+        */}
+      {useCharacters && previewCharacterName ? (
+        <aside aria-hidden="true" className="character-preview">
+          <CharacterCardSpriteImage
+            alt=""
+            className="character-preview-card"
+            frames={getCharacterCardSpriteFrames(previewCharacterName)}
+          />
+        </aside>
+      ) : null}
 
       {isHouseRulesOpen ? (
         <HouseRulesOverlay

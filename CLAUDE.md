@@ -172,6 +172,48 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   no decline button — Pass is one, and it counts as an ordinary pass. `performPlay` also clears
   `round.forcedPlayPlayerID` now, because a lock still standing would take Pass off the encore of a
   player who has already done what it asked.
+- The Thinker steps their own points at the end of every turn they take — the wipe above 12 first,
+  then parity — and is the only character whose points move with no card changing hands. It is a
+  passive with no move, no limit and nothing to decline, so it hangs off `turn.onEnd` beside the
+  status tick: a turn ends eleven ways and `handleTurnEnd` is where all of them meet. It sits
+  **above** the `isRuleRemoved(G, 'status')` early return, because that rule governs the counter and
+  not a character. `getThinkerPoints` is the whole rule, kept separate so the three branches can be
+  read in the order the card writes them; a no-op is not logged, and zero is the only one, since it is
+  even and halves to itself. `hasLeft` is the one guard: a player who has left takes no further turns,
+  so the only end this could still reach is the one straight after `markPlayerLeft`, and
+  `applyLeaveCharacterEffect` is meant to have the last word on a final total. Lower points win, so
+  `3n + 1` is the cost and the wipe is the prize. The archive kind is `recalculatePoints`; it moves
+  `points` without touching `scoredSets`, so a Thinker's scored-ranks tooltip deliberately stops
+  adding up to their total.
+- A turn no longer arrives ready to play. `handleTurnStart` writes `G.turnOpening` naming the seat on
+  the clock, and the `takeTurn` move is what opens it. The record has two halves and they are read
+  separately everywhere. Untaken, `isAwaitingTurnTake` refuses **that one seat's turn actions** —
+  nine sites, all of which already checked `ctx.currentPlayer` — and nothing else: the cheats are
+  defined by being out of turn, `Accuse` is not turn-bound, and a table cannot be made to wait on a
+  button nobody has pressed yet. Taken with a live `reveal`, `isTurnRevealRunning` makes it a fourth
+  procedure inside `isProcedureRunning`, holding the whole table exactly as a BS walk does. It is
+  written last in `handleTurnStart`, after the empty-hand leave branch, so a seat that leaves at the
+  start of its turn is never handed one.
+- The Reveal Rule is performed by hand now. `openTurnReveal` decides what the turn owes **at the
+  press** rather than at the turn's start, so a card palmed off the table in between is never one it
+  asks for, and publishes `reveal.cardIDs` — exactly the cards the player may flip. For The Spy that
+  is one card the server draws with `random.Shuffle`, which is what keeps their ability random rather
+  than a choice, and why `takeTurn` is `client: false`. `revealTurnCard` flips one, `finalizeTurnReveal`
+  is Continue and writes the history and archive entries through `completeTurnReveal`. Four cases skip
+  the walk and write the same thing immediately: no pending play, the rule removed, a pile already
+  face up, and a play The Mime's disguise is not drawing — a card that is not on screen is not one a
+  client can be asked to click. The turn reveal is the one procedure that does **not** call
+  `clearMimicry`: it is not raised by anybody, and a disguise that came off every turn would not be a
+  disguise.
+- On the client the walk reuses `focusedSeatID` and `.focused-seat`, with no lead-in — nothing is
+  drawn between the press and the travel, and `isProcedureRunning` already refuses every move that
+  could start a measuring sequence. Its Continue is a separate branch of `renderSeatRevealActions`
+  with its own completion test, because it waits on the cards the turn owed rather than on everything
+  the seat has face down. Blind is deliberately not lifted for it, unlike a BS or Reset reveal: there
+  is no challenge to resolve, so a blind player opens their cards for the table and still cannot read
+  them. `.take-turn-cover` is a sibling of `.hand-stage`, not a child, and `take-turn-open` lifts the
+  whole strip above the ring — `.hand-stage` isolates its own stacking context, and the viewing
+  player's block is dropped into this strip from above.
 - The Cat owns the direction flip as well as the table-card flip. `resolveToggleDirection` reads
   `isCat`, and its own-turn flip is the only legal one — every other flip is a tamper, cheat licence
   or not. The Contrarian no longer touches the direction at all.
@@ -271,9 +313,15 @@ Guidance for Claude Code when working in this repository. This is the Claude cou
   `renderCardFooter`, so one set of cards carries no controls, status buttons, or a Select button.
   Its page size of four is load-bearing: a second row overflows `board-overlay-panel` and brings back
   the scrollbar the paging exists to avoid.
-- Character card sprites already contain the character name and description. Do not duplicate that
-  description text in the UI unless explicitly requested. Rule cards are the one exception: their
-  illustrations carry no text, so the Rules panel renders the title and description itself.
+- Character card sprites already contain the character name and description, and are now the *only*
+  place a character's ability is written for a player. There is no description table in
+  `src/game/blowCowCharacters.ts` — it existed solely for a lobby tooltip that the full-size card
+  preview replaced, and a second copy in code could drift from the art silently. `Characters.csv` and
+  `RULES.md` are where the wording is authored. Do not reintroduce ability text in the UI unless
+  explicitly requested; show the card instead. Because of that, shipping an implemented character
+  without art leaves it unreadable rather than merely plain, which is what the `character card art`
+  check guards. Rule cards are the one exception to all of this: their illustrations carry no text, so
+  the Rules panel renders the title and description itself.
 - Sprite folders live at the repo root, not in `public/`, and are loaded via `import.meta.glob`:
   `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`,
   `rule_card_sprites/`, `status_sprites/`.

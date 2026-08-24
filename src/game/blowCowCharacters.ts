@@ -24,38 +24,18 @@ export const BLOW_COW_CHARACTER_NAMES = [
   'The Gambler',
   'The Mime',
   'The Clown',
+  'The Thinker',
 ] as const
 
 export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
 
-export const BLOW_COW_CHARACTER_DESCRIPTIONS: Record<BlowCowCharacterName, string> = {
-  'The Dreamer': 'You may cheat. You will be punished if caught. Unlimited use.',
-  'The Believer': 'No special ability.',
-  'The Cat': 'On your turn, flip a revealed table card face down or change the game direction. Unlimited use.',
-  'The Contrarian': 'When you call BS, the opposite player is always punished.',
-  'The Confused': 'Jacks also function as Jokers.',
-  'The Deranged': 'Whenever you score a point, remove up to two cards from your hand. Unlimited use.',
-  'The Drunkard': 'You may play random cards. Lose 3 points on leaving if every play was random.',
-  'The Foreigner': 'When you pass, add any card from outside the game to your hand. Unlimited use.',
-  'The Grandmaster': 'Once per game, call BS on any other player with a hidden play.',
-  'The Invisible Hand': 'Use Manipulate as the starting player to set the round\'s rank and direction and hand it to another player, who must play. Unlimited use.',
-  'The Philanthropist': 'As the starting player, declare that you may play three cards on any turn that round once per game.',
-  'The Privileged': 'You are always the starting player unless you were punished last round or another ability overrides it. Gain 1 point after leaving.',
-  'The Rogue': 'At round start, show an all-Club hand to become the starting player. Unlimited use.',
-  'The Speedrunner': 'If first to leave with exactly 2 points, leave with 0 points instead.',
-  'The Spy': 'On your turn, reveal one random card from your previous play when it has at least two hidden cards. Unlimited use.',
-  'The Streamer': 'Lose 2 points on leaving if you never passed.',
-  'The Pacifist': 'Lose 1 point on leaving if you never called BS.',
-  'The Pawn': 'Use En Passant to call BS on the player before the latest non-passing player when that latest player played two cards. Unlimited use.',
-  'The Seeker': 'At the start of the game, take one character card of your choice from the pool.',
-  'The Broken': 'At the start of the game, remove one rule card of your choice from the game.',
-  'The Prototype': 'Use Defy to destroy one heart card in your hand and one random rule card, without ending your turn. Once per round.',
-  'The Mastermind': 'Use Conspire to open another player\'s hand and play out of it instead of your own. Once per round.',
-  'The Gambler': 'Reset becomes a showdown: the cards in front of each player are read as a poker hand, and the weakest takes the whole table instead of it being redistributed.',
-  'The Mime': 'Use Mimic to take on the appearance of your next player, and swap seats with them half the time. Once per round.',
-  'The Clown': 'Your first play each round does not end your turn. Take one more action after it, but not another play. Once per round.',
-}
-
+/*
+ * There is deliberately no description table here. Every character card sprite has its name and its
+ * ability printed on the art, so the one place the UI shows an ability is the card itself — the lobby
+ * pool preview, the seat badge's enlarged card, and The Seeker's picker all draw the same picture.
+ * A second copy in code was only ever read by a tooltip, and it could drift from the art silently.
+ * `Characters.csv` and `RULES.md` are where the wording is kept for authoring.
+ */
 export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Dreamer',
   'The Believer',
@@ -79,6 +59,7 @@ export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Gambler',
   'The Mime',
   'The Clown',
+  'The Thinker',
 ] as const satisfies readonly BlowCowCharacterName[]
 
 export type BlowCowImplementedCharacterName = (typeof BLOW_COW_IMPLEMENTED_CHARACTER_NAMES)[number]

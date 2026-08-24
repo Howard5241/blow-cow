@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readdirSync } from 'node:fs'
 import { BLOW_COW_IMPLEMENTED_CHARACTER_NAMES, type BlowCowCharacterName } from '../src/game/blowCowCharacters.ts'
 import {
   BLOW_COW_RULE_DEFINITIONS,
@@ -33,6 +34,7 @@ import {
   type BlowCowBeginBSPunishmentArgs,
   type BlowCowBeginResetPunishmentArgs,
   BLOW_COW_RANKS,
+  BLOW_COW_THINKER_WIPE_THRESHOLD,
   BlowCowGame,
   CARD_BACK_SPRITE,
   type BlowCowCallBSArgs,
@@ -72,8 +74,11 @@ import {
   type BlowCowSeekCharacterArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowFinalizeTurnRevealArgs,
   type BlowCowRevealBSCardArgs,
   type BlowCowRevealResetCardArgs,
+  type BlowCowRevealTurnCardArgs,
+  type BlowCowTakeTurnArgs,
   type BlowCowGameOver,
   type BlowCowPassArgs,
   type BlowCowPlayRandomArgs,
@@ -206,6 +211,18 @@ const beginResetPunishmentMove = BlowCowGame.moves.beginResetPunishment as (
   context: TestContext,
   args: BlowCowBeginResetPunishmentArgs,
 ) => unknown
+const takeTurnMove = BlowCowGame.moves.takeTurn.move as (
+  context: TestContext,
+  args: BlowCowTakeTurnArgs,
+) => unknown
+const revealTurnCardMove = BlowCowGame.moves.revealTurnCard as (
+  context: TestContext,
+  args: BlowCowRevealTurnCardArgs,
+) => unknown
+const finalizeTurnRevealMove = BlowCowGame.moves.finalizeTurnReveal as (
+  context: TestContext,
+  args: BlowCowFinalizeTurnRevealArgs,
+) => unknown
 const beginTurn = BlowCowGame.turn.onBegin as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
 const endTurn = BlowCowGame.turn.onEnd as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
 
@@ -303,6 +320,66 @@ function createEventRecorder() {
     },
     record,
   }
+}
+
+/**
+ * Presses Take Turn for whoever the open turn belongs to. A no-op when the turn has already been
+ * taken or never opened one — a seat that left at the start of its turn never gets a gate.
+ */
+function takeOpenTurn(state: BlowCowState, events: TestContext['events'], random?: TestContext['random']) {
+  const opening = state.turnOpening
+  if (!opening || opening.isTaken) {
+    return
+  }
+
+  assert.equal(takeTurnMove({
+    G: state,
+    ctx: {
+      currentPlayer: opening.playerID,
+      turn: opening.turnNumber,
+    },
+    events,
+    playerID: opening.playerID,
+    random,
+  }, { openingID: opening.id }), undefined)
+}
+
+/**
+ * Drives the forced reveal a taken turn may have opened: press every owed card, then Continue. A
+ * no-op when the turn owed nothing, which is most turns.
+ */
+function completeTurnReveal(state: BlowCowState, events: TestContext['events']) {
+  const opening = state.turnOpening
+  if (!opening?.reveal) {
+    return
+  }
+
+  const context: TestContext = {
+    G: state,
+    ctx: {
+      currentPlayer: opening.playerID,
+      turn: opening.turnNumber,
+    },
+    events,
+    playerID: opening.playerID,
+  }
+
+  for (const cardID of opening.reveal.cardIDs) {
+    assert.equal(revealTurnCardMove(context, { openingID: opening.id, cardID }), undefined)
+  }
+
+  assert.equal(finalizeTurnRevealMove(context, { openingID: opening.id }), undefined)
+}
+
+/**
+ * Opens a turn the way a client does: the framework hook, the Take Turn press that unlocks the seat,
+ * and the forced reveal that press may have opened, walked to its end. Scenarios that care about the
+ * gate or the walk itself drive the three separately.
+ */
+function openTurn(context: Omit<TestContext, 'playerID'>) {
+  beginTurn({ G: context.G, ctx: context.ctx, events: context.events })
+  takeOpenTurn(context.G, context.events, context.random)
+  completeTurnReveal(context.G, context.events)
 }
 
 /**
@@ -638,7 +715,7 @@ function runLeaveRemovesTableCardsCheck() {
   state.players['1'].pendingRevealPlayID = 'play-1'
 
   const { events, record } = createEventRecorder()
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '1',
@@ -975,6 +1052,229 @@ function runFinalTwoResolutionWindowCheck() {
   assert.notEqual(lockedPassResult, undefined)
   assert.equal(callResetResult, undefined)
   assert.equal(resetState.resetResolution?.callerPlayerID, '0')
+}
+
+/**
+ * The gate a turn now opens with, and the forced reveal behind it. Four scenarios: the untaken gate
+ * refusing the turn's own actions while leaving the out-of-turn ones alone, the ordinary walk, The
+ * Spy's one-card walk refusing every other card, and the walk holding the whole table the way a BS
+ * resolution does.
+ */
+function runTurnOpeningCheck() {
+  {
+    // The gate itself: no reveal owed, so it is purely "press this before you may act".
+    const state = createScenarioState(3)
+    const { events } = createEventRecorder()
+
+    state.round.trumpRank = 'Q'
+    state.players['0'].hand = [card('hearts_queen.png')]
+    state.players['1'].character = 'The Dreamer'
+    state.players['1'].hand = [card('clubs_ace.png')]
+    state.players['2'].hand = [card('spades_king.png')]
+
+    beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 2 }, events })
+
+    assert.equal(state.turnOpening?.playerID, '0')
+    assert.equal(state.turnOpening?.isTaken, false)
+    assert.equal(state.turnOpening?.reveal ?? null, null)
+
+    const onTurn: TestContext = {
+      G: state,
+      ctx: { currentPlayer: '0', turn: 2 },
+      events,
+      playerID: '0',
+    }
+
+    assert.notEqual(playMove(onTurn, { cardIDs: [state.players['0'].hand[0].id] }), undefined)
+    assert.notEqual(passMove(onTurn), undefined)
+    assert.notEqual(callBSMove(onTurn, { targetPlayerID: '1' }), undefined)
+    assert.equal(state.table.plays.length, 0)
+    assert.equal(state.round.passStreak, 0)
+
+    // The cheats are out of turn by definition, so an untaken gate is not theirs to wait on.
+    assert.equal(toggleDirectionMove({ ...onTurn, playerID: '1' }), undefined)
+    assert.equal(
+      sneakPlayMove({ ...onTurn, playerID: '1' }, { cardIDs: [state.players['1'].hand[0].id] }),
+      undefined,
+    )
+
+    // A press from the wrong seat, and one carrying a stale id, are both refused.
+    const openingID = state.turnOpening?.id ?? ''
+    assert.notEqual(takeTurnMove({ ...onTurn, playerID: '2' }, { openingID }), undefined)
+    assert.notEqual(takeTurnMove(onTurn, { openingID: 'turn-open-stale' }), undefined)
+    assert.equal(state.turnOpening?.isTaken, false)
+
+    assert.equal(takeTurnMove(onTurn, { openingID }), undefined)
+    // Nothing was owed, so the gate does not linger as a record with nothing left in it.
+    assert.equal(state.turnOpening ?? null, null)
+    assert.equal(playMove(onTurn, { cardIDs: [state.players['0'].hand[0].id] }), undefined)
+    // Seat 1's sneaked card is the other one on the table.
+    assert.deepEqual(state.table.plays.map((play) => play.playerID), ['1', '0'])
+  }
+
+  {
+    // The ordinary walk: every face-down card of the pending play, then Continue.
+    const state = createScenarioState()
+    const firstCard = card('hearts_queen.png')
+    const secondCard = card('clubs_king.png')
+    const { events } = createEventRecorder()
+
+    state.round.trumpRank = 'Q'
+    state.players['0'].hand = [card('spades_ace.png')]
+    state.players['1'].hand = [card('diamonds_queen.png')]
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards: [firstCard, secondCard],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 1,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['0'].pendingRevealPlayID = 'play-0'
+
+    beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    takeOpenTurn(state, events)
+
+    const opening = state.turnOpening
+    assert.ok(opening?.reveal)
+    assert.equal(opening.reveal.isFullReveal, true)
+    assert.deepEqual([...opening.reveal.cardIDs].sort(), [firstCard.id, secondCard.id].sort())
+    assert.equal(state.players['0'].pendingRevealPlayID, null)
+
+    const onTurn: TestContext = {
+      G: state,
+      ctx: { currentPlayer: '0', turn: 3 },
+      events,
+      playerID: '0',
+    }
+
+    // The walk holds the table exactly as a BS resolution does, for its owner and for everyone else.
+    assert.notEqual(playMove(onTurn, { cardIDs: [state.players['0'].hand[0].id] }), undefined)
+    assert.notEqual(toggleDirectionMove({ ...onTurn, playerID: '1' }), undefined)
+
+    assert.notEqual(finalizeTurnRevealMove(onTurn, { openingID: opening.id }), undefined)
+    assert.equal(revealTurnCardMove(onTurn, { openingID: opening.id, cardID: firstCard.id }), undefined)
+    // Still one card face down, so Continue is still refused.
+    assert.notEqual(finalizeTurnRevealMove(onTurn, { openingID: opening.id }), undefined)
+    // Only the player the turn belongs to drives it.
+    assert.notEqual(
+      revealTurnCardMove({ ...onTurn, playerID: '1' }, { openingID: opening.id, cardID: secondCard.id }),
+      undefined,
+    )
+    assert.equal(revealTurnCardMove(onTurn, { openingID: opening.id, cardID: secondCard.id }), undefined)
+    assert.equal(finalizeTurnRevealMove(onTurn, { openingID: opening.id }), undefined)
+
+    assert.equal(state.turnOpening ?? null, null)
+    assert.equal(state.table.plays[0].revealedAtTurn, 3)
+    assert.match(
+      state.history.find((entry) => entry.title.includes('revealed 2 card(s)'))?.detail ?? '',
+      /after claiming Q/i,
+    )
+    // And the turn is theirs again.
+    assert.equal(playMove(onTurn, { cardIDs: [state.players['0'].hand[0].id] }), undefined)
+  }
+
+  {
+    // The Spy: the server draws the card, so it is the only one their client may press.
+    const state = createScenarioState()
+    const drawnCard = card('hearts_queen.png')
+    const untouchedCard = card('clubs_king.png')
+    const { events } = createEventRecorder()
+
+    state.round.trumpRank = 'Q'
+    state.players['0'].character = 'The Spy'
+    state.players['0'].hand = [card('spades_ace.png')]
+    state.players['1'].hand = [card('diamonds_queen.png')]
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards: [drawnCard, untouchedCard],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 1,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['0'].pendingRevealPlayID = 'play-0'
+
+    beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    takeOpenTurn(state, events, { Shuffle: identityShuffle })
+
+    const opening = state.turnOpening
+    assert.ok(opening?.reveal)
+    assert.equal(opening.reveal.isFullReveal, false)
+    assert.deepEqual(opening.reveal.cardIDs, [drawnCard.id])
+
+    const onTurn: TestContext = {
+      G: state,
+      ctx: { currentPlayer: '0', turn: 3 },
+      events,
+      playerID: '0',
+    }
+
+    assert.notEqual(revealTurnCardMove(onTurn, { openingID: opening.id, cardID: untouchedCard.id }), undefined)
+    assert.equal(revealTurnCardMove(onTurn, { openingID: opening.id, cardID: drawnCard.id }), undefined)
+    assert.equal(finalizeTurnRevealMove(onTurn, { openingID: opening.id }), undefined)
+
+    assert.equal(state.table.plays[0].revealedAtTurn, null)
+    assert.deepEqual(state.table.plays[0].revealedCardIDs, [drawnCard.id])
+    assert.equal(isCardFaceUpOnTable(state.table.plays[0], untouchedCard.id), false)
+  }
+
+  {
+    // A play the disguise is not drawing cannot be pressed, so the rule simply happens at the press.
+    const state = createScenarioState(3)
+    const hiddenPlayCard = card('hearts_queen.png')
+    const { events } = createEventRecorder()
+
+    state.round.trumpRank = 'Q'
+    state.players['0'].character = 'The Mime'
+    state.players['0'].hand = [card('spades_ace.png')]
+    state.players['1'].hand = [card('diamonds_queen.png')]
+    state.players['2'].hand = [card('clubs_king.png')]
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards: [hiddenPlayCard],
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 1,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['0'].pendingRevealPlayID = 'play-0'
+    state.mimicry = {
+      playerID: '0',
+      sourcePlayerID: '1',
+      turnNumber: 2,
+      character: 'The Believer',
+      points: 0,
+      pointRanks: [],
+      handCount: 1,
+      wasSeekerPick: false,
+      statuses: [],
+      borrowedPlayIDs: [],
+      hiddenPlayIDs: ['play-0'],
+      borrowedFaceDownCardIDs: [],
+      revealedPlayerIDs: [],
+      pendingHandoverPlayerID: null,
+    }
+
+    beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 4 }, events })
+    takeOpenTurn(state, events)
+
+    assert.equal(state.turnOpening ?? null, null)
+    assert.equal(state.table.plays[0].revealedAtTurn, 4)
+    assert.equal(state.players['0'].pendingRevealPlayID, null)
+  }
 }
 
 function runDefaultRankSelectionCheck() {
@@ -1732,7 +2032,7 @@ function runDrunkardRulesCheck() {
     state.players['0'].hasUsedManualPlay = false
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -1760,7 +2060,7 @@ function runDrunkardRulesCheck() {
     state.players['0'].hasUsedManualPlay = true
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -1917,7 +2217,7 @@ function runCatRulesCheck() {
     ]
     state.players['1'].pendingRevealPlayID = 'play-spy-cat'
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '1',
@@ -2144,7 +2444,7 @@ function runPrivilegedRulesCheck() {
     state.players['1'].hand = [card('clubs_ace.png')]
     state.round.trumpRank = 'Q'
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -2501,7 +2801,7 @@ function runDreamerRepeatTrumpCheck() {
     state.round.startingPlayerID = '1'
     state.round.previousTrumpRank = 'Q'
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '1',
@@ -2559,7 +2859,7 @@ function runDreamerRepeatTrumpCheck() {
     state.round.startingPlayerID = '1'
     state.round.previousTrumpRank = 'Q'
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '1',
@@ -2691,7 +2991,7 @@ function createDreamerDirectionScenario() {
   ]
 
   // Seat 0 is on turn, so the direction the tamper is measured against is theirs.
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '0',
@@ -2803,7 +3103,7 @@ function runDreamerDirectionCheatCheck() {
     }), undefined)
     assert.ok(state.directionTamper)
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '2',
@@ -2934,7 +3234,7 @@ function runDreamerSneakPlayCheck() {
       cardIDs: [state.players['1'].hand[0].id],
     }), undefined)
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '2',
@@ -3371,7 +3671,7 @@ function createTakeBackScenario() {
     },
   ]
 
-  beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
 
   return { state, events, record, openCard, revealedCard, hiddenCard }
 }
@@ -3480,7 +3780,7 @@ function runTakeBackCheatCheck() {
     const { state, events, openCard } = createTakeBackScenario()
     // A card in hand, or the Leave Game Rule takes the seat out before their turn can start.
     state.players['1'].hand = [card('clubs_02.png')]
-    beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+    openTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
 
     assert.equal(
       takeBackCardMove(
@@ -3533,7 +3833,7 @@ function runTakeBackCheatCheck() {
       ),
       undefined,
     )
-    beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+    openTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
     assert.equal(state.takeBackTamper ?? null, null)
 
     assert.equal(
@@ -3991,7 +4291,7 @@ function runDirectionFlipTellCheck() {
     }), undefined)
     assert.ok(state.directionFlip)
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '2',
@@ -4230,7 +4530,7 @@ function runTurnOwnershipCheck() {
   ]
   state.players['1'].pendingRevealPlayID = 'play-hidden'
 
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '0',
@@ -4326,7 +4626,7 @@ function runSpyRulesCheck() {
   assert.equal(record.nextPlayerID, '0')
   assert.equal(state.players['1'].pendingRevealPlayID, state.table.plays[0]?.id ?? null)
 
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '1',
@@ -4909,7 +5209,7 @@ function runRemovedRuleEnforcementCheck() {
   revealState.players['0'].pendingRevealPlayID = 'play-0'
 
   const revealRecorder = createEventRecorder()
-  beginTurn({
+  openTurn({
     G: revealState,
     ctx: { currentPlayer: '0', turn: 3 },
     events: revealRecorder.events,
@@ -5034,7 +5334,7 @@ function runRemovedRuleEnforcementCheck() {
 
   const frozenStatusRecorder = createEventRecorder()
   for (const turn of [1, 2, 3]) {
-    beginTurn({ G: frozenStatusState, ctx: { currentPlayer: '0', turn }, events: frozenStatusRecorder.events })
+    openTurn({ G: frozenStatusState, ctx: { currentPlayer: '0', turn }, events: frozenStatusRecorder.events })
     endTurn({ G: frozenStatusState, ctx: { currentPlayer: '0', turn }, events: frozenStatusRecorder.events })
   }
 
@@ -5582,7 +5882,7 @@ function runInvisibleHandCharacterCheck() {
     events,
     playerID: '2',
   }
-  beginTurn({ G: state, ctx: { currentPlayer: '2', turn: 4 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '2', turn: 4 }, events })
   // The lock survives the turn it was made for.
   assert.equal(state.round.forcedPlayPlayerID, '2')
   assert.equal(passMove(forcedContext), 'INVALID_MOVE')
@@ -5603,9 +5903,9 @@ function runInvisibleHandCharacterCheck() {
   assert.equal(state.round.forcedPlayPlayerID, null)
 
   // One turn only: the next turn to begin lifts the lock and Pass comes back.
-  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 5 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '1', turn: 5 }, events })
   assert.equal(state.round.forcedPlayPlayerID, null)
-  beginTurn({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events })
   assert.equal(
     passMove({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events, playerID: '2' }),
     undefined,
@@ -5710,7 +6010,7 @@ function runMatchStatsTrackingCheck() {
 
   const { events, record } = createEventRecorder()
 
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '0',
@@ -5745,7 +6045,7 @@ function runMatchStatsTrackingCheck() {
       && event.handCountsByPlayer['1'] === 1),
   )
 
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '1',
@@ -5770,7 +6070,7 @@ function runMatchStatsTrackingCheck() {
   assert.equal(state.players['1'].matchStats.passCount, 1)
   assert.equal(record.nextPlayerID, '0')
 
-  beginTurn({
+  openTurn({
     G: state,
     ctx: {
       currentPlayer: '0',
@@ -5809,7 +6109,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].points = 2
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5838,7 +6138,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].points = 1
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5865,7 +6165,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].points = 0
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5895,7 +6195,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].points = 2
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5922,7 +6222,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].hasUsedManualPlay = false
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5945,7 +6245,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['0'].points = 3
     state.players['1'].hand = [card('clubs_ace.png')]
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -5973,7 +6273,7 @@ function runLeaveCharacterEffectsCheck() {
     state.players['1'].hand = [card('clubs_ace.png')]
     state.players['1'].points = 4
 
-    beginTurn({
+    openTurn({
       G: state,
       ctx: {
         currentPlayer: '0',
@@ -6776,7 +7076,7 @@ function runMimeCharacterCheck() {
    * is in it. While the disguise stands the two seats it hangs between show the same character but
    * only one of them has it, so the status is trimmed to what both have in common.
    */
-  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
   assert.ok(state.mimicry)
   assert.ok(!state.tableStatus.includes('Change Direction'))
   /*
@@ -6790,12 +7090,12 @@ function runMimeCharacterCheck() {
   // No turn start takes the disguise off, including its wearer's own. It is worn for the round.
   // What a turn start does move is the pile, one chair at a time, starting with the chair after the
   // acting one — which after this swap is The Mime's.
-  beginTurn({ G: state, ctx: { currentPlayer: '0', turn: 5 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '0', turn: 5 }, events })
   assert.ok(state.mimicry)
   assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0'])
-  beginTurn({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '2', turn: 6 }, events })
   assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0'])
-  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 7 }, events })
+  openTurn({ G: state, ctx: { currentPlayer: '1', turn: 7 }, events })
   assert.ok(state.mimicry)
   assert.deepEqual(state.mimicry?.revealedPlayerIDs, ['0', '1'])
 
@@ -6831,11 +7131,11 @@ function runMimeCharacterCheck() {
    * the two chairs has turned its pile over — the chair after the acting one. Which player is sitting
    * in it differs, and that is precisely what the table cannot see.
    */
-  beginTurn({ G: stayState, ctx: { currentPlayer: '1', turn: 4 }, events: stayEvents })
+  openTurn({ G: stayState, ctx: { currentPlayer: '1', turn: 4 }, events: stayEvents })
   assert.deepEqual(stayState.mimicry?.revealedPlayerIDs, ['1'])
 
   // And it outlasts a full lap back to The Mime's own next turn, which used to be where it ended.
-  beginTurn({ G: stayState, ctx: { currentPlayer: '0', turn: 8 }, events: stayEvents })
+  openTurn({ G: stayState, ctx: { currentPlayer: '0', turn: 8 }, events: stayEvents })
   assert.ok(stayState.mimicry)
   assert.deepEqual(stayState.mimicry?.revealedPlayerIDs, ['1', '0'])
 
@@ -6859,7 +7159,7 @@ function runMimeCharacterCheck() {
     borrowedFaceDownCardIDs: [],
     revealedPlayerIDs: [],
   }
-  beginTurn({ G: leaveState, ctx: { currentPlayer: '1', turn: 3 }, events })
+  openTurn({ G: leaveState, ctx: { currentPlayer: '1', turn: 3 }, events })
   assert.equal(leaveState.players['1'].hasLeft, true)
   assert.equal(leaveState.mimicry ?? null, null)
 
@@ -7009,15 +7309,15 @@ function runMimeDisguiseSymmetryCheck() {
 
   // The swap hands the turn over, so its branch begins a turn the other never has to. Both leave
   // chair 1 acting, which is the only thing the table sees.
-  beginTurn({ G: swapState, ctx: { currentPlayer: '1', turn: 4 }, events })
+  openTurn({ G: swapState, ctx: { currentPlayer: '1', turn: 4 }, events })
 
   assert.deepEqual(describeRing(swapState), describeRing(stayState))
   assert.ok(describeRing(swapState).every((chair) => !chair.includes('(up)')))
 
   let turnNumber = 5
   for (const chairIndex of [1, 2, 0, 1, 2, 0]) {
-    beginTurn({ G: swapState, ctx: { currentPlayer: swapState.seatOrder[chairIndex], turn: turnNumber }, events })
-    beginTurn({ G: stayState, ctx: { currentPlayer: stayState.seatOrder[chairIndex], turn: turnNumber }, events })
+    openTurn({ G: swapState, ctx: { currentPlayer: swapState.seatOrder[chairIndex], turn: turnNumber }, events })
+    openTurn({ G: stayState, ctx: { currentPlayer: stayState.seatOrder[chairIndex], turn: turnNumber }, events })
     turnNumber += 1
 
     assert.deepEqual(
@@ -7135,7 +7435,7 @@ function runClownCharacterCheck() {
   assert.equal(passState.round.passStreak, 1)
 
   // The record dies with the turn it belonged to, spent or not.
-  beginTurn({ G: passState, ctx: { currentPlayer: '1', turn: 2 }, events: passRecorder.events })
+  openTurn({ G: passState, ctx: { currentPlayer: '1', turn: 2 }, events: passRecorder.events })
   assert.equal(passState.encore, null)
 
   // Per round, not per match: everyone passing rolls the round over and hands the use back.
@@ -7422,17 +7722,17 @@ function runStatusEffectsCheck() {
   endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
   assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 2)
 
-  beginTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
+  openTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
   endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 1 }, events: tickRecorder.events })
   assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 1)
 
   // Somebody else's turn is not this player's, so it costs them nothing.
-  beginTurn({ G: tickState, ctx: { currentPlayer: '1', turn: 2 }, events: tickRecorder.events })
+  openTurn({ G: tickState, ctx: { currentPlayer: '1', turn: 2 }, events: tickRecorder.events })
   endTurn({ G: tickState, ctx: { currentPlayer: '1', turn: 2 }, events: tickRecorder.events })
   assert.equal(getPlayerStatuses(tickState, '0')[0]?.turnsRemaining, 1)
 
   // And the last turn wears it off entirely, which gives Pass straight back.
-  beginTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 3 }, events: tickRecorder.events })
+  openTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 3 }, events: tickRecorder.events })
   endTurn({ G: tickState, ctx: { currentPlayer: '0', turn: 3 }, events: tickRecorder.events })
   assert.deepEqual(getPlayerStatuses(tickState, '0'), [])
   assert.equal(
@@ -7544,6 +7844,144 @@ function runStatusEffectsCheck() {
   }
 }
 
+function runThinkerCharacterCheck() {
+  /** One opened-and-ended turn for `playerID`, which is the whole of The Thinker's ability. */
+  function takeTurn(state: BlowCowState, playerID: string, turn: number) {
+    const recorder = createEventRecorder()
+    openTurn({ G: state, ctx: { currentPlayer: playerID, turn }, events: recorder.events })
+    endTurn({ G: state, ctx: { currentPlayer: playerID, turn }, events: recorder.events })
+  }
+
+  // The three branches of the step, in the order the card writes them.
+  assert.equal(BLOW_COW_THINKER_WIPE_THRESHOLD, 12)
+
+  const stepState = createScenarioState()
+  stepState.players['0'].character = 'The Thinker'
+  stepState.players['0'].hand = [card('clubs_ace.png')]
+  stepState.players['1'].hand = [card('spades_king.png')]
+
+  // Odd steps up, which is the cost: lower points win.
+  stepState.players['0'].points = 1
+  takeTurn(stepState, '0', 1)
+  assert.equal(stepState.players['0'].points, 4)
+
+  // Even halves.
+  takeTurn(stepState, '0', 2)
+  assert.equal(stepState.players['0'].points, 2)
+  takeTurn(stepState, '0', 3)
+  assert.equal(stepState.players['0'].points, 1)
+
+  // Both halves of the outcome are written down: a `point` history line and an archive action naming
+  // the character, so a replay can tell this apart from a scored 4-of-a-kind.
+  const stepHistory = stepState.history.filter((event) => event.kind === 'point')
+  assert.equal(stepHistory.length, 3)
+  assert.ok(stepHistory[0].title.includes('4 point(s)'))
+  assert.ok(stepHistory[0].detail.includes('1 point(s)'))
+  const stepActions = stepState.archive.turns
+    .flatMap((archiveTurn) => archiveTurn.actions)
+    .filter((action) => action.kind === 'recalculatePoints')
+  assert.equal(stepActions.length, 3)
+  assert.equal(stepActions[0].characterUsed, 'The Thinker')
+  assert.equal(stepActions[0].playerID, '0')
+  // Telemetry rides along with the history event rather than being written separately.
+  assert.equal(stepState.telemetry.events.filter((event) => event.kind === 'point').length, 3)
+
+  // Above the threshold the total is wiped, and the wipe is read before parity: 13 is odd and would
+  // otherwise climb to 40.
+  const wipeState = createScenarioState()
+  wipeState.players['0'].character = 'The Thinker'
+  wipeState.players['0'].hand = [card('clubs_ace.png')]
+  wipeState.players['1'].hand = [card('spades_king.png')]
+  wipeState.players['0'].points = 13
+  takeTurn(wipeState, '0', 1)
+  assert.equal(wipeState.players['0'].points, 0)
+
+  // Zero is the fixed point — it is even, so it halves to itself — and a no-op writes nothing at all.
+  const historyLengthAtZero = wipeState.history.length
+  const archiveLengthAtZero = wipeState.archive.turns.flatMap((archiveTurn) => archiveTurn.actions).length
+  takeTurn(wipeState, '0', 2)
+  assert.equal(wipeState.players['0'].points, 0)
+  assert.equal(wipeState.history.length, historyLengthAtZero)
+  assert.equal(
+    wipeState.archive.turns.flatMap((archiveTurn) => archiveTurn.actions).length,
+    archiveLengthAtZero,
+  )
+
+  // Exactly 12 is not above the threshold, so it halves like any other even total.
+  const boundaryState = createScenarioState()
+  boundaryState.players['0'].character = 'The Thinker'
+  boundaryState.players['0'].hand = [card('clubs_ace.png')]
+  boundaryState.players['1'].hand = [card('spades_king.png')]
+  boundaryState.players['0'].points = 12
+  takeTurn(boundaryState, '0', 1)
+  assert.equal(boundaryState.players['0'].points, 6)
+
+  const scopeState = createScenarioState()
+  scopeState.players['0'].character = 'The Thinker'
+  scopeState.players['0'].points = 3
+  scopeState.players['0'].hand = [card('clubs_ace.png')]
+  scopeState.players['1'].points = 3
+  scopeState.players['1'].hand = [card('spades_king.png')]
+  const scopeRecorder = createEventRecorder()
+
+  // A turn that never opened cannot end, the same guard the status tick leans on.
+  endTurn({ G: scopeState, ctx: { currentPlayer: '0', turn: 1 }, events: scopeRecorder.events })
+  assert.equal(scopeState.players['0'].points, 3)
+
+  // Somebody else's turn ending is not The Thinker's, and a seat that is not The Thinker never steps.
+  takeTurn(scopeState, '1', 2)
+  assert.equal(scopeState.players['0'].points, 3)
+  assert.equal(scopeState.players['1'].points, 3)
+
+  // The Status Rule covers the status counter and nothing else: this is a character, not a status.
+  scopeState.rules.status = 'removed'
+  takeTurn(scopeState, '0', 3)
+  assert.equal(scopeState.players['0'].points, 10)
+
+  // A player who has left takes no further turns, so the leave effect keeps the last word on a final
+  // total. The only end this could otherwise reach is the one straight after they left.
+  const leftState = createScenarioState()
+  leftState.players['0'].character = 'The Thinker'
+  leftState.players['0'].points = 5
+  leftState.players['0'].hasLeft = true
+  leftState.players['0'].hand = [card('clubs_ace.png')]
+  leftState.players['1'].hand = [card('spades_king.png')]
+  takeTurn(leftState, '0', 1)
+  assert.equal(leftState.players['0'].points, 5)
+
+  // The ability needs no move of its own, so being in the pool is the whole of its wiring.
+  assert.ok(BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.includes('The Thinker'))
+}
+
+/**
+ * Every implemented character ships card art.
+ *
+ * This became load-bearing when the lobby dropped its description tooltips: the sprite is now the
+ * only place a character's ability is written for a player, so a missing file is a character nobody
+ * can read rather than a cosmetic gap. Checked against the folder rather than through
+ * `src/ui/characterCardSprites.ts`, which reaches the art with `import.meta.glob` and so only
+ * resolves under Vite; the matching rule below is that module's, kept in step by this check failing.
+ */
+function runCharacterCardArtCheck() {
+  const spriteDirectoryURL = new URL('../character_card_sprites/', import.meta.url)
+  const normalize = (value: string) => value
+    .toLowerCase()
+    .replace(/\.png$/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+
+  const spriteStems = readdirSync(spriteDirectoryURL)
+    .filter((filename) => filename.toLowerCase().endsWith('.png'))
+    .map((filename) => normalize(filename))
+
+  for (const characterName of BLOW_COW_IMPLEMENTED_CHARACTER_NAMES) {
+    const normalizedName = normalize(characterName)
+    const hasArt = spriteStems.some((stem) => stem === normalizedName || stem.startsWith(`${normalizedName} `))
+
+    assert.ok(hasArt, `Expected character_card_sprites/ to hold art for ${characterName}.`)
+  }
+}
+
 const checks = [
   ['BS resolution', runBSResolutionCheck],
   ['BS reveal procedure', runBSRevealProcedureCheck],
@@ -7555,6 +7993,7 @@ const checks = [
   ['reset redistribution', runResetRedistributionCheck],
   ['reset reveal procedure', runResetRevealProcedureCheck],
   ['final-two resolution window', runFinalTwoResolutionWindowCheck],
+  ['turn opening and reveal walk', runTurnOpeningCheck],
   ['match stats tracking', runMatchStatsTrackingCheck],
   ['default rank selection', runDefaultRankSelectionCheck],
   ['character assignment', runCharacterAssignmentCheck],
@@ -7595,6 +8034,8 @@ const checks = [
   ['mime character', runMimeCharacterCheck],
   ['mime disguise symmetry', runMimeDisguiseSymmetryCheck],
   ['clown character', runClownCharacterCheck],
+  ['thinker character', runThinkerCharacterCheck],
+  ['character card art', runCharacterCardArtCheck],
   ['status effects', runStatusEffectsCheck],
 ] as const
 
