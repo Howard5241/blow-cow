@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readdirSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { BLOW_COW_IMPLEMENTED_CHARACTER_NAMES, type BlowCowCharacterName } from '../src/game/blowCowCharacters.ts'
 import {
   BLOW_COW_RULE_DEFINITIONS,
@@ -33,7 +33,10 @@ import {
   type BlowCowBeginAccusationPunishmentArgs,
   type BlowCowBeginBSPunishmentArgs,
   type BlowCowBeginResetPunishmentArgs,
+  BLOW_COW_PLAGUE_STATUS_TURNS,
   BLOW_COW_RANKS,
+  BLOW_COW_SPECIAL_RANKS,
+  BLOW_COW_STARTING_GOLD,
   BLOW_COW_THINKER_WIPE_THRESHOLD,
   BlowCowGame,
   CARD_BACK_SPRITE,
@@ -64,16 +67,27 @@ import {
   formatLeaveEffectLabel,
   type BlowCowFinalizeResetResolutionArgs,
   getBreakableRuleIDs,
+  getAnteStartingGold,
   getDefaultStandardRankCount,
+  getGameMode,
+  getMaxCardsOnTable,
+  getPlayerGold,
+  getRoundLimit,
+  getStandardRankCountForMode,
+  isAnteMode,
   getPlayerStatuses,
   hasStatus,
   getSeekerCharacterChoices,
   getTableCardCount,
+  isBlowCowSpecialRank,
   isCardFaceUpOnTable,
   isSeeker,
+  isSpecialCard,
+  validateBlowCowSetupData,
   type BlowCowSeekCharacterArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowDismissHandPeekArgs,
   type BlowCowFinalizeTurnRevealArgs,
   type BlowCowRevealBSCardArgs,
   type BlowCowRevealResetCardArgs,
@@ -89,6 +103,18 @@ import {
   type BlowCowSetupData,
   type BlowCowState,
 } from '../src/game/blowCowGame.ts'
+import {
+  DEFAULT_BLOW_COW_ANTE_STARTING_GOLD,
+  DEFAULT_BLOW_COW_ROUND_LIMIT,
+  MAX_BLOW_COW_ANTE_STARTING_GOLD,
+  MAX_BLOW_COW_ROUND_LIMIT,
+  MIN_BLOW_COW_ANTE_STARTING_GOLD,
+  MIN_BLOW_COW_ROUND_LIMIT,
+  getAnteRecordObservations,
+  getAnteSeatRecord,
+  normalizeAnteStartingGold,
+  normalizeRoundLimit,
+} from '../src/game/blowCowAnte.ts'
 import { comparePokerHands, evaluatePokerHand } from '../src/game/blowCowPoker.ts'
 // The one UI module this harness reaches into. It is pure play-and-card logic with no React or DOM,
 // and what The Mime promises is a claim about what the ring draws, so it cannot be checked anywhere
@@ -111,7 +137,11 @@ type TestContext = {
   }
 }
 
-const deckBySprite = new Map(createDeck().map((card) => [card.sprite, card]))
+// Built with every action rank in it so `card('hearts_skip.png')` works, whatever a scenario's own
+// deck config says. Nothing here reads a card id, so the shifted ids this causes matter to nobody.
+const deckBySprite = new Map(
+  createDeck(BLOW_COW_RANKS, BLOW_COW_SPECIAL_RANKS).map((card) => [card.sprite, card]),
+)
 
 const passMove = BlowCowGame.moves.pass as (context: TestContext, args?: BlowCowPassArgs) => unknown
 const callBSMove = BlowCowGame.moves.callBS.move as (context: TestContext, args?: BlowCowCallBSArgs) => unknown
@@ -219,11 +249,16 @@ const revealTurnCardMove = BlowCowGame.moves.revealTurnCard as (
   context: TestContext,
   args: BlowCowRevealTurnCardArgs,
 ) => unknown
-const finalizeTurnRevealMove = BlowCowGame.moves.finalizeTurnReveal as (
+const finalizeTurnRevealMove = BlowCowGame.moves.finalizeTurnReveal.move as (
   context: TestContext,
   args: BlowCowFinalizeTurnRevealArgs,
 ) => unknown
-const beginTurn = BlowCowGame.turn.onBegin as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
+const dismissHandPeekMove = BlowCowGame.moves.dismissHandPeek as (
+  context: TestContext,
+  args: BlowCowDismissHandPeekArgs,
+) => unknown
+// `random` is passable because Ante's third round ending redeals the whole deck from inside this hook.
+const beginTurn = BlowCowGame.turn.onBegin as (context: Omit<TestContext, 'playerID'>) => unknown
 const endTurn = BlowCowGame.turn.onEnd as (context: Omit<TestContext, 'playerID' | 'random'>) => unknown
 
 function identityShuffle<Value>(values: Value[]) {
@@ -282,6 +317,8 @@ function createScenarioState(numPlayers = 2): BlowCowState {
       cardsPlayed: 0,
       punishmentCount: 0,
       bsWinCount: 0,
+      bsTargetCount: 0,
+      bsTargetWinCount: 0,
       accusationCount: 0,
       accusationWinCount: 0,
     }
@@ -348,7 +385,11 @@ function takeOpenTurn(state: BlowCowState, events: TestContext['events'], random
  * Drives the forced reveal a taken turn may have opened: press every owed card, then Continue. A
  * no-op when the turn owed nothing, which is most turns.
  */
-function completeTurnReveal(state: BlowCowState, events: TestContext['events']) {
+function completeTurnReveal(
+  state: BlowCowState,
+  events: TestContext['events'],
+  random?: TestContext['random'],
+) {
   const opening = state.turnOpening
   if (!opening?.reveal) {
     return
@@ -362,6 +403,8 @@ function completeTurnReveal(state: BlowCowState, events: TestContext['events']) 
     },
     events,
     playerID: opening.playerID,
+    // Carried because Continue is where a revealed Plague rolls its status.
+    random,
   }
 
   for (const cardID of opening.reveal.cardIDs) {
@@ -379,7 +422,7 @@ function completeTurnReveal(state: BlowCowState, events: TestContext['events']) 
 function openTurn(context: Omit<TestContext, 'playerID'>) {
   beginTurn({ G: context.G, ctx: context.ctx, events: context.events })
   takeOpenTurn(context.G, context.events, context.random)
-  completeTurnReveal(context.G, context.events)
+  completeTurnReveal(context.G, context.events, context.random)
 }
 
 /**
@@ -532,6 +575,10 @@ function runBSResolutionCheck() {
   assert.equal(state.round.roundNumber, 1)
   assert.ok(state.bsResolution)
   assert.equal(state.players['0'].matchStats.callBSCount, 1)
+  // The call is counted from both ends at the same moment, so the two tallies can never disagree
+  // about how many calls a table saw.
+  assert.equal(state.players['1'].matchStats.bsTargetCount, 1)
+  assert.equal(state.players['0'].matchStats.bsTargetCount, 0)
   assert.equal(state.bsResolution?.callerPlayerID, '0')
   assert.equal(state.bsResolution?.targetPlayerID, '1')
   assert.equal(state.bsResolution?.targetPlayID, 'play-1')
@@ -567,6 +614,8 @@ function runBSResolutionCheck() {
   assert.equal(state.players['1'].pendingRevealPlayID, null)
   assert.equal(state.players['1'].points, 1)
   assert.equal(state.players['0'].matchStats.bsWinCount, 1)
+  // The caller won it, so the target did not: exactly one seat is credited per call.
+  assert.equal(state.players['1'].matchStats.bsTargetWinCount, 0)
   assert.equal(state.players['1'].matchStats.punishmentCount, 1)
   assert.equal(state.players['0'].hand.length, 1)
   assertCardSet(state.players['1'].hand, ['spades_king.png', 'clubs_03.png'])
@@ -1880,6 +1929,8 @@ function runContrarianRulesCheck() {
     // The unpunished player opens the next round, so the flip hands that away too.
     assert.equal(record.nextPlayerID, '1')
     assert.equal(state.players['0'].matchStats.bsWinCount, 0)
+    // The flip is what credits the target instead, which is the other half of the overall BS winrate.
+    assert.equal(state.players['1'].matchStats.bsTargetWinCount, 1)
     assert.match(
       state.history.find((entry) => entry.kind === 'verdict')?.detail ?? '',
       /is The Contrarian, so the punishment was reversed\./,
@@ -1897,6 +1948,7 @@ function runContrarianRulesCheck() {
     assert.equal(punishment.unpunishedPlayerID, '0')
     assert.equal(state.players['1'].matchStats.punishmentCount, 1)
     assert.equal(state.players['0'].matchStats.bsWinCount, 1)
+    assert.equal(state.players['1'].matchStats.bsTargetWinCount, 0)
     assert.equal(record.nextPlayerID, '0')
   }
 
@@ -7029,6 +7081,7 @@ function runMimeCharacterCheck() {
     character: 'The Cat',
     points: 1,
     pointRanks: ['K'],
+    gold: 5,
     handCount: 2,
     wasSeekerPick: false,
     // Copied like the numbers above it, so the two blocks agree on what the copied seat is under.
@@ -7982,6 +8035,948 @@ function runCharacterCardArtCheck() {
   }
 }
 
+/**
+ * The action ranks: what they are in the deck, what they are worth, and what they do when the Reveal
+ * Rule turns one up.
+ *
+ * The trigger is the point of most of this. "Revealed by the Reveal Rule" has to mean exactly that,
+ * so the cases that must *not* fire are checked as carefully as the ones that must — a card that was
+ * already face up when the turn opened, a Spy's other card, and a rule that has been torn up.
+ */
+function runSpecialRankCardsCheck() {
+  const cardSpriteNames = new Set(readdirSync(new URL('../card_sprites/', import.meta.url)))
+  const rectCardSpriteNames = new Set(readdirSync(new URL('../rect_card_sprites/', import.meta.url)))
+
+  for (const specialRank of BLOW_COW_SPECIAL_RANKS) {
+    for (const suit of ['clubs', 'diamonds', 'hearts', 'spades']) {
+      const spriteName = `${suit}_${specialRank.toLowerCase()}.png`
+      assert.ok(cardSpriteNames.has(spriteName), `Expected card_sprites/${spriteName}.`)
+      assert.ok(rectCardSpriteNames.has(spriteName), `Expected rect_card_sprites/${spriteName}.`)
+    }
+  }
+
+  // Four of each chosen rank, in the same suits as everything else, and none of them without asking.
+  const plainDeck = createDeck(['A'])
+  const actionDeck = createDeck(['A'], ['Plague', 'Skip'])
+  assert.equal(plainDeck.filter((deckCard) => isSpecialCard(deckCard)).length, 0)
+  assert.equal(actionDeck.length, plainDeck.length + 8)
+  assert.equal(actionDeck.filter((deckCard) => deckCard.rank === 'Skip').length, 4)
+  assert.deepEqual(
+    actionDeck.filter((deckCard) => deckCard.rank === 'Plague').map((deckCard) => deckCard.sprite).sort(),
+    ['clubs_plague.png', 'diamonds_plague.png', 'hearts_plague.png', 'spades_plague.png'],
+  )
+  assert.equal(isBlowCowSpecialRank('Peek'), true)
+  assert.equal(isBlowCowSpecialRank('K'), false)
+
+  // Off unless the host asks, and asked for the same way whichever mode the standard ranks are in.
+  assert.deepEqual(createInitialBlowCowState(2, identityShuffle).deckConfig.specialRanks, [])
+  assert.deepEqual(
+    createInitialBlowCowState(2, identityShuffle, { specialRanks: ['Peek', 'Plague'] }).deckConfig.specialRanks,
+    // Ordered by the constant rather than by the host's clicks, so two identical selections agree.
+    ['Plague', 'Peek'],
+  )
+  assert.deepEqual(
+    createInitialBlowCowState(2, identityShuffle, {
+      rankSelectionMode: 'manual',
+      selectedRanks: ['A', 'K'],
+      specialRanks: ['Skip'],
+    }).deckConfig.specialRanks,
+    ['Skip'],
+  )
+  assert.equal(validateBlowCowSetupData({ specialRanks: ['Skip'] }), undefined)
+  assert.ok(validateBlowCowSetupData({ specialRanks: ['Skip', 'Skip'] }))
+  assert.ok(validateBlowCowSetupData({ specialRanks: ['nonsense'] as unknown as BlowCowSetupData['specialRanks'] }))
+
+  // Four of a kind still leaves the hand. It simply pays nothing.
+  const scored = scoreHand(
+    [
+      card('clubs_plague.png'),
+      card('diamonds_plague.png'),
+      card('hearts_plague.png'),
+      card('spades_plague.png'),
+      card('clubs_ace.png'),
+      card('diamonds_ace.png'),
+      card('hearts_ace.png'),
+      card('spades_ace.png'),
+      card('clubs_skip.png'),
+    ],
+    '0',
+    'other',
+    1,
+    1,
+  )
+  assert.equal(scored.pointsAwarded, 1)
+  assert.deepEqual(scored.scoredSets.map((scoredSet) => scoredSet.rank).sort(), ['A', 'Plague'])
+  assert.deepEqual(scored.remainingHand.map((handCard) => handCard.sprite), ['clubs_skip.png'])
+
+  {
+    // Never trump. The play move refuses the rank outright, so nothing downstream has to exclude it.
+    const state = createScenarioState(3)
+    const { events } = createEventRecorder()
+    state.players['0'].hand = [card('clubs_skip.png'), card('hearts_ace.png')]
+    state.players['1'].hand = [card('spades_king.png')]
+    state.players['2'].hand = [card('diamonds_king.png')]
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 2 }, events })
+
+    const onTurn: TestContext = { G: state, ctx: { currentPlayer: '0', turn: 2 }, events, playerID: '0' }
+    assert.notEqual(
+      selectTrumpAndPlayMove(onTurn, {
+        trumpRank: 'Skip' as unknown as BlowCowRank,
+        cardIDs: [state.players['0'].hand[0].id],
+      }),
+      undefined,
+    )
+    assert.equal(state.round.trumpRank, null)
+    assert.equal(
+      selectTrumpAndPlayMove(onTurn, { trumpRank: 'A', cardIDs: [state.players['0'].hand[0].id] }),
+      undefined,
+    )
+    assert.equal(state.round.trumpRank, 'A')
+  }
+
+  /** Stages one seat owing the Reveal Rule the given cards, and opens their turn. */
+  const stageReveal = (
+    cards: BlowCowCard[],
+    options: { numPlayers?: number; revealedCardIDs?: string[]; random?: TestContext['random'] } = {},
+  ) => {
+    const state = createScenarioState(options.numPlayers ?? 3)
+    const { events, record } = createEventRecorder()
+
+    state.round.trumpRank = 'Q'
+    for (const playerID of state.seatOrder) {
+      state.players[playerID].hand = [card('spades_king.png')]
+    }
+    state.players['0'].hand = [card('hearts_ace.png')]
+    state.table.plays = [
+      {
+        id: 'play-0',
+        playerID: '0',
+        cards,
+        revealedCardIDs: options.revealedCardIDs,
+        claimedRank: 'Q',
+        playedAtRound: 1,
+        playedAtTurn: 1,
+        revealedAtTurn: null,
+        wasTrumpSelection: false,
+      },
+    ]
+    state.players['0'].pendingRevealPlayID = 'play-0'
+
+    return { state, events, record }
+  }
+
+  {
+    // Skip: the next seat round loses its turn, and the hand-over walks past it.
+    const skipCard = card('hearts_skip.png')
+    const { state, events, record } = stageReveal([skipCard])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.round.skippedPlayerIDs, ['1'])
+
+    assert.equal(passMove({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' }), undefined)
+    assert.equal(record.nextPlayerID, '2')
+    // Spent by the hand-over it bought, so the seat is not skipped again next time round.
+    assert.deepEqual(state.round.skippedPlayerIDs, [])
+  }
+
+  {
+    // Two Skips reach two seats. Each card counts one seat further out from the revealer.
+    const { state, events, record } = stageReveal([card('hearts_skip.png'), card('clubs_skip.png')])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.round.skippedPlayerIDs, ['1', '2'])
+
+    assert.equal(passMove({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' }), undefined)
+    // Both skipped, so the turn comes back round to the seat that revealed them.
+    assert.equal(record.nextPlayerID, '0')
+  }
+
+  {
+    // Two seats, one Skip: the only opponent loses their turn, so the revealer takes another.
+    const { state, events, record } = stageReveal([card('hearts_skip.png')], { numPlayers: 2 })
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.round.skippedPlayerIDs, ['1'])
+
+    assert.equal(passMove({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' }), undefined)
+    assert.equal(record.nextPlayerID, '0')
+  }
+
+  {
+    // Peek: the next hand opens, and it opens for exactly one pair of eyes.
+    const { state, events } = stageReveal([card('hearts_peek.png')])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.handPeek?.targetPlayerIDs, ['1'])
+
+    const peekPlayerView = BlowCowGame.playerView as (args: { G: BlowCowState; playerID: string | null }) => BlowCowState
+    assert.deepEqual(
+      peekPlayerView({ G: state, playerID: '0' }).players['1'].hand.map((handCard) => handCard.sprite),
+      ['spades_king.png'],
+    )
+    assert.deepEqual(
+      peekPlayerView({ G: state, playerID: '2' }).players['1'].hand.map((handCard) => handCard.sprite),
+      [CARD_BACK_SPRITE],
+    )
+    assert.deepEqual(
+      peekPlayerView({ G: state, playerID: null }).players['1'].hand.map((handCard) => handCard.sprite),
+      [CARD_BACK_SPRITE],
+    )
+
+    // Closing it is a move, so it dies on the server rather than behind one client's Close button.
+    const peekID = state.handPeek?.id ?? ''
+    assert.notEqual(
+      dismissHandPeekMove({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '1' }, { peekID }),
+      undefined,
+    )
+    assert.notEqual(
+      dismissHandPeekMove(
+        { G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' },
+        { peekID: 'peek-stale' },
+      ),
+      undefined,
+    )
+    assert.ok(state.handPeek)
+    assert.equal(
+      dismissHandPeekMove({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, playerID: '0' }, { peekID }),
+      undefined,
+    )
+    assert.equal(state.handPeek ?? null, null)
+  }
+
+  {
+    // A peek nobody closed comes down with the turn that opened it.
+    const { state, events } = stageReveal([card('hearts_peek.png')])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.ok(state.handPeek)
+
+    beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 4 }, events })
+    assert.equal(state.handPeek ?? null, null)
+  }
+
+  {
+    // Plague: one random status, for its own fixed number of turns, on the next seat round.
+    const { state, events } = stageReveal([card('hearts_plague.png')])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, random: { Shuffle: reverseShuffle } })
+    // Drawn through `random`, so the roll is the last id rather than the first.
+    assert.deepEqual(getPlayerStatuses(state, '1'), [
+      { id: BLOW_COW_STATUS_IDS[BLOW_COW_STATUS_IDS.length - 1], turnsRemaining: BLOW_COW_PLAGUE_STATUS_TURNS },
+    ])
+    assert.deepEqual(getPlayerStatuses(state, '2'), [])
+  }
+
+  {
+    // Two Plagues afflict two seats rather than doubling one counter.
+    const { state, events } = stageReveal([card('hearts_plague.png'), card('clubs_plague.png')])
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, random: { Shuffle: identityShuffle } })
+    assert.deepEqual(getPlayerStatuses(state, '1'), [
+      { id: BLOW_COW_STATUS_IDS[0], turnsRemaining: BLOW_COW_PLAGUE_STATUS_TURNS },
+    ])
+    assert.deepEqual(getPlayerStatuses(state, '2'), [
+      { id: BLOW_COW_STATUS_IDS[0], turnsRemaining: BLOW_COW_PLAGUE_STATUS_TURNS },
+    ])
+  }
+
+  {
+    // A card that was already face up was not turned over by this rule, so it does nothing here.
+    const skipCard = card('hearts_skip.png')
+    const { state, events } = stageReveal([skipCard], { revealedCardIDs: [skipCard.id] })
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.round.skippedPlayerIDs, [])
+    assert.equal(state.handPeek ?? null, null)
+  }
+
+  {
+    // Tear up the Reveal Rule and nothing is revealed, so nothing goes off.
+    const { state, events } = stageReveal([card('hearts_skip.png'), card('clubs_peek.png')])
+    state.rules.reveal = 'removed'
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events })
+    assert.deepEqual(state.round.skippedPlayerIDs, [])
+    assert.equal(state.handPeek ?? null, null)
+  }
+
+  {
+    // The Spy reveals one card of the pair, and only that card acts. The other stays inert.
+    const { state, events } = stageReveal([card('hearts_ace.png'), card('clubs_skip.png')])
+    state.players['0'].character = 'The Spy'
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, random: { Shuffle: identityShuffle } })
+    assert.deepEqual(state.round.skippedPlayerIDs, [])
+  }
+
+  {
+    // The same pair the other way round: the Skip is the card drawn, so this time it fires.
+    const { state, events } = stageReveal([card('hearts_ace.png'), card('clubs_skip.png')])
+    state.players['0'].character = 'The Spy'
+
+    openTurn({ G: state, ctx: { currentPlayer: '0', turn: 3 }, events, random: { Shuffle: reverseShuffle } })
+    assert.deepEqual(state.round.skippedPlayerIDs, ['1'])
+  }
+}
+
+/*
+ * The companion to the art check. A character card carries its ability for players; `CHARACTERS.md`
+ * carries it for whoever is changing the code, and an implemented character missing from it is the
+ * gap that let eight of them go undocumented before the file existed. Headings only — the wording is
+ * authored, not generated, so the check deliberately says nothing about what the section contains.
+ */
+function runCharacterDocumentationCheck() {
+  const documentationURL = new URL('../CHARACTERS.md', import.meta.url)
+  const documentation = readFileSync(documentationURL, 'utf8')
+
+  const documentedNames = new Set(
+    documentation
+      .split('\n')
+      .filter((line) => line.startsWith('## '))
+      .map((line) => line.slice(3).trim()),
+  )
+
+  for (const characterName of BLOW_COW_IMPLEMENTED_CHARACTER_NAMES) {
+    assert.ok(
+      documentedNames.has(characterName),
+      `Expected CHARACTERS.md to hold a "## ${characterName}" section.`,
+    )
+  }
+}
+
+/*
+ * One table written in three places: the function, the rule card every seat can open, and `RULES.md`.
+ * Worth pinning together because the caps do not climb with the player count — 5 players sit at the
+ * same 10 as 2 do — so a correct value can read as a typo, and a real typo would read as correct.
+ */
+function runMaxCardsOnTableCheck() {
+  const expectedCaps: Record<number, number> = { 2: 10, 3: 12, 4: 12, 5: 10, 6: 12, 7: 14, 8: 16 }
+
+  for (const [playerCount, cap] of Object.entries(expectedCaps)) {
+    assert.equal(getMaxCardsOnTable(Number(playerCount)), cap)
+  }
+
+  // A table worn down below the minimum player count still has to answer with the 2-player cap.
+  assert.equal(getMaxCardsOnTable(1), expectedCaps[2])
+
+  // How each row of the table is written in `RULES.md`, and how the rule card words the same row.
+  const capRows = [
+    { playerCounts: [2], rulesLabel: '2', cardLabel: '2 players' },
+    { playerCounts: [3, 4], rulesLabel: '3 or 4', cardLabel: '3 or 4 players' },
+    { playerCounts: [5], rulesLabel: '5', cardLabel: '5 players' },
+    { playerCounts: [6], rulesLabel: '6', cardLabel: '6 players' },
+    { playerCounts: [7], rulesLabel: '7', cardLabel: '7 players' },
+    { playerCounts: [8], rulesLabel: '8', cardLabel: '8 players' },
+  ]
+
+  const cardDescription = BLOW_COW_RULE_DEFINITIONS
+    .find((definition) => definition.id === 'maxCardsOnTable')?.description
+  assert.ok(cardDescription)
+
+  const rulesDocumentation = readFileSync(new URL('../RULES.md', import.meta.url), 'utf8')
+  const documentedSection = rulesDocumentation.split('## MaxCardsOnTable By Player Count')[1]?.split('\n## ')[0]
+  assert.ok(documentedSection, 'Expected RULES.md to hold a "## MaxCardsOnTable By Player Count" table.')
+
+  const documentedCaps = new Map(
+    documentedSection
+      .split('\n')
+      // The header and the `| --- |` separator both fail this, so only the value rows are read.
+      .filter((line) => /^\|\s*\d/.test(line))
+      .map((line) => {
+        const cells = line.split('|').map((cell) => cell.trim())
+        return [cells[1] ?? '', cells[2] ?? ''] as const
+      }),
+  )
+
+  for (const capRow of capRows) {
+    const cap = getMaxCardsOnTable(capRow.playerCounts[0])
+
+    assert.ok(
+      capRow.playerCounts.every((playerCount) => getMaxCardsOnTable(playerCount) === cap),
+      `Expected ${capRow.rulesLabel} players to share one cap, since they share one row.`,
+    )
+    assert.ok(
+      cardDescription.includes(`${capRow.cardLabel} ${cap}`),
+      `Expected the Max Cards On Table rule card to say "${capRow.cardLabel} ${cap}".`,
+    )
+    assert.equal(
+      documentedCaps.get(capRow.rulesLabel),
+      String(cap),
+      `Expected RULES.md to give ${capRow.rulesLabel} player(s) a cap of ${cap}.`,
+    )
+  }
+}
+
+/*
+ * Gold buys nothing yet, so what there is to hold is that every seat has the same purse and that
+ * nothing moves it — a deal, a punishment and a scored set all leave it exactly where it started.
+ */
+function runPlayerGoldCheck() {
+  const stagedState = BlowCowGame.setup({
+    ctx: { numPlayers: 4 },
+    random: { Shuffle: identityShuffle },
+  })
+
+  // Dealt with the seats rather than with the cards: a staged room already holds everybody's purse.
+  assert.ok(
+    stagedState.seatOrder.every((playerID) => stagedState.players[playerID].gold === BLOW_COW_STARTING_GOLD),
+  )
+
+  const state = createInitialBlowCowState(4, identityShuffle)
+
+  // The deal hands out characters and scores whatever four of a kind it dealt. Neither pays.
+  assert.ok(state.seatOrder.every((playerID) => getPlayerGold(state.players[playerID]) === BLOW_COW_STARTING_GOLD))
+
+  const punishedState = createScenarioState(3)
+  punishedState.players['1'].hand = [...punishedState.players['1'].hand, card('spades_king.png')]
+  punishedState.players['1'].points += 1
+  assert.equal(getPlayerGold(punishedState.players['1']), BLOW_COW_STARTING_GOLD)
+
+  // A seat restored from a match staged before gold existed reads as an unspent purse, not as 0.
+  const restoredPlayer: BlowCowState['players'][string] = { ...state.players['0'] }
+  delete restoredPlayer.gold
+  assert.equal(getPlayerGold(restoredPlayer), BLOW_COW_STARTING_GOLD)
+}
+
+/*
+ * Ante Mode. Every check below builds a real match through `createInitialBlowCowState` rather than a
+ * hand-assembled scenario, because most of what the mode changes happens at a round boundary — the
+ * redeal, the gold, the elimination, the deck resize — and a scenario state has no boundary to cross.
+ */
+function createAnteState(numPlayers = 3, setupData: Partial<BlowCowSetupData> = {}) {
+  const state = createInitialBlowCowState(numPlayers, identityShuffle, {
+    gameMode: 'ante',
+    ...setupData,
+  })
+
+  // Nothing here has taken a turn, so no gate stands in front of the moves these checks drive.
+  state.turnOpening = null
+
+  return state
+}
+
+function getAnteHandTotal(state: BlowCowState) {
+  return state.seatOrder.reduce((totalCards, playerID) => totalCards + state.players[playerID].hand.length, 0)
+}
+
+/**
+ * Groups a deck by rank before dealing, so a contiguous slice of it lands four of a kind in one
+ * hand. The ordinary shuffles spread suits across the deal and never produce one.
+ */
+function rankGroupedShuffle<Value>(values: Value[]) {
+  const isCardArray = values.every((entry) => Boolean(entry) && typeof entry === 'object' && 'rank' in (entry as object))
+  if (!isCardArray) {
+    return [...values]
+  }
+
+  return [...(values as unknown as BlowCowCard[])]
+    .sort((leftCard, rightCard) => String(leftCard.rank).localeCompare(String(rightCard.rank))) as unknown as Value[]
+}
+
+function runAnteSetupCheck() {
+  // The mode's own rank table, and the classic one left exactly where it was.
+  assert.deepEqual(
+    [2, 3, 4, 5, 6, 7, 8].map((playerCount) => getStandardRankCountForMode('ante', playerCount)),
+    [3, 4, 6, 7, 7, 10, 12],
+  )
+  assert.deepEqual(
+    [2, 3, 4, 5, 6, 7, 8].map((playerCount) => getStandardRankCountForMode('classic', playerCount)),
+    [2, 3, 4, 5, 6, 7, 8].map((playerCount) => getDefaultStandardRankCount(playerCount)),
+  )
+
+  const state = createAnteState(3)
+  assert.equal(getGameMode(state), 'ante')
+  assert.ok(isAnteMode(state))
+  assert.equal(getRoundLimit(state), DEFAULT_BLOW_COW_ROUND_LIMIT)
+  assert.equal(state.deckConfig.selectedRanks.length, 4)
+  // The whole deck goes out, and none of it is scored away on the way.
+  assert.equal(getAnteHandTotal(state), 4 * 4 + 2)
+  assert.ok(state.seatOrder.every((playerID) => getPlayerGold(state.players[playerID]) === DEFAULT_BLOW_COW_ANTE_STARTING_GOLD))
+  assert.ok(state.seatOrder.every((playerID) => state.players[playerID].points === 0))
+  assert.ok(state.seatOrder.every((playerID) => state.players[playerID].scoredSets.length === 0))
+
+  /*
+   * Everything Ante does not play is forced off, however loudly the setup data asks for it. A host
+   * cannot reach these panels in the lobby, so this is about a hand-made room rather than a stray
+   * click — and forcing them here is what lets every branch downstream trust the mode alone.
+   */
+  const forcedState = createAnteState(3, {
+    useCharacters: true,
+    specialRanks: ['Plague', 'Skip'],
+    initialStatuses: ['tilted'],
+    initialStatusTurns: 4,
+    rules: { reverse: 'removed' },
+  })
+
+  assert.equal(forcedState.useCharacters, false)
+  assert.deepEqual(forcedState.characterPool, [])
+  assert.deepEqual(forcedState.deckConfig.specialRanks, [])
+  assert.deepEqual(forcedState.initialStatuses, [])
+  assert.ok(isDefaultRulesSelection(forcedState.rules))
+  assert.ok(forcedState.seatOrder.every((playerID) => forcedState.players[playerID].character === null))
+  assert.ok(forcedState.seatOrder.every((playerID) => getPlayerStatuses(forcedState, playerID).length === 0))
+  assert.ok(forcedState.seatOrder.every((playerID) => {
+    return forcedState.players[playerID].hand.every((handCard) => !isSpecialCard(handCard))
+  }))
+
+  // Both dials are carried through, and both are clamped rather than trusted.
+  const dialledState = createAnteState(3, { roundLimit: 7, startingGold: 9 })
+  assert.equal(getRoundLimit(dialledState), 7)
+  assert.equal(getAnteStartingGold(dialledState), 9)
+  assert.ok(dialledState.seatOrder.every((playerID) => getPlayerGold(dialledState.players[playerID]) === 9))
+  assert.equal(normalizeRoundLimit(0), MIN_BLOW_COW_ROUND_LIMIT)
+  assert.equal(normalizeRoundLimit(9999), MAX_BLOW_COW_ROUND_LIMIT)
+  assert.equal(normalizeRoundLimit('twenty'), DEFAULT_BLOW_COW_ROUND_LIMIT)
+  assert.equal(normalizeAnteStartingGold(0), MIN_BLOW_COW_ANTE_STARTING_GOLD)
+  assert.equal(normalizeAnteStartingGold(9999), MAX_BLOW_COW_ANTE_STARTING_GOLD)
+  assert.ok(validateBlowCowSetupData({ gameMode: 'ante', roundLimit: 0 }))
+  assert.ok(validateBlowCowSetupData({ gameMode: 'ante', startingGold: 0 }))
+  assert.ok(validateBlowCowSetupData({ gameMode: 'nonsense' as never }))
+  assert.equal(validateBlowCowSetupData({ gameMode: 'ante', roundLimit: 20, startingGold: 5 }), undefined)
+
+  /*
+   * The remainder lands on the seats latest in turn order. Four players take 6 ranks, so the deck is
+   * 26 and two seats hold 7; turn order runs counterclockwise from seat 0, which is 0, 3, 2, 1, so
+   * the extras belong to seats 2 and 1 — the two that act last.
+   */
+  const unevenState = createAnteState(4)
+  assert.equal(getAnteHandTotal(unevenState), 6 * 4 + 2)
+  assert.deepEqual(
+    unevenState.seatOrder.map((playerID) => unevenState.players[playerID].hand.length),
+    [6, 7, 7, 6],
+  )
+  assert.equal(unevenState.round.startingPlayerID, '0')
+
+  // Five and six players share a rank count, so only one of the two deals evenly by luck.
+  assert.equal(createAnteState(5).deckConfig.selectedRanks.length, 7)
+  assert.equal(getAnteHandTotal(createAnteState(5)), 30)
+  assert.equal(getAnteHandTotal(createAnteState(6)), 30)
+}
+
+function runAnteNoPointsCheck() {
+  /*
+   * Four of a kind stays in an Ante hand. This is what lets the mode promise to deal the whole deck
+   * every round: a scored set never comes back, so removing one would shrink the deck permanently.
+   */
+  const anteState = createInitialBlowCowState(2, rankGroupedShuffle, {
+    gameMode: 'ante',
+    rankSelectionMode: 'manual',
+    selectedRanks: ['A', '2'],
+  })
+
+  assert.equal(getAnteHandTotal(anteState), 10)
+  assert.ok(anteState.seatOrder.every((playerID) => anteState.players[playerID].scoredSets.length === 0))
+  assert.ok(anteState.seatOrder.every((playerID) => anteState.players[playerID].points === 0))
+
+  const anteRankCounts = anteState.players['0'].hand.filter((handCard) => handCard.rank === '2').length
+  assert.equal(anteRankCounts, 4, 'expected the grouped deal to leave four of a kind in seat 0\'s hand')
+
+  /*
+   * A classic room scores the same set out, which is what makes the assertion above a rule rather
+   * than an accident of how these cards happened to fall. It needs a different deck order to set up,
+   * because the two modes deal differently on purpose: classic goes round-robin by seat, and Ante
+   * takes contiguous slices in turn order so the remainder can land on the seats acting last. The
+   * natural deck order runs suit-outer, so round-robin over two seats hands seat 0 all four Aces.
+   */
+  const classicState = createInitialBlowCowState(2, identityShuffle, {
+    rankSelectionMode: 'manual',
+    selectedRanks: ['A', '2'],
+    useCharacters: false,
+  })
+
+  assert.equal(classicState.players['0'].scoredSets.length, 1)
+  assert.equal(classicState.players['0'].scoredSets[0].rank, 'A')
+  assert.equal(classicState.players['0'].points, 1)
+  assert.ok(classicState.players['0'].hand.every((handCard) => handCard.rank !== 'A'))
+}
+
+function runAntePassEndingCheck() {
+  const state = createAnteState(3)
+  const { events, record } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Reaching `n` means every seat chose to pass, so the opening round of passes is an ordinary
+  // ending rather than the round without a winner the `n - 1` trigger would have produced.
+  assert.equal(passMove({ G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random }), undefined)
+  assert.equal(state.round.passStreak, 1)
+  assert.equal(state.round.roundNumber, 1)
+
+  assert.equal(passMove({ G: state, ctx: { currentPlayer: '2', turn: 2 }, events, playerID: '2', random }), undefined)
+  assert.equal(state.round.passStreak, 2)
+  assert.equal(state.round.roundNumber, 1)
+
+  assert.equal(passMove({ G: state, ctx: { currentPlayer: '1', turn: 3 }, events, playerID: '1', random }), undefined)
+
+  // The last passer takes the round, and nobody pays for it.
+  assert.equal(getPlayerGold(state.players['1']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  assert.equal(getPlayerGold(state.players['0']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD)
+  assert.equal(getPlayerGold(state.players['2']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD)
+  assert.equal(state.round.roundNumber, 2)
+  assert.equal(state.round.startingPlayerID, '1')
+  assert.equal(record.nextPlayerID, '1')
+  assert.equal(record.endedGame, null)
+  /*
+   * No reveal walk, and this is the ordinary case rather than a special one: reaching `n` means every
+   * seat took a turn since its last play, so the Reveal Rule opened the whole table already and
+   * `beginAnteRoundEndReveal` refuses an empty walk. Here nobody even played.
+   */
+  assert.equal(state.resetResolution, null)
+  assert.equal(state.table.plays.length, 0)
+  // Redealt in full, and the direction has not moved — Ante does not play the Direction Change Rule.
+  assert.equal(getAnteHandTotal(state), 18)
+  assert.equal(state.round.direction, 'counterclockwise')
+  assert.ok(state.seatOrder.every((playerID) => !state.players[playerID].hasLeft))
+}
+
+function runAnteEmptyHandEndingCheck() {
+  const state = createAnteState(3)
+  const { events, record } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Seat 1 empties its hand onto the table, which is the only way this ending is ever reached: the
+  // hand-emptying play is by construction one the Reveal Rule never got to.
+  state.round.trumpRank = 'A'
+  state.round.lastNonPassingPlayerID = '0'
+  const emptyingCards = state.players['1'].hand.slice(0, 1)
+  assert.equal(playMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 4 }, events, playerID: '1', random },
+    { cardIDs: emptyingCards.map((handCard) => handCard.id) },
+  ), undefined)
+  state.players['1'].hand = []
+
+  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 5 }, events, random })
+
+  /*
+   * The round is decided but not settled: the winner turns the table over first, so the play nobody
+   * had to answer is read at last. No turn was opened for them, so Take Turn is still never pressed.
+   */
+  assert.equal(state.turnOpening, null)
+  assert.equal(state.resetResolution?.kind, 'anteEmptyHand')
+  assert.equal(state.resetResolution?.callerPlayerID, '1')
+  assert.deepEqual(state.resetResolution?.revealOrder, ['1'])
+  assert.equal(getPlayerGold(state.players['1']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD)
+  assert.equal(state.round.roundNumber, 1)
+  // Nothing may happen on top of it: the walk is a procedure like a BS call.
+  assert.equal(passMove({ G: state, ctx: { currentPlayer: '1', turn: 5 }, events, playerID: '1', random }), 'INVALID_MOVE')
+
+  completeResetReveal(state, events, 5)
+  assert.ok(state.table.plays.every((play) => play.cards.every((tableCard) => isCardFaceUpOnTable(play, tableCard.id))))
+
+  assert.equal(finalizeResetResolutionMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 5 }, events, playerID: '1', random },
+    { resolutionID: state.resetResolution?.id ?? '' },
+  ), undefined)
+
+  // An empty hand wins the round here rather than removing its owner.
+  assert.equal(state.players['1'].hasLeft, false)
+  assert.equal(state.players['1'].leaveOrder, null)
+  assert.equal(getPlayerGold(state.players['1']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  assert.equal(state.round.roundNumber, 2)
+  assert.equal(record.nextPlayerID, '1')
+  assert.equal(state.resetResolution, null)
+  assert.equal(state.table.plays.length, 0)
+  assert.equal(getAnteHandTotal(state), 18)
+}
+
+/**
+ * The guard in front of both Ante round-end walks. It refuses an empty one, which is what keeps
+ * `Ending 2` instant in every position legal play can produce — and raises one wherever a card really
+ * is still face down, which is `Ending 3` always and `Ending 2` never.
+ */
+function runAnteRoundEndRevealCheck() {
+  const state = createAnteState(3)
+  const { events } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Seat 0 plays and the table never gets back to them, so their claim is still face down when the
+  // pass streak completes. Legal play cannot reach this, but the branch is the one that decides
+  // whether an ending walks or settles, so it is driven rather than argued about.
+  state.round.trumpRank = 'A'
+  state.round.lastNonPassingPlayerID = '2'
+  const playedCards = state.players['0'].hand.slice(0, 1)
+  assert.equal(playMove(
+    { G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random },
+    { cardIDs: playedCards.map((handCard) => handCard.id) },
+  ), undefined)
+
+  state.round.passStreak = state.seatOrder.filter((seatID) => !state.players[seatID].hasLeft).length - 1
+  assert.equal(passMove({ G: state, ctx: { currentPlayer: '2', turn: 2 }, events, playerID: '2', random }), undefined)
+
+  assert.equal(state.resetResolution?.kind, 'antePassEnding')
+  assert.equal(state.resetResolution?.callerPlayerID, '2')
+  assert.deepEqual(state.resetResolution?.revealOrder, ['0'])
+  // The gold waits on the walk. Nothing has been paid out yet.
+  assert.equal(getPlayerGold(state.players['2']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD)
+
+  // Only the last passer drives it, exactly as only a BS caller drives theirs.
+  assert.equal(advanceResetRevealMove(
+    { G: state, ctx: { currentPlayer: '2', turn: 2 }, events, playerID: '0', random },
+    { resolutionID: state.resetResolution?.id ?? '' },
+  ), 'INVALID_MOVE')
+
+  completeResetReveal(state, events, 2)
+  assert.equal(finalizeResetResolutionMove(
+    { G: state, ctx: { currentPlayer: '2', turn: 2 }, events, playerID: '2', random },
+    { resolutionID: state.resetResolution?.id ?? '' },
+  ), undefined)
+
+  assert.equal(getPlayerGold(state.players['2']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  assert.equal(state.round.roundNumber, 2)
+  assert.ok(state.history.some((event) => /won it by passing last/i.test(event.detail)))
+}
+
+function runAnteBSEndingCheck() {
+  const state = createAnteState(2)
+  const { events, record } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Seat 0 opens with a rank it is not holding, so the claim is a lie and seat 1 wins the call.
+  const liedCard = state.players['0'].hand.find((handCard) => handCard.rank !== '3')
+  assert.ok(liedCard)
+  assert.equal(selectTrumpAndPlayMove(
+    { G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random },
+    { trumpRank: '3', cardIDs: [liedCard.id] },
+  ), undefined)
+
+  assert.equal(callBSMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 2 }, events, playerID: '1', random },
+    { targetPlayerID: '0' },
+  ), undefined)
+
+  completeBSReveal(state, events, 2)
+  assert.equal(state.bsResolution?.punishment?.punishedPlayerID, '0')
+
+  assert.equal(finalizeBSResolutionMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 2 }, events, playerID: '1', random },
+    { resolutionID: state.bsResolution?.id ?? '' },
+  ), undefined)
+
+  // The gold moves and the cards do not: the table is gathered into the redeal rather than taken.
+  assert.equal(getPlayerGold(state.players['1']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  assert.equal(getPlayerGold(state.players['0']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD - 1)
+  assert.equal(state.players['0'].points, 0)
+  assert.equal(state.players['0'].scoredSets.length, 0)
+  assert.ok(state.history.some((event) => /No cards changed hands/i.test(event.detail)))
+  assert.equal(state.round.roundNumber, 2)
+  assert.equal(state.round.startingPlayerID, '1')
+  assert.equal(record.nextPlayerID, '1')
+  assert.equal(getAnteHandTotal(state), 14)
+  assert.equal(state.table.plays.length, 0)
+
+  // One archive line per round, naming both sides of it.
+  const roundResults = state.archive.turns
+    .flatMap((archivedTurn) => archivedTurn.actions)
+    .filter((action) => action.kind === 'anteRoundResult')
+  assert.equal(roundResults.length, 1)
+  assert.equal(roundResults[0].unpunishedPlayerID, '1')
+  assert.equal(roundResults[0].punishedPlayerID, '0')
+
+  // The public honesty record, which is the one thing in `G` written purely for the multi-round bot.
+  // Seat 0 lied and was caught; seat 1 called and won. `getAnteSeatRecord` is the only reader.
+  const liar = getAnteSeatRecord(state.players['0'])
+  const caller = getAnteSeatRecord(state.players['1'])
+  assert.equal(liar.lies, 1, 'the caught lie is recorded')
+  assert.equal(liar.honest, 0)
+  assert.equal(liar.bsLosses, 1)
+  assert.equal(liar.roundsWon, 0)
+  assert.equal(liar.callsMade, 0)
+  assert.equal(caller.callsMade, 1)
+  assert.equal(caller.callsWon, 1)
+  assert.equal(caller.roundsWon, 1)
+  assert.equal(caller.bsLosses, 0)
+  // The caller never played, so the table holds nothing of theirs to judge.
+  assert.equal(getAnteRecordObservations(caller), 0)
+}
+
+/**
+ * The record is **cumulative across rounds and never reset**, which is the whole reason it exists —
+ * a per-round count is already recoverable from the table, and it is the cross-round total the match
+ * observation reads. Also holds the honest branch: a truthful play that the table saw counts toward
+ * `honest`, so `lie_rate` has a denominator that is not just lies.
+ */
+function runAnteSeatRecordAccumulatesCheck() {
+  const state = createAnteState(2)
+  const { events } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  const playRoundWithCaughtLie = (liarID: string, callerID: string, turn: number) => {
+    // Claim a rank and play something that is not it. Holding the claimed rank is irrelevant — the
+    // lie is in the card that hits the table — and a Joker is excluded because it is always honest.
+    const liar = state.players[liarID]
+    const rank = state.deckConfig.selectedRanks[0]
+    const card = liar.hand.find((handCard) => handCard.rank !== rank && handCard.rank !== 'Joker')
+    assert.ok(card, 'the liar needs a non-Joker card of some other rank')
+    assert.equal(selectTrumpAndPlayMove(
+      { G: state, ctx: { currentPlayer: liarID, turn }, events, playerID: liarID, random },
+      { trumpRank: rank, cardIDs: [card.id] },
+    ), undefined)
+    assert.equal(callBSMove(
+      { G: state, ctx: { currentPlayer: callerID, turn: turn + 1 }, events, playerID: callerID, random },
+      { targetPlayerID: liarID },
+    ), undefined)
+    completeBSReveal(state, events, turn + 1)
+    assert.equal(finalizeBSResolutionMove(
+      { G: state, ctx: { currentPlayer: callerID, turn: turn + 1 }, events, playerID: callerID, random },
+      { resolutionID: state.bsResolution?.id ?? '' },
+    ), undefined)
+  }
+
+  playRoundWithCaughtLie('0', '1', 1)
+  playRoundWithCaughtLie('0', '1', 3)
+
+  const liar = getAnteSeatRecord(state.players['0'])
+  const caller = getAnteSeatRecord(state.players['1'])
+  assert.equal(state.round.roundNumber, 3, 'two rounds completed')
+  assert.equal(liar.lies, 2, 'the record accumulates rather than resetting each round')
+  assert.equal(liar.bsLosses, 2)
+  assert.equal(caller.callsMade, 2)
+  assert.equal(caller.callsWon, 2)
+  assert.equal(caller.roundsWon, 2)
+  assert.equal(getAnteRecordObservations(liar), 2)
+}
+
+/**
+ * Classic mode never writes the record. It is Ante's alone, so a classic match must restore and play
+ * without the field ever appearing — the same guarantee every other `isAnteMode` branch carries.
+ */
+function runAnteSeatRecordIsAnteOnlyCheck() {
+  const state = createScenarioState()
+  assert.equal(getGameMode(state), 'classic')
+  for (const playerID of Object.keys(state.players)) {
+    assert.equal(state.players[playerID].anteRecord, undefined)
+    // The reader still answers for a seat that has none, which is what makes the field optional.
+    assert.equal(getAnteRecordObservations(getAnteSeatRecord(state.players[playerID])), 0)
+  }
+}
+
+function runAnteEliminationCheck() {
+  const state = createAnteState(3)
+  const { events, record } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Seat 0 is one lost call from bankrupt, and only a lost call can take gold.
+  state.players['0'].gold = 1
+  assert.equal(state.deckConfig.selectedRanks.length, 4)
+
+  const liedCard = state.players['0'].hand.find((handCard) => handCard.rank !== '4')
+  assert.ok(liedCard)
+  assert.equal(selectTrumpAndPlayMove(
+    { G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random },
+    { trumpRank: '4', cardIDs: [liedCard.id] },
+  ), undefined)
+
+  assert.equal(callBSMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 2 }, events, playerID: '1', random },
+    { targetPlayerID: '0' },
+  ), undefined)
+
+  completeBSReveal(state, events, 2)
+  assert.equal(finalizeBSResolutionMove(
+    { G: state, ctx: { currentPlayer: '1', turn: 2 }, events, playerID: '1', random },
+    { resolutionID: state.bsResolution?.id ?? '' },
+  ), undefined)
+
+  assert.equal(getPlayerGold(state.players['0']), 0)
+  assert.equal(state.players['0'].hasLeft, true)
+  assert.equal(state.players['0'].leaveOrder, 1)
+  assert.equal(state.players['0'].hand.length, 0)
+  assert.ok(state.history.some((event) => /Ran out of gold/i.test(event.detail)))
+
+  // Two players left, so the deck drops to the 2-player rank count and stays dropped.
+  assert.equal(state.deckConfig.selectedRanks.length, 3)
+  assert.equal(state.deckConfig.defaultRankCount, 3)
+  assert.equal(getAnteHandTotal(state), 3 * 4 + 2)
+  assert.ok(state.history.some((event) => /deck shrank/i.test(event.title)))
+  assert.equal(record.endedGame, null)
+  assert.equal(state.round.roundNumber, 2)
+  // The bankrupt seat cannot start the round it just lost, and never takes another turn.
+  assert.notEqual(state.round.startingPlayerID, '0')
+  assert.equal(record.nextPlayerID, '1')
+}
+
+function runAnteRoundLimitCheck() {
+  const state = createAnteState(3, { roundLimit: 2 })
+  const { events, record } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Seat 2 is ahead on gold going into the final round, and seat 1 is about to win it outright.
+  state.players['2'].gold = 9
+  state.players['0'].gold = 3
+  state.round.roundNumber = 2
+  state.players['1'].hand = []
+
+  // Nothing is on the table, so the round-end walk is refused and the ending settles where it stands.
+  beginTurn({ G: state, ctx: { currentPlayer: '1', turn: 9 }, events, random })
+  assert.equal(state.resetResolution, null)
+
+  assert.equal(state.gameStatus, 'finished')
+  assert.ok(record.endedGame)
+  // Most gold wins, which is the opposite of the classic ordering.
+  assert.deepEqual(state.placements, ['2', '1', '0'])
+  assert.equal(record.endedGame?.winnerID, '2')
+  assert.equal(record.endedGame?.goldByPlayer?.['2'], 9)
+  assert.equal(record.endedGame?.goldByPlayer?.['1'], DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  // The round that hit the limit still paid out before the match was called.
+  assert.equal(getPlayerGold(state.players['1']), DEFAULT_BLOW_COW_ANTE_STARTING_GOLD + 1)
+  assert.match(state.tableStatus, /2 round\(s\) have been played/i)
+}
+
+function runAnteRemovedRulesCheck() {
+  const state = createAnteState(3)
+  const { events } = createEventRecorder()
+  const random = { Shuffle: identityShuffle }
+
+  // Call Reset does not exist, however full the table is.
+  state.round.maxCardsOnTable = 0
+  assert.equal(callResetMove({ G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random }), 'INVALID_MOVE')
+
+  // Nor does the cap it used to unlock at: a play goes through with the table already over it.
+  state.round.trumpRank = 'A'
+  state.round.lastNonPassingPlayerID = '1'
+  const playedCards = state.players['0'].hand.slice(0, 2)
+  assert.equal(playMove(
+    { G: state, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random },
+    { cardIDs: playedCards.map((handCard) => handCard.id) },
+  ), undefined)
+  assert.equal(getTableCardCount(state.table), 2)
+
+  // The trump rank may repeat, because Ante does not play the Rank Change Rule.
+  const repeatState = createAnteState(3)
+  repeatState.round.previousTrumpRank = 'A'
+  const repeatCard = repeatState.players['0'].hand[0]
+  assert.equal(selectTrumpAndPlayMove(
+    { G: repeatState, ctx: { currentPlayer: '0', turn: 1 }, events, playerID: '0', random },
+    { trumpRank: 'A', cardIDs: [repeatCard.id] },
+  ), undefined)
+  assert.equal(repeatState.round.trumpRank, 'A')
+
+  /*
+   * And there is no Final Two Players Rule. In the classic game an opponent with an empty hand is
+   * about to leave, so the last player is held to Call BS; here they win a round instead, so Pass
+   * stays open and answering with a call is a choice rather than the only button on screen.
+   */
+  const headsUpState = createAnteState(2)
+  headsUpState.players['1'].hand = []
+  headsUpState.round.trumpRank = 'A'
+  headsUpState.round.lastNonPassingPlayerID = '1'
+  assert.equal(passMove({ G: headsUpState, ctx: { currentPlayer: '0', turn: 4 }, events, playerID: '0', random }), undefined)
+  assert.equal(headsUpState.round.passStreak, 1)
+
+  // Play too, on a fresh copy of the same position. Both halves matter: the classic rule takes Play
+  // and Pass away together, so a mirror of it that is missing the Ante gate greys out both.
+  const headsUpPlayState = createAnteState(2)
+  headsUpPlayState.players['1'].hand = []
+  headsUpPlayState.round.trumpRank = 'A'
+  headsUpPlayState.round.lastNonPassingPlayerID = '1'
+  const headsUpCard = headsUpPlayState.players['0'].hand[0]
+  assert.equal(playMove(
+    { G: headsUpPlayState, ctx: { currentPlayer: '0', turn: 4 }, events, playerID: '0', random },
+    { cardIDs: [headsUpCard.id] },
+  ), undefined)
+  assert.equal(getTableCardCount(headsUpPlayState.table), 1)
+}
+
 const checks = [
   ['BS resolution', runBSResolutionCheck],
   ['BS reveal procedure', runBSRevealProcedureCheck],
@@ -8036,7 +9031,22 @@ const checks = [
   ['clown character', runClownCharacterCheck],
   ['thinker character', runThinkerCharacterCheck],
   ['character card art', runCharacterCardArtCheck],
+  ['character documentation', runCharacterDocumentationCheck],
   ['status effects', runStatusEffectsCheck],
+  ['special rank cards', runSpecialRankCardsCheck],
+  ['max cards on table', runMaxCardsOnTableCheck],
+  ['player gold', runPlayerGoldCheck],
+  ['ante setup', runAnteSetupCheck],
+  ['ante keeps no points', runAnteNoPointsCheck],
+  ['ante pass ending', runAntePassEndingCheck],
+  ['ante empty hand ending', runAnteEmptyHandEndingCheck],
+  ['ante round end reveal', runAnteRoundEndRevealCheck],
+  ['ante bs ending', runAnteBSEndingCheck],
+  ['ante seat record accumulates', runAnteSeatRecordAccumulatesCheck],
+  ['ante seat record is ante only', runAnteSeatRecordIsAnteOnlyCheck],
+  ['ante elimination and deck resize', runAnteEliminationCheck],
+  ['ante round limit', runAnteRoundLimitCheck],
+  ['ante removed rules', runAnteRemovedRulesCheck],
 ] as const
 
 for (const [label, runCheck] of checks) {

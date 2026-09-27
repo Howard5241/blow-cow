@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+import { getPlayerGold } from '../src/game/blowCowGame.ts'
 import type {
   BlowCowArchiveInitialState,
   BlowCowCard,
@@ -175,6 +176,14 @@ function buildInitialArchive(
     characterPool: [...initialArchive.characterPool],
     // Additive within schemaVersion 1: readers that predate rule cards simply ignore the key.
     rules: { ...initialArchive.rules },
+    /*
+     * Which game was played, and the two dials only one of them reads. Also additive. Note that in an
+     * Ante match `deckConfig.selectedRanks` above is the *opening* deck: it shrinks as players are
+     * eliminated, so `endgame` is what says what the match finished on.
+     */
+    gameMode: initialArchive.gameMode ?? 'classic',
+    roundLimit: initialArchive.roundLimit ?? null,
+    startingGold: initialArchive.startingGold ?? null,
     players: initialArchive.playerOrder.map((playerID) => {
       const player = initialArchive.players[playerID]
       return {
@@ -184,6 +193,7 @@ function buildInitialArchive(
         character: player.character,
         initialHand: cloneCards(player.hand),
         initialPoints: player.points,
+        initialGold: player.gold ?? null,
         initialScoredSets: cloneScoredSets(player.scoredSets),
       }
     }),
@@ -203,6 +213,10 @@ function buildEndgameArchive(
   const pointsByPlayer = gameover?.pointsByPlayer ?? Object.fromEntries(
     Object.entries(state.players).map(([playerID, player]) => [playerID, player.points]),
   )
+  // The score in an Ante match, and an untouched starting purse everywhere in a classic one.
+  const goldByPlayer = gameover?.goldByPlayer ?? Object.fromEntries(
+    Object.entries(state.players).map(([playerID, player]) => [playerID, getPlayerGold(player)]),
+  )
 
   return {
     winnerID: gameover?.winnerID ?? placements[0]?.playerID ?? null,
@@ -213,8 +227,14 @@ function buildEndgameArchive(
      * different facts and an analysis needs both. Additive within schemaVersion 1.
      */
     rules: cloneSerializable(state.rules ?? {}),
+    /*
+     * The deck the match finished under. Only Ante ever moves it — every elimination trims it — so in
+     * a classic match this repeats the opening deck exactly, the way `rules` above does.
+     */
+    deckConfig: cloneSerializable(state.deckConfig),
     placements,
     pointsByPlayer: cloneSerializable(pointsByPlayer),
+    goldByPlayer: cloneSerializable(goldByPlayer),
     players: state.seatOrder.map((playerID) => {
       const player = state.players[playerID]
       const placementIndex = placements.findIndex((entry) => entry.playerID === playerID)
@@ -224,6 +244,7 @@ function buildEndgameArchive(
         seatIndex: player.seatIndex,
         character: player.character,
         points: player.points,
+        gold: getPlayerGold(player),
         leaveOrder: player.leaveOrder,
         place: placementIndex >= 0 ? placementIndex + 1 : null,
         matchStats: cloneSerializable<BlowCowPlayerMatchStats>(player.matchStats),
@@ -332,6 +353,8 @@ function buildPlayerIndexEntries(
     bsWinCount: player.matchStats.bsWinCount,
     // Additive within schemaVersion 1: the per-match snapshot already carries the whole matchStats
     // object, so leaving these out would only make this compact line disagree with it.
+    bsTargetCount: player.matchStats.bsTargetCount,
+    bsTargetWinCount: player.matchStats.bsTargetWinCount,
     accusationCount: player.matchStats.accusationCount,
     accusationWinCount: player.matchStats.accusationWinCount,
   }))

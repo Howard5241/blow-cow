@@ -17,7 +17,12 @@ import {
   getManipulationTargetPlayerIDs,
   getMimicryTargetPlayerID,
   getSeekerCharacterChoices,
+  getGameMode,
+  getPlayerGold,
+  getRoundLimit,
+  isAnteMode,
   getPlayerStatuses,
+  getPointScoringRanks,
   getTableCardCount,
   hasStatus,
   isCardFaceUpOnTable,
@@ -36,6 +41,7 @@ import {
   type BlowCowCatHideCardArgs,
   type BlowCowCard,
   type BlowCowFinalizeBSResolutionArgs,
+  type BlowCowDismissHandPeekArgs,
   type BlowCowFinalizeTurnRevealArgs,
   type BlowCowAdvanceResetRevealArgs,
   type BlowCowRevealBSCardArgs,
@@ -60,6 +66,7 @@ import {
   type BlowCowSelectTrumpAndPlayArgs,
   type BlowCowState,
 } from '../game/blowCowGame.ts'
+import { BLOW_COW_GAME_MODE_DESCRIPTIONS, BLOW_COW_GAME_MODE_LABELS } from '../game/blowCowAnte.ts'
 import type { BlowCowRuleID } from '../game/blowCowRules.ts'
 import { getStatusDefinition, type BlowCowStatusID } from '../game/blowCowStatuses.ts'
 import type { BlowCowImplementedCharacterName } from '../game/blowCowCharacters.ts'
@@ -94,7 +101,19 @@ import {
   X_ICON_SPRITE,
 } from './iconSprites.ts'
 import { TableCenterHub } from './TableCenterHub.tsx'
-import { BreakRuleOverlay, HistoryOverlay, RulesOverlay } from './BoardOverlays.tsx'
+import { BreakRuleOverlay, HandPeekOverlay, HistoryOverlay, RulesOverlay } from './BoardOverlays.tsx'
+import { useTooltip } from './tooltipContext.ts'
+import { canSeatBots } from '../bots/blowCowBotSeating.ts'
+import {
+  BLOW_COW_BOT_DESCRIPTIONS,
+  BLOW_COW_ANTE_BOT_KINDS,
+  BLOW_COW_BOT_KINDS,
+  BLOW_COW_BOT_LABELS,
+  getBotKindFromSeatName,
+  type BlowCowBotKind,
+} from '../bots/blowCowBotTypes.ts'
+import type { BotSeat } from '../bots/useBotSeats.ts'
+import { getSpecialRankEffect, getSpecialRankFromSprite } from './specialRankInfo.ts'
 import { useTransientMessage } from './useTransientMessage.ts'
 import {
   getDisplayedFrontCards,
@@ -113,6 +132,7 @@ import type {
   HistoryEvent,
   MatchPlayer,
   PointsFlashDirection,
+  SeatRepair,
   SeatRow,
   SeatStatus,
 } from './boardTypes.ts'
@@ -193,17 +213,26 @@ type EndGameRow = {
   lieRate: number | null
   cardsPlayed: number
   punishmentCount: number
+  bsTargetCount: number
+  /** Won as the caller only: the column this used to be, renamed now that it has a sibling. */
+  bsCallerWinRate: number | null
+  /** Won from either end of a BS call, so calls made and calls received are both in the denominator. */
   bsWinRate: number | null
   isWinner: boolean
   /** Formatted leave-triggered point change, or null when no ability fired for this player. */
   leaveEffectLabel: string | null
 }
 
+/**
+ * One column of the endgame chart. Classic plots cards in hand per turn and Ante plots gold per
+ * round, so `step` is a turn number in the first and a round number in the second — which is why
+ * neither it nor `valuesByPlayer` is named after either reading.
+ */
 type EndGameChartPoint = {
   id: string
   title: string
-  turnNumber: number
-  handCountsByPlayer: Record<string, number>
+  step: number
+  valuesByPlayer: Record<string, number>
 }
 
 /** One x sprite on the line drawn from the caller's block to the accused's block. */
@@ -482,6 +511,25 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
   roomError: string
   serverState: BoardServerState
   serverStatusLabel: string
+  /*
+   * Bot seats are owned by `App`, because they are lobby operations — joining and leaving a match —
+   * and because the headless clients that play them have to outlive any single board render. The
+   * board only draws the controls and reports which one was pressed.
+   */
+  botSeats: BotSeat[]
+  botError: string
+  isBotBusy: boolean
+  onAddBot: (kind: BlowCowBotKind) => void
+  onRemoveBot: (playerID: string) => void
+  /*
+   * The three seat repairs, in the order a stuck table wants them: restart a bot this browser runs,
+   * kick one and seat a replacement, take over one whose browser has gone, and fill a chair nobody
+   * is in. See `useBotSeats` for why each exists and what it can and cannot fix.
+   */
+  onRefreshBot: (playerID: string) => void
+  onReplaceBot: (playerID: string) => void
+  onResumeBot: (playerID: string, playerName: string) => void
+  onSeatBot: (playerID: string, kind: BlowCowBotKind) => void
   moves: {
     accuseDreamer: (args: BlowCowAccuseDreamerArgs) => void
     advanceBSReveal: (args: BlowCowAdvanceBSRevealArgs) => void
@@ -513,6 +561,7 @@ type BlowCowBoardProps = BoardProps<BlowCowState> & {
     takeTurn: (args: BlowCowTakeTurnArgs) => void
     revealTurnCard: (args: BlowCowRevealTurnCardArgs) => void
     finalizeTurnReveal: (args: BlowCowFinalizeTurnRevealArgs) => void
+    dismissHandPeek: (args: BlowCowDismissHandPeekArgs) => void
     toggleDirection: () => void
   }
 }
@@ -569,20 +618,32 @@ function formatTurnLabel(turnNumber: number) {
   return turnNumber === 0 ? 'Deal' : `T${turnNumber}`
 }
 
-function buildEndGameChartPoints(events: BlowCowState['telemetry']['events']) {
-  const latestEventByTurn = new Map<number, BlowCowState['telemetry']['events'][number]>()
+function formatRoundLabel(roundNumber: number) {
+  return `R${roundNumber}`
+}
+
+/**
+ * Collapses the telemetry stream to one point per step, keeping the last event of each — the latest
+ * authoritative snapshot of that turn or round.
+ *
+ * Ante groups by round rather than by turn because gold only ever moves at a round's end, so a
+ * per-turn line would be a staircase of flat runs. Reading the round's *last* event is what puts the
+ * award inside it: `endAnteRound` hands out the gold, logs it, and only then opens the next round.
+ */
+function buildEndGameChartPoints(events: BlowCowState['telemetry']['events'], plotsGold: boolean) {
+  const latestEventByStep = new Map<number, BlowCowState['telemetry']['events'][number]>()
 
   for (const event of events) {
-    latestEventByTurn.set(event.turnNumber, event)
+    latestEventByStep.set(plotsGold ? event.roundNumber : event.turnNumber, event)
   }
 
-  return [...latestEventByTurn.values()]
-    .sort((leftEvent, rightEvent) => leftEvent.turnNumber - rightEvent.turnNumber)
-    .map((event) => ({
+  return [...latestEventByStep.entries()]
+    .sort(([leftStep], [rightStep]) => leftStep - rightStep)
+    .map(([step, event]) => ({
       id: event.id,
       title: event.title,
-      turnNumber: event.turnNumber,
-      handCountsByPlayer: event.handCountsByPlayer,
+      step,
+      valuesByPlayer: plotsGold ? event.goldByPlayer ?? {} : event.handCountsByPlayer,
     } satisfies EndGameChartPoint))
 }
 
@@ -851,7 +912,18 @@ export function BlowCowBoard({
   roomError,
   serverState,
   serverStatusLabel,
+  botSeats,
+  botError,
+  isBotBusy,
+  onAddBot,
+  onRefreshBot,
+  onRemoveBot,
+  onReplaceBot,
+  onResumeBot,
+  onSeatBot,
 }: BlowCowBoardProps) {
+  /** Builds trigger props for the shared tooltip layer. See `src/ui/Tooltip.tsx`. */
+  const tooltip = useTooltip()
   const currentSeatID = playerID
   /*
    * The conspiracy this viewer owes a play on, or null. Only ever non-null on The Mastermind's own
@@ -906,6 +978,7 @@ export function BlowCowBoard({
   const playersFromRoom = roomPlayers.length > 0
     ? roomPlayers
     : ((matchData as MatchPlayer[] | undefined) ?? [])
+  const [selectedBotKind, setSelectedBotKind] = useState<BlowCowBotKind>('heuristic')
   const [selectedCardIDs, setSelectedCardIDs] = useState<string[]>([])
   const [enteringHandCardIDs, setEnteringHandCardIDs] = useState<string[]>([])
   const [removingHandCards, setRemovingHandCards] = useState<HandMotionCard[]>([])
@@ -1059,6 +1132,13 @@ export function BlowCowBoard({
    */
   const turnOpening = G.turnOpening ?? null
   const turnReveal = turnOpening?.isTaken ? turnOpening.reveal ?? null : null
+  /*
+   * The hands a Peek opened, and only ever on the seat that opened them: every other client holds
+   * the record too, but their copies of those hands are still masked, so mounting the panel for them
+   * would draw card backs. It is not a procedure — nothing waits on it — so it is read here rather
+   * than beside the reveal walk below.
+   */
+  const openHandPeek = G.handPeek?.playerID === currentSeatID ? G.handPeek : null
   const isViewerAwaitingTurnTake = Boolean(turnOpening && !turnOpening.isTaken && turnOpening.playerID === currentSeatID)
   /** Only the player the turn belongs to may flip its cards, so nobody else renders the affordances. */
   const isTurnRevealDriver = Boolean(turnReveal && turnOpening && currentSeatID === turnOpening.playerID)
@@ -1580,6 +1660,34 @@ export function BlowCowBoard({
     const timeoutIDs: number[] = []
     const animationFrameIDs: number[] = []
     const shouldAutoFinalize = Boolean(currentSeatID && currentSeatID === G.resetResolution.callerPlayerID && isActive)
+    /*
+     * Ante's two round-end walks have nothing to move. No card goes to a hand and none is
+     * redistributed — the whole deck is gathered into the next round's deal — so the table simply
+     * holds for a beat with everything face up and then the round settles. The gather, shuffle and
+     * deal below would be an animation for a redistribution that is not going to happen, and the
+     * return travel above would fly cards to owners who are about to be dealt new ones.
+     */
+    if (kind === 'antePassEnding' || kind === 'anteEmptyHand') {
+      setResetSequenceProgress(null)
+      setResetMoveSequence(null)
+      setResetGatherSequence(null)
+      setResetPileState(null)
+      setResetDealSequence(null)
+      setDepartedResetCardIDs([])
+
+      if (shouldAutoFinalize) {
+        timeoutIDs.push(window.setTimeout(() => {
+          finalizeResetResolutionRef.current({ resolutionID: id })
+        }, scaleSequenceDelay(RESET_POST_REVEAL_PAUSE_MS, G.speedMultiplier)))
+      }
+
+      return () => {
+        timeoutIDs.forEach((timeoutID) => {
+          window.clearTimeout(timeoutID)
+        })
+      }
+    }
+
     if (kind === 'roundReturn') {
       // A beat to let the last flip land, then the cards go straight home.
       const returnStartAt = scaleSequenceDelay(RESET_POST_REVEAL_PAUSE_MS, G.speedMultiplier)
@@ -1944,6 +2052,15 @@ export function BlowCowBoard({
   const activePlayerCount = activePlayerIDs.length || ctx.numPlayers
   const totalCardsOnTable = getTableCardCount(G.table)
   const maxCardsOnTable = G.round.maxCardsOnTable
+  /*
+   * Ante is the same board with three things taken off it: the table has no cap to count against,
+   * there is no Call Reset to unlock at one, and there are no points — gold is the score, so the
+   * pill that flashes and the column the results table ranks by both move over to it.
+   */
+  const isAnte = isAnteMode(G)
+  const roundLimit = getRoundLimit(G)
+  /** Whichever number is this match's score, so the flash watcher and the pill agree on what moved. */
+  const getSeatScore = (seatID: string) => (isAnte ? getPlayerGold(G.players[seatID]) : G.players[seatID].points)
   const currentTrump = G.round.trumpRank
   const bsResolution = G.bsResolution
   const resetResolution = G.resetResolution
@@ -1964,6 +2081,10 @@ export function BlowCowBoard({
     ? 'accusation'
     : isTurnRevealSequenceActive
     ? 'reveal'
+    // Ante borrows the Reset walk for two of its round endings, and neither is a Reset to anybody
+    // sitting at the table — the mode has no such action.
+    : resetResolution?.kind === 'antePassEnding' || resetResolution?.kind === 'anteEmptyHand'
+    ? 'round end'
     : 'Reset'
   const actingPlayerID = ctx.currentPlayer
   const currentPlayerState = currentSeatID ? (G.players[currentSeatID] ?? null) : null
@@ -1971,7 +2092,7 @@ export function BlowCowBoard({
   const handCards = handSourcePlayerState ? sortCards(handSourcePlayerState.hand).map(toHandCard) : []
   const handCardIDsKey = handCards.map((card) => card.id).join('|')
   const scoredSetIDsKey = currentPlayerState?.scoredSets.map((scoredSet) => scoredSet.id).join('|') ?? ''
-  const seatPointsKey = G.seatOrder.map((seatID) => `${seatID}:${G.players[seatID].points}`).join('|')
+  const seatPointsKey = G.seatOrder.map((seatID) => `${seatID}:${getSeatScore(seatID)}`).join('|')
   const selectedCards = handCards.filter((card) => selectedCardIDs.includes(card.id))
   const isSpectator = currentSeatID === null
   const canEmote = Boolean(
@@ -2027,8 +2148,16 @@ export function BlowCowBoard({
     ? visibleTargetSeatID
     : null
   const hasBSTarget = Boolean(!isBSSequenceActive && actionableBSTargetSeatID)
+  /*
+   * Mirrors the server's `isFinalTwoResolutionTurn`, `isAnteMode` gate included. Ante has no Final
+   * Two Players Rule: the classic one holds the last player to `Call BS` because an opponent who
+   * empties their hand is about to leave the game, and here they merely win a round the match
+   * carries on from. Without the gate this row greyed out `Play` and `Pass` on moves the server
+   * would have accepted, which is the one way a client mirror of a server rule can do real damage.
+   */
   const isFinalTwoResolutionTurn = Boolean(
-    !isBSSequenceActive
+    !isAnte
+      && !isBSSequenceActive
       && currentSeatID
       && activePlayerCount === 2
       && hasBSTarget
@@ -2115,11 +2244,13 @@ export function BlowCowBoard({
     && Boolean(currentSeatID && canMimic(G, currentSeatID))
   /** This seat owes the table a play because The Invisible Hand opened the round for them. */
   const isForcedToPlay = Boolean(currentSeatID && G.round.forcedPlayPlayerID === currentSeatID)
-  const isTableLimitRemoved = isRuleRemoved(G, 'maxCardsOnTable')
+  // Ante plays neither rule, so the board asks the mode alongside the card exactly as the server does.
+  const isTableLimitRemoved = isAnte || isRuleRemoved(G, 'maxCardsOnTable')
   const isPassRemoved = isRuleRemoved(G, 'pass')
   const hasTableRoomForSelection = isTableLimitRemoved
     || totalCardsOnTable + selectedCards.length <= maxCardsOnTable
-  const isRepeatingPreviousTrump = !isRuleRemoved(G, 'rankChange')
+  const isRepeatingPreviousTrump = !isAnte
+    && !isRuleRemoved(G, 'rankChange')
     && selectedTrumpRank === G.round.previousTrumpRank
   const canRepeatPreviousTrump = canCheat && isRepeatingPreviousTrump
   /*
@@ -2222,7 +2353,7 @@ export function BlowCowBoard({
   const selectedTrumpPlayCallout = selectedCards.length > 0
     ? buildPlayCalloutText(selectedTrumpRank, selectedCards.length)
     : null
-  const canCallReset = isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable && !openConspiracy
+  const canCallReset = !isAnte && isInteractiveTurn && totalCardsOnTable >= maxCardsOnTable && !openConspiracy
   const canUseCat = isInteractiveTurn && isCat && !isResolutionSequenceActive
   const selectedForeignerCardLabel = FOREIGNER_CARD_OPTIONS.find((option) => option.value === selectedForeignerCardCode)?.label ?? 'the selected card'
   const displayedTrumpRank = currentTrump ?? selectedTrumpRank
@@ -2237,7 +2368,10 @@ export function BlowCowBoard({
   const manipulateRank = resolvedManipulateRank ?? selectedTrumpRank
   // With the cap removed the number still gates Call Reset, so it is labelled as the reset threshold
   // rather than a maximum it no longer is.
-  const tableCapacityLabel = isTableLimitRemoved
+  const tableCapacityLabel = isAnte
+    // No cap and no Call Reset, so the threshold has nothing left to be a threshold for.
+    ? `current cards: ${totalCardsOnTable}, no maximum`
+    : isTableLimitRemoved
     ? `current cards: ${totalCardsOnTable}, no maximum (reset unlocks at ${maxCardsOnTable})`
     : `current cards: ${totalCardsOnTable}, max cards: ${maxCardsOnTable}`
   /*
@@ -2252,7 +2386,6 @@ export function BlowCowBoard({
     : canUseCat
     ? `${tableCapacityLabel}. Because you are The Cat, you may click any face-up front card to flip it face down.`
     : tableCapacityLabel
-  const roomCodeTooltip = `Room Code:\n${matchID}`
   const copyRoomCodeLabel = copyRoomCodeStatus === 'copied'
     ? 'Room code copied'
     : copyRoomCodeStatus === 'failed'
@@ -2288,14 +2421,31 @@ export function BlowCowBoard({
   const allSeatsFilled = filledSeatCount === ctx.numPlayers
   const isHostPlayer = currentSeatID === G.hostPlayerID
   const hostSlot = roomSlots.find((slot) => slot.isHost) ?? null
+  // Vanilla classic, or a five-seat Ante table; `canSeatBots` says why when it refuses. See
+  // `src/bots/blowCowBotSeating.ts`.
+  const botSeating = canSeatBots(G)
+  /*
+   * Ante's roster is the learned agent alone — the scripted five are ports of the classic package and
+   * do not know these rules. Derived rather than stored, so switching mode cannot strand the picker
+   * on a kind this table will not seat, and without an effect that would fight the existing
+   * `set-state-in-effect` warnings in this file.
+   */
+  const botKinds = isAnteMode(G) ? BLOW_COW_ANTE_BOT_KINDS : BLOW_COW_BOT_KINDS
+  const effectiveBotKind = botKinds.includes(selectedBotKind) ? selectedBotKind : botKinds[0]
   const stagingStatusText = isHostPlayer
     ? (allSeatsFilled
       ? 'Everyone is here. Start when ready.'
       : `Waiting for ${ctx.numPlayers - filledSeatCount} more player(s) to join the room.`)
     : `${hostSlot?.displayName || 'The host'} will start the game once the room is ready.`
-  const stagingDeckSummary = G.deckConfig.rankSelectionMode === 'manual'
+  // Appended rather than folded into either sentence: the action ranks are a separate choice from the
+  // standard thirteen, and a room that took none of them should read exactly as it did before.
+  const stagingSpecialRankSummary = (G.deckConfig.specialRanks ?? []).length > 0
+    ? ` Action ranks: ${(G.deckConfig.specialRanks ?? []).join(', ')}.`
+    : ''
+  const stagingDeckSummary = (G.deckConfig.rankSelectionMode === 'manual'
     ? `Manual deck with ranks ${G.deckConfig.selectedRanks.join(', ')} plus 2 Jokers.`
-    : `Default deck with ${G.deckConfig.selectedRanks.length} selected standard ranks (${G.deckConfig.selectedRanks.join(', ')}) plus 2 Jokers.`
+    : `Default deck with ${G.deckConfig.selectedRanks.length} selected standard ranks (${G.deckConfig.selectedRanks.join(', ')}) plus 2 Jokers.`)
+    + stagingSpecialRankSummary
   const stagingCharactersSummary = G.useCharacters ? 'Enabled' : 'Disabled'
   const canStartMatch = isStaging && isHostPlayer && allSeatsFilled && !isLeaving
   const departedPunishmentCardIDSet = new Set(departedPunishmentCardIDs)
@@ -2446,7 +2596,7 @@ export function BlowCowBoard({
   }, [displayedFrontCardsBySeatID])
 
   useEffect(() => {
-    const nextPointsBySeat = new Map(G.seatOrder.map((seatID) => [seatID, G.players[seatID].points]))
+    const nextPointsBySeat = new Map(G.seatOrder.map((seatID) => [seatID, getSeatScore(seatID)]))
     const previousPointsBySeat = previousPointsBySeatRef.current
 
     previousPointsBySeatRef.current = nextPointsBySeat
@@ -2627,7 +2777,11 @@ export function BlowCowBoard({
     showPlayerCallout(
       resetResolution.callerPlayerID,
       latestResetResolutionID,
-      resetResolution.kind === 'roundReturn' ? 'All passed' : 'Reset!',
+      resetResolution.kind === 'roundReturn' || resetResolution.kind === 'antePassEnding'
+        ? 'All passed'
+        : resetResolution.kind === 'anteEmptyHand'
+        ? 'Out of cards!'
+        : 'Reset!',
     )
   }, [resetResolution?.id])
 
@@ -2899,12 +3053,53 @@ export function BlowCowBoard({
   /** Exactly the cards this turn owes, so no other face-down card of the seat's lights up. */
   const turnRevealCardIDSet = new Set(turnReveal?.cardIDs ?? [])
 
+  /*
+   * Whether this seat can still act, and what would fix it if not.
+   *
+   * All three answers are read off the room roster rather than off `G`: the engine has no idea a
+   * player has closed their browser, only that it is that seat's turn. The order matters — a bot this
+   * tab runs is answered before anything about its connection, because restarting it in place is
+   * always the cheaper repair and is the only one that works while the seat is still claimed.
+   *
+   * A missing roster entry yields nothing rather than `seat`. The roster is polled, so it is briefly
+   * empty on a fresh mount, and reading that as "nobody is in any of these chairs" would put a repair
+   * button on every block on the table.
+   */
+  const getSeatRepair = (seatID: string, rosterEntry: MatchPlayer | undefined, hasLeft: boolean): SeatRepair | null => {
+    if (hasLeft || G.gameStatus !== 'active' || !rosterEntry) {
+      return null
+    }
+
+    if (botSeats.some((bot) => bot.playerID === seatID)) {
+      return { action: 'local', name: rosterEntry.name || getFallbackSeatLabel(seatID) }
+    }
+
+    // Claimed by nobody. Either somebody left the room without leaving the game, or a kick lost its
+    // rejoin half. `botSeating` decides whether a bot is a legal answer for this room at all.
+    if (!rosterEntry.name) {
+      return botSeating.allowed ? { action: 'seat' } : null
+    }
+
+    return rosterEntry.isConnected === false && getBotKindFromSeatName(rosterEntry.name) !== null
+      ? { action: 'resume', name: rosterEntry.name }
+      : null
+  }
+
   const seatRows: SeatRow[] = G.seatOrder.map((seatID) => {
     const player = G.players[seatID]
     const disguise = wornMimicry?.playerID === seatID ? wornMimicry : null
     /** Whose face and numbers this block shows, which is its own unless it is wearing somebody's. */
     const identitySeatID = disguise?.sourcePlayerID ?? seatID
     const matchPlayer = playersFromRoom.find((entry) => String(entry.id) === identitySeatID)
+    /*
+     * The roster entry for the chair itself rather than for the face it is wearing. Only `Resume Bot`
+     * reads it, and it has to: that button acts on a real seat through `/rejoin`, which would refuse
+     * a disguise's name against this chair's `playerID`. The source's own block still offers it, so
+     * nothing is lost by the Mime's block not doing so a second time.
+     */
+    const chairMatchPlayer = disguise
+      ? playersFromRoom.find((entry) => String(entry.id) === seatID)
+      : matchPlayer
     const displayedFrontCards = displayedFrontCardsBySeatID.get(seatID) ?? []
     /** What The Mime has spent out of the copied hand since copying it. See `resolveMimic`. */
     const cardsPlayedUnderDisguise = disguise
@@ -2973,6 +3168,12 @@ export function BlowCowBoard({
       isConnected: identitySeatID === currentSeatID ? isConnected : Boolean(matchPlayer?.isConnected),
       isTargetPlayer: seatID === visibleTargetSeatID,
       isViewingPlayer: seatID === currentSeatID,
+      /*
+       * Read off the chair rather than through the disguise, unlike every number above it. A Skip
+       * takes a turn from a seat in the ring, and the ring is the one thing a Mimic disguise does not
+       * redraw, so the mark has to stay where the turn will actually not happen.
+       */
+      isSkipped: (G.round.skippedPlayerIDs ?? []).includes(seatID),
       leaveEffect: player.leaveEffect
         ? {
             label: formatLeaveEffectLabel(player.leaveEffect),
@@ -2980,8 +3181,11 @@ export function BlowCowBoard({
           }
         : null,
       name: getSeatDisplayName(identitySeatID, currentSeatID, playerName, playersFromRoom),
-      pointRanks: disguise ? disguise.pointRanks : player.scoredSets.map((scoredSet) => scoredSet.rank),
+      repair: getSeatRepair(seatID, chairMatchPlayer, player.hasLeft),
+      pointRanks: disguise ? disguise.pointRanks : getPointScoringRanks(player.scoredSets),
       points: disguise ? disguise.points : player.points,
+      // Copied through the disguise like the points above it, so the two blocks cannot differ here.
+      gold: disguise ? disguise.gold ?? getPlayerGold(player) : getPlayerGold(player),
       // Copied like every other number on a disguised block, so the two never differ here.
       statuses: toSeatStatuses(disguise ? disguise.statuses ?? [] : getPlayerStatuses(G, seatID)),
       wasSeekerPick: disguise ? disguise.wasSeekerPick : player.seekerPickedCharacter !== null,
@@ -3126,14 +3330,22 @@ export function BlowCowBoard({
   const endGameRows: EndGameRow[] = G.placements.map((seatID, placeIndex) => {
     const player = G.players[seatID]
     const lieRate = formatPercent(player.matchStats.lieCount, player.matchStats.playCount)
-    const bsWinRate = formatPercent(player.matchStats.bsWinCount, player.matchStats.callBSCount)
+    const bsCallerWinRate = formatPercent(player.matchStats.bsWinCount, player.matchStats.callBSCount)
+    // Exactly one seat walks away unpunished from every call, so summing both ends is a plain tally
+    // of BS calls this player was party to and how many of them went their way.
+    const bsWinRate = formatPercent(
+      player.matchStats.bsWinCount + player.matchStats.bsTargetWinCount,
+      player.matchStats.callBSCount + player.matchStats.bsTargetCount,
+    )
 
     return {
       id: seatID,
       seatIndex: player.seatIndex,
       place: placeIndex + 1,
       name: getSeatDisplayName(seatID, currentSeatID, playerName, playersFromRoom),
-      points: player.points,
+      // The column the table is ranked by, whichever mode this was. Ante keeps no points, so showing
+      // a column of zeroes beside a Gold column nobody could see would explain nothing.
+      points: isAnte ? getPlayerGold(player) : player.points,
       leaveOrder: player.leaveOrder ?? G.placements.length,
       playCount: player.matchStats.playCount,
       callBSCount: player.matchStats.callBSCount,
@@ -3143,37 +3355,44 @@ export function BlowCowBoard({
       lieRate,
       cardsPlayed: player.matchStats.cardsPlayed,
       punishmentCount: player.matchStats.punishmentCount,
+      bsTargetCount: player.matchStats.bsTargetCount,
+      bsCallerWinRate,
       bsWinRate,
       isWinner: seatID === winnerID,
       // Why the Points column can disagree with the ranks this player scored.
       leaveEffectLabel: player.leaveEffect ? formatLeaveEffectLabel(player.leaveEffect) : null,
     }
   })
-  const endGameChartPoints = buildEndGameChartPoints(G.telemetry.events)
-  const chartMaxHandCount = endGameChartPoints.reduce(
-    (highestValue, point) => Math.max(highestValue, ...Object.values(point.handCountsByPlayer)),
+  // Ante keeps no cards between rounds and every hand is redealt, so a cards-in-hand line there says
+  // nothing about how the match went. Gold is the number it is actually played for.
+  const chartPlotsGold = isAnte
+  const endGameChartPoints = buildEndGameChartPoints(G.telemetry.events, chartPlotsGold)
+  const chartMaxValue = endGameChartPoints.reduce(
+    (highestValue, point) => Math.max(highestValue, ...Object.values(point.valuesByPlayer)),
     0,
   )
   const chartInnerWidth = ENDGAME_CHART_WIDTH - ENDGAME_CHART_PADDING.left - ENDGAME_CHART_PADDING.right
   const chartInnerHeight = ENDGAME_CHART_HEIGHT - ENDGAME_CHART_PADDING.top - ENDGAME_CHART_PADDING.bottom
   const chartXTickIndices = getEndGameChartTickIndices(endGameChartPoints.length)
-  const chartYTicks = getEndGameChartYTicks(chartMaxHandCount)
+  const chartYTicks = getEndGameChartYTicks(chartMaxValue)
+  const formatChartStepLabel = chartPlotsGold ? formatRoundLabel : formatTurnLabel
+  const formatChartValueLabel = (value: number) => (chartPlotsGold ? `${value} gold` : `${value} card(s)`)
   const endGameChartSeries = endGameRows.map((row, seriesIndex) => {
     const color = ENDGAME_CHART_COLORS[seriesIndex % ENDGAME_CHART_COLORS.length]
     const values = endGameChartPoints.map((point, pointIndex) => {
-      const handCount = point.handCountsByPlayer[row.id] ?? 0
+      const value = point.valuesByPlayer[row.id] ?? 0
       const x = ENDGAME_CHART_PADDING.left + (endGameChartPoints.length <= 1
         ? chartInnerWidth / 2
         : (pointIndex / (endGameChartPoints.length - 1)) * chartInnerWidth)
-      const y = ENDGAME_CHART_PADDING.top + (chartMaxHandCount === 0
+      const y = ENDGAME_CHART_PADDING.top + (chartMaxValue === 0
         ? chartInnerHeight
-        : ((chartMaxHandCount - handCount) / chartMaxHandCount) * chartInnerHeight)
+        : ((chartMaxValue - value) / chartMaxValue) * chartInnerHeight)
 
       return {
         x,
         y,
-        handCount,
-        label: formatTurnLabel(point.turnNumber),
+        value,
+        label: formatChartStepLabel(point.step),
         title: point.title,
       }
     })
@@ -3182,7 +3401,7 @@ export function BlowCowBoard({
       id: row.id,
       name: row.name,
       color,
-      finalHandCount: values[values.length - 1]?.handCount ?? 0,
+      finalValue: values[values.length - 1]?.value ?? 0,
       isWinner: row.isWinner,
       polylinePoints: values.map((point) => `${point.x},${point.y}`).join(' '),
       values,
@@ -3912,11 +4131,11 @@ export function BlowCowBoard({
   }
 
   /*
-   * Every action that needs somebody to point at lives here rather than in the action row: Call BS
-   * and Accuse for everyone, plus Conspire and Manipulate for the one seat holding the character
-   * that has them. Both of those used to carry a player dropdown, which the block itself replaces.
+   * Every action that needs somebody to point at: Call BS and Accuse for everyone, plus Conspire and
+   * Manipulate for the one seat holding the character that has them. Both of those used to carry a
+   * player dropdown, which the block itself replaces.
    */
-  const renderSeatTargetActions = (seat: SeatRow) => {
+  const renderSeatChallengeActions = (seat: SeatRow) => {
     const targetSelection = resolveClientBSTargetSelection(G, currentSeatID, seat.id)
     const callBSFailure = getCallBSFailure(seat.id)
     const accuseFailure = getAccuseFailure(seat.id)
@@ -3924,7 +4143,7 @@ export function BlowCowBoard({
     const manipulateFailure = isInvisibleHand ? getManipulateFailure(seat.id) : null
 
     return (
-      <div className="seat-target-actions">
+      <>
         <button
           className="seat-target-button"
           onClick={(event) => {
@@ -4041,6 +4260,94 @@ export function BlowCowBoard({
             </button>
           </div>
         ) : null}
+      </>
+    )
+  }
+
+  /*
+   * The repairs, which are the one thing in this bubble that is not about the game. A seat can stop
+   * acting three ways — a bot this tab runs has wedged, a bot's whole browser has gone, or the chair
+   * is empty — and the rules keep dealing turns to it in all three, so each gets a way out here.
+   *
+   * They are not gated on the seat being targetable, unlike everything above them. The moment they
+   * are most needed is a table frozen on a seat that will never act, and a frozen table is usually
+   * mid-procedure — exactly when `canTargetSeats` is false and the challenge half is not drawn at all.
+   */
+  const renderSeatRepairActions = (repair: SeatRepair, seatID: string) => {
+    if (repair.action === 'seat') {
+      return (
+        <button
+          className="seat-target-button bot-repair"
+          disabled={isBotBusy}
+          onClick={(event) => {
+            event.stopPropagation()
+            onSeatBot(seatID, effectiveBotKind)
+          }}
+          title={`Nobody is in this seat, and the game will stall the moment the turn reaches it — there is no forfeit in the rules, so an empty chair is never skipped. This puts a ${BLOW_COW_BOT_LABELS[effectiveBotKind]} bot in it, played from this browser.`}
+          type="button"
+        >
+          {isBotBusy ? 'Working...' : 'Seat Bot'}
+        </button>
+      )
+    }
+
+    if (repair.action === 'resume') {
+      return (
+        <button
+          className="seat-target-button bot-repair"
+          disabled={isBotBusy}
+          onClick={(event) => {
+            event.stopPropagation()
+            onResumeBot(seatID, repair.name)
+          }}
+          title={`Run ${repair.name} from this browser. Bots play from the tab that added them, and this one's tab is gone, so the seat sits idle until somebody picks it up.`}
+          type="button"
+        >
+          {isBotBusy ? 'Working...' : 'Resume Bot'}
+        </button>
+      )
+    }
+
+    return (
+      <>
+        <button
+          className="seat-target-button bot-repair"
+          onClick={(event) => {
+            event.stopPropagation()
+            onRefreshBot(seatID)
+          }}
+          title={`Restart ${repair.name} in this browser, keeping its seat and its cards. Try this first when a bot has stopped moving: it clears a dropped socket, a stalled load, and a move that was sent but never landed. If the bot still does not act, the fault is in how it is choosing rather than in how it is connected.`}
+          type="button"
+        >
+          Refresh Bot
+        </button>
+
+        <button
+          className="seat-target-button bot-repair kick"
+          disabled={isBotBusy}
+          onClick={(event) => {
+            event.stopPropagation()
+            onReplaceBot(seatID)
+          }}
+          title={`Kick ${repair.name} and seat a brand new bot of the same kind in its place. A harder reset than Refresh — the seat is left and rejoined, so the server rebuilds its record of it. The chair is never left empty, because an empty chair stalls the table rather than being skipped.`}
+          type="button"
+        >
+          {isBotBusy ? 'Working...' : 'Kick & Reseat'}
+        </button>
+      </>
+    )
+  }
+
+  const renderSeatTargetActions = (seat: SeatRow) => {
+    const canChallenge = selectableTargetSeatIDSet.has(seat.id)
+    if (!canChallenge && !seat.repair) {
+      return null
+    }
+
+    return (
+      <div className="seat-target-actions">
+        {canChallenge ? renderSeatChallengeActions(seat) : null}
+        {seat.repair ? renderSeatRepairActions(seat.repair, seat.id) : null}
       </div>
     )
   }
@@ -4274,7 +4581,7 @@ export function BlowCowBoard({
     key: 'play',
     label: isBrokenStatus
       ? 'Play 1 Random'
-      : selectedPlayCallout ? `Play \"${selectedPlayCallout}\"` : 'Play',
+      : selectedPlayCallout ? `Play "${selectedPlayCallout}"` : 'Play',
     onClick: () => {
       sendSelectionToTable(null)
     },
@@ -4457,20 +4764,31 @@ export function BlowCowBoard({
       label: 'Pass',
       onClick: handlePass,
     },
-    {
-      description: isResolutionSequenceActive
-        ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
-        : isFinalTwoResolutionTurn && totalCardsOnTable >= maxCardsOnTable
-        ? 'With two players left and the table full, Reset is allowed instead of forcing BS.'
-        : totalCardsOnTable >= maxCardsOnTable
-        ? 'Reset is legal because the table is at capacity.'
-        : `Need ${maxCardsOnTable - totalCardsOnTable} more card(s) on the table before reset is legal.`,
-      disabled: !canCallReset,
-      icon: RESET_ICON_SPRITE,
-      key: 'call-reset',
-      label: 'Call Reset',
-      onClick: handleCallReset,
-    },
+    /*
+     * Dropped entirely in Ante rather than shown greyed out. Every other disabled button here is an
+     * action the match *has* and this seat cannot take yet, and its description says what would
+     * unlock it; Call Reset does not exist in this mode at all, so a permanently dead button with a
+     * card-count hint is describing a rule the room is not playing. The Rules panel says the same
+     * thing in words — see `BoardOverlays`.
+     */
+    ...(isAnte
+      ? []
+      : [
+          {
+            description: isResolutionSequenceActive
+              ? `Wait for the ${resolutionSequenceLabel} resolution sequence to finish.`
+              : isFinalTwoResolutionTurn && totalCardsOnTable >= maxCardsOnTable
+              ? 'With two players left and the table full, Reset is allowed instead of forcing BS.'
+              : totalCardsOnTable >= maxCardsOnTable
+              ? 'Reset is legal because the table is at capacity.'
+              : `Need ${maxCardsOnTable - totalCardsOnTable} more card(s) on the table before reset is legal.`,
+            disabled: !canCallReset,
+            icon: RESET_ICON_SPRITE,
+            key: 'call-reset',
+            label: 'Call Reset',
+            onClick: handleCallReset,
+          },
+        ]),
   ].map((action) => (isTakeBackLocked
     /*
      * Applied over the finished row rather than folded into each button's own gate, so the lock
@@ -4527,7 +4845,6 @@ export function BlowCowBoard({
               <div className="endgame-copy">
                 <p className="panel-kicker">Final Results</p>
                 <h2 id="endgame-title">{winnerLabel} Is The Winner</h2>
-                <p className="room-note endgame-summary">{G.tableStatus}</p>
               </div>
 
               <button
@@ -4551,16 +4868,18 @@ export function BlowCowBoard({
                   <tr>
                     <th>Place</th>
                     <th>Player</th>
-                    <th>Points</th>
+                    <th>{isAnte ? 'Gold' : 'Points'}</th>
                     <th>Leave Order</th>
                     <th># of Plays</th>
                     <th># of Call BSs</th>
+                    <th># of BS Calls Received</th>
                     <th># of Passes</th>
                     <th># of Resets</th>
                     <th># of Turns</th>
                     <th>% of Lies</th>
                     <th># of Cards Played</th>
                     <th># Punished</th>
+                    <th>BS Winrate As Caller</th>
                     <th>BS Winrate</th>
                   </tr>
                 </thead>
@@ -4585,9 +4904,9 @@ export function BlowCowBoard({
                                 className="endgame-info-badge"
                                 role="note"
                                 tabIndex={0}
+                                {...tooltip({ title: 'Leave Ability', description: row.leaveEffectLabel })}
                               >
                                 i
-                                <span className="endgame-info-tooltip">{row.leaveEffectLabel}</span>
                               </span>
                             ) : null}
                           </div>
@@ -4598,12 +4917,14 @@ export function BlowCowBoard({
                       <td>{formatOrdinal(row.leaveOrder)}</td>
                       <td>{row.playCount}</td>
                       <td>{row.callBSCount}</td>
+                      <td>{row.bsTargetCount}</td>
                       <td>{row.passCount}</td>
                       <td>{row.resetCount}</td>
                       <td>{row.turnsInGame}</td>
                       <td>{row.lieRate === null ? 'N/A' : `${row.lieRate}%`}</td>
                       <td>{row.cardsPlayed}</td>
                       <td>{row.punishmentCount}</td>
+                      <td>{row.bsCallerWinRate === null ? 'N/A' : `${row.bsCallerWinRate}%`}</td>
                       <td>{row.bsWinRate === null ? 'N/A' : `${row.bsWinRate}%`}</td>
                     </tr>
                   ))}
@@ -4616,26 +4937,30 @@ export function BlowCowBoard({
                 <div className="endgame-chart-header">
                   <div>
                     <p className="panel-kicker">Telemetry</p>
-                    <h3 id="endgame-chart-title">Cards In Hand Over Time</h3>
+                    <h3 id="endgame-chart-title">{chartPlotsGold ? 'Gold Over Rounds' : 'Cards In Hand Over Time'}</h3>
                   </div>
                   <p className="room-note endgame-chart-summary">
-                    One point per turn, using the latest authoritative hand count snapshot recorded during that turn.
+                    {chartPlotsGold
+                      ? 'One point per round, using the latest authoritative gold snapshot recorded during that round, so each point is the purse the round finished on.'
+                      : 'One point per turn, using the latest authoritative hand count snapshot recorded during that turn.'}
                   </p>
                 </div>
 
                 <div className="endgame-chart-wrap">
                   <svg
-                    aria-label="Line chart of each player's cards in hand over the course of the match."
+                    aria-label={chartPlotsGold
+                      ? "Line chart of each player's gold over the rounds of the match."
+                      : "Line chart of each player's cards in hand over the course of the match."}
                     className="endgame-chart"
                     role="img"
                     viewBox={`0 0 ${ENDGAME_CHART_WIDTH} ${ENDGAME_CHART_HEIGHT}`}
                   >
-                    <title>Cards in hand over time</title>
+                    <title>{chartPlotsGold ? 'Gold over rounds' : 'Cards in hand over time'}</title>
 
                     {chartYTicks.map((tickValue) => {
-                      const y = ENDGAME_CHART_PADDING.top + (chartMaxHandCount === 0
+                      const y = ENDGAME_CHART_PADDING.top + (chartMaxValue === 0
                         ? chartInnerHeight
-                        : ((chartMaxHandCount - tickValue) / chartMaxHandCount) * chartInnerHeight)
+                        : ((chartMaxValue - tickValue) / chartMaxValue) * chartInnerHeight)
 
                       return (
                         <g key={`y-tick-${tickValue}`}>
@@ -4669,7 +4994,7 @@ export function BlowCowBoard({
                             y2={ENDGAME_CHART_HEIGHT - ENDGAME_CHART_PADDING.bottom}
                           />
                           <text className="endgame-chart-axis-label" textAnchor="middle" x={x} y={ENDGAME_CHART_HEIGHT - 10}>
-                            {formatTurnLabel(point.turnNumber)}
+                            {formatChartStepLabel(point.step)}
                           </text>
                         </g>
                       )
@@ -4693,7 +5018,7 @@ export function BlowCowBoard({
                               r={series.isWinner ? 5 : 4}
                               style={{ '--series-color': series.color } as CSSProperties}
                             >
-                              <title>{`${series.name}: ${lastPoint.handCount} card(s) at ${lastPoint.label}. ${lastPoint.title}`}</title>
+                              <title>{`${series.name}: ${formatChartValueLabel(lastPoint.value)} at ${lastPoint.label}. ${lastPoint.title}`}</title>
                             </circle>
                           ) : null}
                         </g>
@@ -4708,7 +5033,7 @@ export function BlowCowBoard({
                       <span className="endgame-chart-legend-swatch" style={{ '--series-color': series.color } as CSSProperties} />
                       <div className="endgame-chart-legend-copy">
                         <strong>{series.name}</strong>
-                        <span className="room-note">{series.finalHandCount} card(s) at finish</span>
+                        <span className="room-note">{formatChartValueLabel(series.finalValue)} at finish</span>
                       </div>
                     </div>
                   ))}
@@ -4881,6 +5206,32 @@ export function BlowCowBoard({
         />
       ) : null}
 
+      {/*
+        * Mounted straight off `G.handPeek` with no local open flag: the record is what makes the
+        * panel exist, and Close is a move that ends it. That is what keeps a reconnect from
+        * reopening a peek its owner already closed, and what makes the next turn start close it.
+        */}
+      {openHandPeek ? (
+        <HandPeekOverlay
+          handsByPlayerID={Object.fromEntries(
+            openHandPeek.targetPlayerIDs.map((targetPlayerID) => [
+              targetPlayerID,
+              G.players[targetPlayerID]?.hand ?? [],
+            ]),
+          )}
+          onClose={() => {
+            moves.dismissHandPeek({ peekID: openHandPeek.id })
+          }}
+          seatLabelsByPlayerID={Object.fromEntries(
+            openHandPeek.targetPlayerIDs.map((targetPlayerID) => [
+              targetPlayerID,
+              getSeatDisplayName(targetPlayerID, currentSeatID, playerName, playersFromRoom),
+            ]),
+          )}
+          targetPlayerIDs={openHandPeek.targetPlayerIDs}
+        />
+      ) : null}
+
       {!isStaging && isHistoryOpen ? (
         <HistoryOverlay
           historyEvents={historyEvents}
@@ -4892,10 +5243,13 @@ export function BlowCowBoard({
 
       {!isStaging && isRulesOpen ? (
         <RulesOverlay
+          isAnteMode={isAnte}
           onClose={() => {
             setIsRulesOpen(false)
           }}
+          roundLimit={roundLimit}
           rules={G.rules}
+          startingGold={G.startingGold}
         />
       ) : null}
 
@@ -4942,6 +5296,18 @@ export function BlowCowBoard({
       {roomError ? (
         <div className="board-error-toast error-banner" role="alert">
           {roomError}
+        </div>
+      ) : null}
+
+      {/*
+        * Bot failures used to be reported only in the staging panel, which meant the one that
+        * matters most was reported nowhere: an Ante agent whose weights fail to load sits inert for
+        * the whole match, and the table shows a seat that simply never moves. Shown here for every
+        * player, since the repairs beside it are open to every player too.
+        */}
+      {!isStaging && botError ? (
+        <div className="board-error-toast bot-error error-banner" role="alert">
+          {botError}
         </div>
       ) : null}
 
@@ -5013,7 +5379,7 @@ export function BlowCowBoard({
           <div className="board-hero-copy-wrap">
             <div className="header-title-with-info">
               <h2>Room staging</h2>
-              <InlineInfoTooltip tooltip={roomCodeTooltip} />
+              <InlineInfoTooltip description={matchID} title="Room Code" />
               <button
                 aria-label={copyRoomCodeLabel}
                 className={`inline-icon-button copy-room-button ${copyRoomCodeStatus}`}
@@ -5071,7 +5437,6 @@ export function BlowCowBoard({
               <div className="room-staging-panel-header">
                 <div>
                   <p className="panel-kicker">Roster</p>
-                  <h3>Who Is In The Room</h3>
                 </div>
                 <span className="seat-pill">Host starts the match</span>
               </div>
@@ -5085,6 +5450,9 @@ export function BlowCowBoard({
                     </div>
                     <div className="room-staging-seat-badges">
                       {slot.isHost ? <span className="seat-tag target">Host</span> : null}
+                      {botSeats.some((bot) => bot.playerID === String(slot.slotIndex))
+                        ? <span className="seat-tag">Bot</span>
+                        : null}
                       <span className={`seat-tag ${slot.isFilled && slot.isConnected ? 'online' : 'offline'}`}>
                         {slot.isFilled ? (slot.isConnected ? 'Connected' : 'Offline') : 'Waiting'}
                       </span>
@@ -5092,30 +5460,125 @@ export function BlowCowBoard({
                   </div>
                 ))}
               </div>
+
+              {isHostPlayer ? (
+                <div className="room-staging-bot-bay">
+                  <div className="room-staging-panel-header">
+                    <div>
+                      <p className="panel-kicker">Practice</p>
+                    </div>
+                  </div>
+
+                  {botSeating.allowed ? (
+                    <>
+                      <div className="room-staging-bot-controls">
+                        <label className="field-label" htmlFor="bot-kind">Opponent</label>
+                        <select
+                          className="text-input"
+                          disabled={isBotBusy || allSeatsFilled}
+                          id="bot-kind"
+                          onChange={(event) => setSelectedBotKind(event.target.value as BlowCowBotKind)}
+                          value={effectiveBotKind}
+                        >
+                          {botKinds.map((kind) => (
+                            <option key={kind} value={kind}>{BLOW_COW_BOT_LABELS[kind]}</option>
+                          ))}
+                        </select>
+                        <button
+                          className="secondary-button"
+                          disabled={isBotBusy || allSeatsFilled}
+                          onClick={() => onAddBot(effectiveBotKind)}
+                          type="button"
+                        >
+                          {isBotBusy ? 'Working...' : 'Add Bot'}
+                        </button>
+                      </div>
+
+                      <p className="room-note">{BLOW_COW_BOT_DESCRIPTIONS[effectiveBotKind]}</p>
+
+                      {allSeatsFilled ? (
+                        <p className="room-note">Every seat is taken. Free one to add a bot.</p>
+                      ) : null}
+
+                      {botSeats.length > 0 ? (
+                        <div className="room-staging-bot-list">
+                          {botSeats.map((bot) => (
+                            <div className="room-staging-seat filled" key={bot.playerID}>
+                              <div className="room-staging-seat-copy">
+                                <strong>{bot.name}</strong>
+                                <span className="room-note">{BLOW_COW_BOT_DESCRIPTIONS[bot.kind]}</span>
+                              </div>
+                              <button
+                                className="ghost-button"
+                                disabled={isBotBusy}
+                                onClick={() => onRemoveBot(bot.playerID)}
+                                type="button"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                          {/*
+                            * Stated rather than left to be discovered: the bots are headless clients
+                            * running in this tab, so closing it stops them playing.
+                            */}
+                          <p className="room-note">Bots play from this browser tab. Keep it open.</p>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="room-note">{botSeating.reason}</p>
+                  )}
+
+                  {botError ? <p className="room-note board-error-text">{botError}</p> : null}
+                </div>
+              ) : null}
             </article>
 
             <article className="room-staging-panel">
               <div className="room-staging-panel-header">
                 <div>
                   <p className="panel-kicker">Match Settings</p>
-                  <h3>Ready Check</h3>
                 </div>
               </div>
 
               <div className="room-staging-settings-list">
                 <div className="room-staging-setting-row">
+                  <span>Mode</span>
+                  <strong>{BLOW_COW_GAME_MODE_LABELS[getGameMode(G)]}</strong>
+                </div>
+                <div className="room-staging-setting-row">
                   <span>Speed</span>
                   <strong>{G.speedMultiplier}x</strong>
                 </div>
-                <div className="room-staging-setting-row">
-                  <span>Characters</span>
-                  <strong>{stagingCharactersSummary}</strong>
-                </div>
+                {/* Ante seats none, so the row would read `Disabled` for a setting nobody chose. */}
+                {isAnte ? (
+                  <>
+                    <div className="room-staging-setting-row">
+                      <span>Rounds</span>
+                      <strong>{roundLimit}</strong>
+                    </div>
+                    <div className="room-staging-setting-row">
+                      <span>Starting Gold</span>
+                      <strong>{G.startingGold ?? 5}</strong>
+                    </div>
+                  </>
+                ) : (
+                  <div className="room-staging-setting-row">
+                    <span>Characters</span>
+                    <strong>{stagingCharactersSummary}</strong>
+                  </div>
+                )}
                 <div className="room-staging-setting-row">
                   <span>Deck</span>
                   <strong>{G.deckConfig.rankSelectionMode === 'manual' ? 'Manual' : 'Default'}</strong>
                 </div>
                 <p className="room-note room-staging-setting-note">{stagingDeckSummary}</p>
+                {isAnte ? (
+                  <p className="room-note room-staging-setting-note">
+                    {BLOW_COW_GAME_MODE_DESCRIPTIONS.ante}
+                  </p>
+                ) : null}
               </div>
 
               <div className="room-staging-actions">
@@ -5168,6 +5631,7 @@ export function BlowCowBoard({
         renderRevealActions={renderSeatRevealActions}
         renderTargetActions={renderSeatTargetActions}
         seats={seatRows}
+        showPoints={!isAnte}
         selectableSeatIDSet={selectableTargetSeatIDSet}
         selectedSeatID={resolvedTargetSeatID}
       >
@@ -5182,6 +5646,7 @@ export function BlowCowBoard({
             : undefined}
           frontCardsTooltip={frontCardsColumnTooltip}
           maxCardsOnTable={maxCardsOnTable}
+          showTableLimit={!isAnte}
           onToggleDirection={handleToggleDirection}
           totalCardsOnTable={totalCardsOnTable}
           trumpLabel={displayedTrumpLabel}
@@ -5221,6 +5686,9 @@ export function BlowCowBoard({
               ) : null}
 
               {handCards.map((card) => {
+                // Off the sprite, the same way a front card reads its own, so both card surfaces
+                // answer this one way.
+                const specialRank = getSpecialRankFromSprite(card.sprite)
                 const isSelected = selectedCardIDs.includes(card.id)
                 const enteringIndex = enteringHandCardIndexByID.get(card.id)
                 const handCardDelayStyle = enteringIndex === undefined
@@ -5236,6 +5704,14 @@ export function BlowCowBoard({
                     onClick={() => {
                       toggleCardSelection(card.id)
                     }}
+                    /*
+                     * Only the action ranks explain themselves. Every other card is a rank and a suit
+                     * and says so on its face; these three carry an effect the art cannot print, and
+                     * unlike a character card there is no full-size preview to open.
+                     */
+                    {...tooltip(specialRank
+                      ? { title: getCardLabel(card.sprite), description: getSpecialRankEffect(specialRank) }
+                      : null)}
                     ref={(element) => {
                       if (element) {
                         handCardButtonRefs.current.set(card.id, element)
@@ -5262,7 +5738,7 @@ export function BlowCowBoard({
             <div className="hand-meta-row">
               <div className="header-title-with-info hand-meta-title">
                 <h2>Live match</h2>
-                <InlineInfoTooltip tooltip={roomCodeTooltip} />
+                <InlineInfoTooltip description={matchID} title="Room Code" />
                 <button
                   aria-label={copyRoomCodeLabel}
                   className={`inline-icon-button copy-room-button ${copyRoomCodeStatus}`}
@@ -5387,7 +5863,16 @@ export function BlowCowBoard({
             </div>
 
             {actionButtons.map((action) => (
-              <div className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`} key={action.key}>
+              /*
+               * The tooltip sits on the item rather than on the button inside it, because a disabled
+               * button dispatches no pointer events — and a disabled action is exactly when its
+               * description is worth reading.
+               */
+              <div
+                className={`action-button-item ${action.key === 'select-trump' ? 'trump-action-item' : ''}${action.key === 'play-random' ? ' drunkard-random-item' : ''}${action.key === 'pass' && isForeigner ? ' foreigner-pass-item' : ''}`}
+                key={action.key}
+                {...tooltip({ title: action.label, description: action.description })}
+              >
                 {action.key === 'select-trump' ? (
                   <div className="trump-action-combo">
                     <select
@@ -5409,7 +5894,6 @@ export function BlowCowBoard({
                       className={`action-button ${action.disabled ? 'disabled' : ''}`}
                       disabled={action.disabled}
                       onClick={action.onClick}
-                      title={action.description}
                       type="button"
                     >
                       <ActionButtonContent icon={action.icon} label={action.label} />
@@ -5453,7 +5937,6 @@ export function BlowCowBoard({
                       className={`action-button ${action.disabled ? 'disabled' : ''}`}
                       disabled={action.disabled}
                       onClick={action.onClick}
-                      title={action.description}
                       type="button"
                     >
                       <ActionButtonContent icon={action.icon} label={action.label} />
@@ -5480,7 +5963,6 @@ export function BlowCowBoard({
                       className={`action-button ${action.disabled ? 'disabled' : ''}`}
                       disabled={action.disabled}
                       onClick={action.onClick}
-                      title={action.description}
                       type="button"
                     >
                       <ActionButtonContent icon={action.icon} label={action.label} />
@@ -5491,15 +5973,11 @@ export function BlowCowBoard({
                     className={`action-button ${action.disabled ? 'disabled' : ''}`}
                     disabled={action.disabled}
                     onClick={action.onClick}
-                    title={action.description}
                     type="button"
                   >
                     <ActionButtonContent icon={action.icon} label={action.label} />
                   </button>
                 )}
-                <div className="action-button-tooltip" role="tooltip">
-                  {action.description}
-                </div>
               </div>
             ))}
           </div>

@@ -5,9 +5,9 @@
  * carries a counter that ticks down by 1 at the end of its owner's own turn and wears off at 0, and
  * a player holds at most `BLOW_COW_MAX_STATUSES_PER_PLAYER` of them.
  *
- * Every status here is enforced. Nothing in the game inflicts one yet — the only source is the
- * lobby's testing panel, which applies the same set to every player at match start — so this module
- * is deliberately free of any notion of who hands them out.
+ * Every status here is enforced. Two things hand one out — a revealed Plague card, and the lobby's
+ * testing panel, which applies the same set to every player at match start — and this module is
+ * deliberately free of any notion of either. Both go in through `addPlayerStatus`.
  *
  * The `broken` status and the character `The Broken` are unrelated and share nothing but a word.
  */

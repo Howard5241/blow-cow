@@ -36,6 +36,21 @@ export type SeatStatus = {
   turnsRemaining: number
 }
 
+/**
+ * What a seat block offers for putting a broken seat right, and nothing to do with the game itself.
+ *
+ * Bots are headless clients running in the browser that added them, and a human can leave the room
+ * without leaving the *game*, so a seat has three ways to stop acting while the rules go on dealing
+ * it turns. Each has one repair, and they are mutually exclusive.
+ */
+export type SeatRepair =
+  /** A bot this browser runs. It can be restarted in place, or kicked and reseated. */
+  | { action: 'local'; name: string }
+  /** A bot whose browser has gone. Any player may take the seat over and run it from theirs. */
+  | { action: 'resume'; name: string }
+  /** Nobody is in this seat at all, so the table will stall the moment the turn reaches it. */
+  | { action: 'seat' }
+
 export type SeatRow = {
   id: string
   seatIndex: number
@@ -49,14 +64,23 @@ export type SeatRow = {
   isConnected: boolean
   isTargetPlayer: boolean
   isViewingPlayer: boolean
+  /** A revealed Skip is standing over this seat, so the turn will pass it by. Cleared when it does. */
+  isSkipped: boolean
   /**
    * The leave-triggered ability that moved this player's points, already formatted. Null for players
    * who are still in, and for those whose ability never met its condition. It never clears.
    */
   leaveEffect: { label: string; isGain: boolean } | null
   name: string
+  /**
+   * The repair this seat needs, or null when it needs none — a human who is present, or a seat whose
+   * player has left the game properly and whose turn will therefore never come round again.
+   */
+  repair: SeatRepair | null
   pointRanks: string[]
   points: number
+  /** This seat's gold. A third readout beside the hand count and the points, and nothing more yet. */
+  gold: number
   /**
    * The statuses this block is under. Under a Mimic disguise these are the copied seat's, like every
    * other number on the block, rather than the player really sitting there.

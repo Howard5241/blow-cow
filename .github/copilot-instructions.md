@@ -1,121 +1,127 @@
 # Project Guidelines
 
-Workspace guidance for Copilot in this repo. `CLAUDE.md` at the repository root is the Claude Code
-counterpart; keep the two in sync when project-wide guidance changes.
+Workspace guidance for Copilot in this repo.
+
+## Documentation Map
+
+This file is deliberately short. The project's detailed guidance lives in four documents, each owning
+its facts exactly once — read the relevant one rather than working from this summary:
+
+| File | Owns |
+| --- | --- |
+| `RULES.md` | The vanilla game with a standard deck: what every player does regardless of character. Source of truth for rules. |
+| `RULES-EXTENSIONS.md` | Optional additions on top of `RULES.md`: action ranks and statuses. |
+| `CHARACTERS.md` | Per-character abilities, windows, limits, and their interactions with rules and statuses. |
+| `Characters.csv` | The wording printed on the character card art. Authoring source for the art. |
+| `CLAUDE.md` | Implementation notes: move names, state fields, enforcement sites, and why the code is shaped as it is. |
+
+- Before changing gameplay, read `RULES.md` and `CHARACTERS.md`.
+- Before changing anything under `src/game/`, read the Game Logic Conventions section of `CLAUDE.md`.
+- Before frontend or layout changes, read the relevant page doc under `docs/ui-pages/`
+  (`lobby-page.md`, `room-staging-page.md`, `table-page.md`).
+- When a change alters a documented page's structure, major elements, element roles, or visible
+  relationships, update the matching `docs/ui-pages/` file in the same task.
+
+Do not restate a rule or an implementation note that one of those files already carries. Cross-
+reference it instead.
 
 ## Product Goal
+
 - Build Blow Cow, a turn-based online multiplayer browser card game inspired by BS.
 - Use boardgame.io for game rules, turn flow, multiplayer state sync, and server authority.
-- Target the web browser first.
-- Support 2 to 8 players.
-- See `RULES.md` for the current working rules.
+- Target the web browser first. Support 2 to 8 players.
 
 ## Default Stack
-- Prefer TypeScript for new code unless JavaScript is explicitly requested.
-- Prefer React for the frontend unless plain HTML and CSS is explicitly requested.
+
+- React 19 + TypeScript + Vite client. Prefer TypeScript and React for new code unless plain JS/HTML/CSS
+  is explicitly requested.
 - Prefer boardgame.io built-in client, lobby, and multiplayer patterns before custom networking.
-- The active client stack is React + TypeScript + Vite.
-- The active local multiplayer server runs from `server/server.cjs` with `node --experimental-strip-types --watch`.
+- The local multiplayer server runs from `server/server.cjs` with `node --experimental-strip-types --watch`.
 
 ## Build and Run
-- Start the full local website with `npm run dev`. This runs both the Vite client and the local boardgame.io server together.
-- The Vite client normally serves the site at `http://localhost:5173`.
-- The local multiplayer server normally runs on port `8000`.
-- Start only the client with `npm run dev:client`.
-- Start only the multiplayer server with `npm run dev:server`.
-- Build the production website with `npm run build`.
-- Preview the production build locally with `npm run preview`.
-- Start the multiplayer server without watch mode with `npm run server`.
-- Run ESLint across the repo with `npm run lint`.
-- Run the targeted gameplay checks with `npm run check:gameplay`.
-- After changing anything under `src/game/`, run `npm run check:gameplay` and `npx tsc -b`. The check script is the only automated test harness in this repo.
-- When a rule changes, add a matching check to `scripts/check-blowcow-gameplay.ts` and register it in the `checks` array at the bottom of that file.
-- In PowerShell, if port `8000` is already in use, start the server on a different port with `$env:PORT=8001; npm run dev:server`.
-- Vite proxies `/games` and `/socket.io` to `http://localhost:8000`, so the client needs the server running for lobby and match traffic.
+
+- `npm run dev` — Vite client + local boardgame.io server together.
+- `npm run dev:client` — client only (`http://localhost:5173`).
+- `npm run dev:server` — server only, with watch (port `8000`).
+- `npm run server` — server without watch.
+- `npm run build` — `tsc -b` then the Vite production build.
+- `npm run preview` — serve the production build locally.
+- `npm run lint` — ESLint across the repo.
+- `npm run check:gameplay` — targeted gameplay checks (`scripts/check-blowcow-gameplay.ts`).
+- In PowerShell, if port `8000` is taken: `$env:PORT=8001; npm run dev:server`.
+- Vite proxies `/games` and `/socket.io` to `http://localhost:8000`, so the client needs the server
+  running for lobby and match traffic.
+
+## Verifying Changes
+
+- After changing anything under `src/game/`, run `npm run check:gameplay` and `npx tsc -b`. The check
+  script is the only automated test harness in this repo.
+- When a rule changes, add a matching check to `scripts/check-blowcow-gameplay.ts` and register it in
+  the `checks` array at the bottom of that file.
+- `npm run lint` currently reports pre-existing problems in `src/ui/BlowCowBoard.tsx` and `src/App.tsx`.
+  Those are not caused by new work and should not be fixed unless asked.
 
 ## Architecture
-- Keep all game rules deterministic and serializable.
+
+- Keep all game rules deterministic and serializable; `G` must stay JSON-serializable.
 - Put core game logic in boardgame.io `Game`, `moves`, `turn`, `phases`, and related helpers.
-- Do not put DOM access, React state, timers, or browser-only APIs inside game logic.
-- Treat the server as authoritative. Do not trust client-side validation for legal moves.
-- Keep hidden information private by using boardgame.io patterns such as `playerView` and per-player data shaping.
+- No DOM access, React state, timers, or browser-only APIs inside game logic.
+- Treat the server as authoritative. Do not trust client-side validation for move legality.
+- Keep hidden information private through `playerView` and per-player data shaping.
+- Use `random.Shuffle` rather than `Math.random`, so replays and server authority hold.
 
 ## Frontend Conventions
-- Keep UI components focused on rendering state and dispatching boardgame.io moves or events.
-- Separate game logic from presentation code.
-- Build responsive layouts that work on desktop and mobile browsers.
-- Use clear card, hand, discard, turn, and player-status components instead of large monolithic views.
-- Keep preview-only UI behavior clearly separated from eventual boardgame.io move logic.
-- Character card sprites already include the character name and description, and are now the only place a character's ability is written for a player. There is no description table in `src/game/blowCowCharacters.ts`: it existed solely for a lobby tooltip that the full-size card preview replaced, and a second copy in code could drift from the art silently. `Characters.csv` and `RULES.md` are where the wording is authored. Do not reintroduce ability text in the UI unless explicitly requested — show the card instead. Because of that, an implemented character without art is unreadable rather than merely plain, which is what the `character card art` check guards. Rule cards are the one exception to all of this: their illustrations carry no text, so the Rules panel renders the title and description itself.
-- Character sprites live under `character_card_sprites/` and rule illustrations under `rule_card_sprites/`. Character filename matching tolerates suffixes after the name, such as `The Contrarian 2.png`, where a suffix only means a newer revision. A run numbered from `1`, such as `The Prototype 1/2/3.png`, is the one exception and means an animation, since a revision is never numbered 1. `getCharacterCardSpriteFrames` tells the two apart and `CharacterCardSpriteImage` plays a run at 300ms a frame wherever the card is shown large; `getCharacterCardSprite` still returns one still everywhere else. Rule sprites are the exception: a `Reverse Rule 2.png` beside a `Reverse Rule.png` is the upgraded illustration, so `getRuleCardSprite(title, isUpgraded)` looks the two up separately. A missing rule sprite renders a placeholder tile.
-- Sprite folders live at the repository root, not in `public/`, and are loaded through `import.meta.glob`: `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`, `rule_card_sprites/`, and `status_sprites/`.
-- Rule cards live in `src/game/blowCowRules.ts`: the game's rules serialized as data so they can be shown to players and changed by a character. Each rule's status is `active`, `removed`, or `upgraded`, stored on `G.rules`, and a rule may only take a status it defines a description for.
-- `removed` is enforced through `isRuleRemoved(state, ruleID)`, which every enforcement site calls. `upgraded` is not enforced yet and stays display-only. The helper optional-chains `state.rules` because a match staged before rule cards existed restores without the field.
-- The Broken removes one rule at the start of the game via the `breakRule` move. It is not turn-bound and has no deadline, so `G.rules` can change mid-turn; read it at the moment of enforcement rather than caching. `brokenRemovedRuleID` on the player is the spent flag.
-- The Prototype destroys one heart from hand and one random rule card via the `defy` move, once per round, without ending the turn. It draws from the same `getBreakableRuleIDs` pool The Broken picks from and is refused when that pool is empty. The suit is one helper, `isDefyDestroyableCard`, read by both `canUseDefy` and `resolveDefy` — the latter before anything is removed, so a card of the wrong suit costs neither half nor the round's use. `hasUsedDefyThisRound` is the spent flag, cleared by `beginNextRound`.
-- The Mastermind opens another player's hand via the `conspire` move, once per round, and commits the turn to a play out of it. `G.conspiracy` is the live record; while it stands, `pass`, `callBS`, `callReset`, and `accuseDreamer` refuse for its owner, and `performPlay` takes the cards from `conspiracy.targetPlayerID`'s hand while the play still belongs to the mover. There is no cancel, so `hasUsedConspireThisRound` is spent at the peek. It is the one ability that widens `hideSecretState`: one extra hand, for one seat, until the play clears the conspiracy.
-- The Invisible Hand sets the round's trump rank and direction and hands the first turn to another player via the `manipulate` move. `canManipulate` gates it to the starting player on the round's very first turn, and unlimited use needs no spent flag because handing the round away is what ends being the starting player. `round.forcedPlayPlayerID` is the lock on the chosen player, enforced only against `pass` and lifted by `handleTurnStart` once any other turn begins. The move leaves `lastNonPassingPlayerID` null so the handed-over turn has nothing to call BS on, and the chosen rank obeys the Rank Change Rule through `getManipulableTrumpRanks`.
-- Conspire and Manipulate are pressed on a player block rather than in the action row: `renderSeatTargetActions` carries them beside `Call BS` and `Accuse`, and the block being clicked is the target, so neither has a player dropdown. `getConspireFailure` and `getManipulateFailure` both check the turn, which the old action-row tooltips never had to, because a block is hoverable on anyone's turn. Manipulate's rank and direction selectors moved with it, so all three of its decisions are made in one bubble; they write one shared choice rather than one per block, and their wrapper stops click and key events because the block underneath is a click-and-Enter target of its own.
-- The Gambler turns every Reset into a poker showdown: the weakest hand in front takes the whole table instead of it being shuffled and dealt. It is a rule imposed on the table rather than an action, so `isGamblerShowdownActive` reads the seating and not the caller, and an all-pass `roundReturn` is never a showdown. `createResetShowdown` builds the standings at call time and `hideSecretState` withholds them until the reveal is complete, exactly as it does a BS `punishment`, which is also why `callReset` is now a server-only move. The caller still opens the next round even when they are the one punished. `beginResetPunishment` splits from `finalizeResetResolution` like `beginBSPunishment` does and additionally carries the chosen seat, because a tie is the caller's to break; the server re-checks it against `weakestPlayerIDs`. The client reuses the BS punishment travel through `activePunishment` and bails the gather-shuffle-deal chain out.
-- Poker evaluation lives in `src/game/blowCowPoker.ts`, outside the game module, taking cards and returning a comparable score with no state. Standard five-card categories, so four to a flush is not a flush and a short hand cannot reach the higher ones; nothing is padded to five. Ace is high only, Jokers are wild and spent once, The Confused's Jacks stay Jacks, card count is the last tiebreak, and a `comparePokerHands` of 0 is a real tie for the caller to settle.
-- The Mime copies their next player's block via the `mimic` move, once per round, and flips a coin for the two seats. `G.mimicry` changes nothing the engine reads: it is a snapshot the *client* draws one block from, so hands, plays, points, and character all stay where they were. The snapshot is load-bearing rather than incidental — the board subtracts The Mime's own plays from the copied hand count and stacks them onto the copied pile, so the acting block loses cards and gains a pile whichever way the coin fell, while a live mirror would leak the answer. `swapSeatPositions` trades `seatOrder` and both `seatIndex` values together, keeping `seatIndex` equal to the position, which is what keeps every "Seat N" label on the chair rather than the player and so stops the swap renaming anything. The swap is permanent; the drawing is worn for the rest of the round, no turn start ending it, and `clearMimicry` drops it at every site that opens a procedure, on either party leaving, and again at `beginNextRound` as belt and braces — every way a round ends is one of those procedures, so a procedure is always what takes it off. `hasUsedMimicThisRound` is the spent flag. The Mimic history event is the one anonymous event in the game; `buildTurnStatus` drops to a bare table-and-chair line while a disguise stands, because the action space it recites is read off the acting player's own character; and the board seeds The Mime's block with the source's callout, but only when The Mime is not the one on the clock. It is a screen-level illusion and nothing more. The Reveal Rule is the one part that needed machinery rather than a snapshot: both blocks draw the same physical cards, so obeying it literally flips the borrowed pile on both at once, at whichever chair the source really sits in. `mimicry.revealedPlayerIDs` splits it per chair, holding back only `borrowedFaceDownCardIDs` and holding them back on the source's own block too; `mimicry.pendingHandoverPlayerID` discounts the turn a swap hands over, since from outside the ring the turn never moved, and it is the only field `hideSecretState` strips. `getDisplayedFrontCards` in `src/ui/tablePlays.ts` is the single source of truth for what each block draws, read by the seat rows and by the one flip watcher that replaced the two table-keyed ones, so a card can never be animated as flipping while it is drawn the other way up. `mime disguise symmetry` in the check script runs both branches side by side and compares the ring chair by chair through `playerView`. `G.mimicry` still names the disguised seat to anything reading state rather than screen. It hides nothing `playerView` was ever responsible for.
-- The Clown's first play each round leaves the turn where it was, and one more action follows it — anything but another play. It is the only character with no move of its own: `performPlay` decides it, and `G.encore` is the live record, public and turn-bound and cleared by `handleTurnStart` exactly as a conspiracy is. `hasUsedClownEncoreThisRound` is spent by the play rather than by the action it buys, since an encore cannot be declined. Two things carry the weight. `encore.bsTargetPlayerID` remembers the BS target from before the play, because the play makes The Clown the latest non-passing player and `getDefaultBSTargetPlayerID` would otherwise answer "yourself" and close the very action the encore hands back; that fallback lives in the one helper, so `src/ui/bsTargeting.ts` imports `getEncoreBSTargetPlayerID` instead of mirroring it. And `isEncoreWorthTaking` refuses an encore that would buy nothing, since a play is the action it takes away and a kept turn with no Pass, no BS target and no full table would have no legal move left. There is no decline button: Pass is one, and it counts as an ordinary pass. `performPlay` also clears `round.forcedPlayPlayerID` now, because a lock still standing would take Pass off the encore of a player who has already done what it asked.
-- The Thinker steps their own points at the end of every turn they take — the wipe above 12 first, then parity — and is the only character whose points move with no card changing hands. It is a passive with no move, no limit and nothing to decline, so it hangs off `turn.onEnd` beside the status tick, since a turn ends eleven ways and `handleTurnEnd` is where all of them meet. It sits above the `isRuleRemoved(G, 'status')` early return, because that rule governs the counter and not a character. `getThinkerPoints` is the whole rule, kept separate so the three branches read in the order the card writes them; a no-op is not logged, and zero is the only one, since it is even and halves to itself. `hasLeft` is the one guard: a player who has left takes no further turns, so the only end this could still reach is the one straight after `markPlayerLeft`, and `applyLeaveCharacterEffect` is meant to have the last word on a final total. Lower points win, so `3n + 1` is the cost and the wipe is the prize. The archive kind is `recalculatePoints`; it moves `points` without touching `scoredSets`, so a Thinker's scored-ranks tooltip deliberately stops adding up to their total.
-- A turn no longer arrives ready to play. `handleTurnStart` writes `G.turnOpening` naming the seat on the clock, and the `takeTurn` move opens it. The record has two halves, read separately everywhere. Untaken, `isAwaitingTurnTake` refuses that one seat's turn actions — nine sites, all of which already checked `ctx.currentPlayer` — and nothing else, because the cheats are defined by being out of turn, `Accuse` is not turn-bound, and a table cannot be made to wait on a button nobody has pressed yet. Taken with a live `reveal`, `isTurnRevealRunning` makes it a fourth procedure inside `isProcedureRunning` and it holds the whole table exactly as a BS walk does. It is written last in `handleTurnStart`, after the empty-hand leave branch, so a seat that leaves at the start of its turn is never handed one.
-- The Reveal Rule is performed by hand now. `openTurnReveal` decides what the turn owes at the press rather than at the turn's start, so a card palmed off the table in between is never one it asks for, and publishes `reveal.cardIDs` — exactly the cards the player may flip. For The Spy that is one card the server draws with `random.Shuffle`, which keeps the ability random rather than a choice and is why `takeTurn` is `client: false`. `revealTurnCard` flips one, `finalizeTurnReveal` is Continue and writes the history and archive entries through `completeTurnReveal`. Four cases skip the walk and write the same thing immediately: no pending play, the rule removed, a pile already face up, and a play The Mime's disguise is not drawing, since a card that is not on screen is not one a client can be asked to click. The turn reveal is the one procedure that does not call `clearMimicry`, because it is not raised by anybody and a disguise that came off every turn would not be a disguise. On the client the walk reuses `focusedSeatID` and `.focused-seat` with no lead-in, its Continue is a separate branch of `renderSeatRevealActions` with its own completion test, and Blind is deliberately not lifted for it. `.take-turn-cover` is a sibling of `.hand-stage` and `take-turn-open` lifts the whole strip above the ring, because `.hand-stage` isolates its own stacking context and the viewing player's block is dropped into the strip from above.
-- The Cat owns the direction flip as well as the table-card flip. `resolveToggleDirection` reads `isCat`, and their own-turn flip is the only legal one; every other flip is a tamper, cheat licence or not. The Contrarian no longer touches the direction at all.
-- The Contrarian is a second layer of the Reverse Rule, applied in `createBSResolution` and nowhere else. It is a layer rather than an override, so the two combine as `reverseRuleTriggered !== contrarianTriggered` and a call that trips both lands on the default punishment. It is bound to `callerPlayerID`, so being called on by a Contrarian does nothing. The UI needed no addition: `Punish` already renders on `punishment.punishedPlayerID`'s block, so moving that field moves the button. Read `contrarianTriggered` tolerantly — a match staged before it existed restores a punishment record without the field.
-- Cheating is gated by one helper, `canCheat`: The Dreamer while the No Cheating Rule stands, and everybody once it is removed. All six cheats route through it, permission and detection alike, so the licence and the accusation window can never disagree about who is answerable. `isDreamer` survives only where the question really is "is this seat The Dreamer", which is archive labelling and nothing else. Removing the rule is the one removal that widens the game rather than narrowing it, and it leaves The Dreamer an ordinary seat.
-- A direction flip writes no history event at all. It publishes `G.directionFlip`, naming the player who made it so each client can lean their block toward the hub, plus an anonymous telemetry line for the archive. `directionFlip` is the deliberate opposite of `directionTamper`: the flip record is public and says only who, the tamper record is stripped by `hideSecretState` and holds whether they were allowed to. Legal flips publish too, because nudging only the cheats would announce the verdict and nudging only the illegitimate flippers would say the same in reverse. `handleTurnStart` clears both together.
-- The take-back (`takeBackCard` move) is the mirror of the sneak play: one of your own face-up cards goes back into your hand, on anybody's turn including your own, unlimited, and in the same silence — archive only, no history, no telemetry, and `tableStatus` deliberately left stale so nothing re-announces it. Face-down cards are refused, because those are still live claims and palming one would answer a BS call by deleting the evidence. It is the one cheat that leaves nothing on the table to inspect, which is why `G.takeBackTamper` has to exist for `getAccusableCheat` to read; a play emptied by it is dropped from `table.plays`, since `getLatestPlayForPlayer` and En Passant both walk that array by position. `hideSecretState` strips the record from everyone except its owner, which is the single asymmetry in that function: an opponent holding it would be checking the answer instead of gambling, its owner cannot, and their client is the only one that needs it, to serve `TAKE_BACK_ACTION_LOCK_MS`. That two-second lock over the whole action row and the seat buttons is client-side by construction, because a server-enforced deadline would be a wall clock in `G` and a wall clock in `G` is not replayable. It arms only on the cheat's own turn, and `id` changes per take-back so a run of them re-arms rather than coasting on the first.
-- The No Cheating Rule card does not list the cheats it covers, and neither description mentions The Dreamer. `RULES.md` is where the six are written down; the card is what every seat can open.
-- `BlowCowTablePlay.claimedRank` is nullable for exactly one case: a card sneaked onto the table before the round had a trump rank. `settleUnclaimedPlays` fills it in wherever `round.trumpRank` goes from null to a rank — the trump-selecting play and Manipulate — and counts the lie there, since until a rank exists there is nothing to have lied about. Nothing reads that null in between, but a new reader should still handle it rather than assume.
-- `src/ui/RuleCardDeck.tsx` is the paged rule-card grid shared by the in-match Rules panel, the lobby's House Rules editor, and The Broken's picker, each passing a different `renderCardFooter`.
-- Status effects live in `src/game/blowCowStatuses.ts`: temporary, public, per-player modifiers serialized as data, at most `BLOW_COW_MAX_STATUSES_PER_PLAYER` per seat, each carrying a counter. `normalizeStatusSelection` and `normalizeStatusTurns` are the single sanitisers, the way `normalizeRulesSelection` is for rule cards. Every enforcement site asks `hasStatus` and never `getPlayerStatuses` — that helper is the one reader of the optional `player.statuses` field, and keeping the question in one place is what stops what a status forbids and what the seat block draws from disagreeing. `addPlayerStatus` is the one door in and enforces the cap. Tilted and Worried are mutually exclusive — holding one makes the player immune to the other — through `getOpposedStatusID`, checked in `addPlayerStatus` before the cap so an immunity and a full seat stay distinguishable, and deliberately unannounced: no rule card, no history event, no lobby warning. `startMatchState` deals the lobby's selection one status at a time through the same door so the opposition applies there too.
-- The status counter ticks on `turn.onEnd`, the only hook hanging off it. `advanceTurn` covers just play and pass, while a turn also ends through nine direct `events.endTurn` calls, and `onEnd` is where all of them meet. `G.round.startedTurnNumber`, stamped by `handleTurnStart`, is the guard: `startMatch` flips `gameStatus` to `active` and then ends the staging turn, so a turn that never opened must not spend a counter. `beginNextRound` deliberately leaves statuses alone, because they are counted in turns rather than rounds. The tick is the Status Rule and `handleTurnEnd` is its one enforcement site: removed, the counters stay on screen and stop moving, so every status becomes permanent — the one removal that makes an effect stronger rather than weaker. It is read at the tick rather than where a status is handed out, because the rule can be torn up mid-match and freezing whatever counters are standing is the whole effect.
-- Each status is enforced at exactly one server site: Tilted in the `pass` move, Worried in `validateCommonPlay` (the gate in front of all three play moves, and deliberately not in front of the cheats), Mad and Nervous in `performPlay` right after `wasHonest` is computed — restoring the hand on refusal the way the missing-rank branch above them does — and Broken inside `resolveDrunkardRandomPlay`, which it opens to a non-Drunkard and forces down to one card. Blind is the exception: a pure display effect in `BlowCowBoard.tsx` that swaps face-up table cards for `unknown.png` and is lifted during BS and Reset reveals. Nothing secret is trusted to the client by it, because those cards are already public to every other seat.
-- `BlowCowMimicry` copies the source's `statuses` along with their hand count and points, because a disguise showing The Mime's own status column would be two identical blocks differing in the one place the illusion has to hold.
-- Nothing in the game inflicts a status yet. The only source is the lobby's Initial Statuses panel, carried by `initialStatuses` and `initialStatusTurns` on `BlowCowSetupData` and dealt out by `startMatchState`.
 
-## UI Documentation
-- Before making frontend or layout changes, read the relevant page docs under `docs/ui-pages/` to understand the current page structure, element aliases, and UI relationships.
-- When a frontend change alters a documented page's structure, major UI elements, element roles, or visible relationships, update the matching file in `docs/ui-pages/` in the same task so the documentation stays in sync.
-- If a new top-level page or equivalent major page state is added, create a matching Markdown document under `docs/ui-pages/`.
+- Keep UI components focused on rendering state and dispatching boardgame.io moves or events.
+- Build responsive layouts that work on desktop and mobile browsers.
+- Prefer clear card, hand, table, turn, and player-status components over monolithic views.
+- Character card sprites carry the name and ability as art, and are the only place a character's
+  ability is written for a player. There is deliberately no description table in
+  `src/game/blowCowCharacters.ts`. Do not reintroduce ability text in the UI unless explicitly
+  requested — show the card instead. Rule cards are the exception: their illustrations carry no text,
+  so the Rules panel renders the title and description itself.
+- Sprite folders live at the repository root, not in `public/`, and load through `import.meta.glob`:
+  `card_sprites/`, `rect_card_sprites/`, `character_card_sprites/`, `avatar_sprites/`,
+  `rule_card_sprites/`, and `status_sprites/`.
+- Sprite filename matching has two different rules for characters and rules; see Frontend Conventions
+  in `CLAUDE.md` before touching either helper.
 
 ## Code Organization
-- Prefer small focused modules.
-- Put rules and helpers under a game-focused area such as `src/game/`.
-- Put UI under a frontend-focused area such as `src/ui/`.
-- Keep shared types and constants in dedicated files.
-- Current layout: `src/game/` holds the game definition and characters, `src/ui/` holds the board and sprite helpers, `server/server.cjs` is the local server runtime, `server/completedGameArchive.ts` archives finished matches to `data/completed-games/`, and `scripts/check-blowcow-gameplay.ts` holds the gameplay checks.
+
+- Prefer small focused modules, and keep shared types and constants in dedicated files.
+- `src/game/` holds the game definition, characters, rule cards, statuses, and poker evaluation.
+- `src/ui/` holds the board and sprite helpers.
+- `src/App.tsx` and `src/config.ts` hold the lobby flow and client configuration.
+- `server/server.cjs` is the local server runtime; `server/completedGameArchive.ts` archives finished
+  matches to `data/completed-games/`.
+- `scripts/check-blowcow-gameplay.ts` holds the gameplay checks.
 
 ## Implementation Priorities
-- Add brief comments only where card rules, bluffing flow, or hidden-information handling would be non-obvious.
+
+- Add brief comments only where card rules, bluffing flow, or hidden-information handling would be
+  non-obvious.
+- Match the surrounding code's naming, comment density, and idiom.
 - When asked to scaffold, default to a browser app using boardgame.io with React and TypeScript.
 
-## External References
-- boardgame.io docs: https://boardgame.io/documentation/#/
-- boardgame.io repo: https://github.com/boardgameio/boardgame.io
+## Persistence and Archives
+
+Live matches persist to `data/matches/` and finished matches are archived to `data/completed-games/`.
+Both have constraints that are easy to break silently — see Match Persistence and Completed Match
+Archives in `CLAUDE.md` before touching either.
 
 ## boardgame.io Notes
-- The framework centers game state around `G` for game data and `ctx` for framework-managed turn metadata such as current player, turn number, and player count.
-- Keep `G` JSON-serializable because state is synchronized between client and server.
-- Implement player actions as `moves` that deterministically update `G` without relying on external state or browser-only side effects.
-- Use framework `events` for turn and phase progression such as ending turns or changing phases.
-- Use `phases` for large rule changes across the game and `stages` for per-player substeps inside a turn.
-- Relevant docs areas for this project: Multiplayer, Turn Order, Phases, Stages, Events, Secret State, Randomness, Testing, Deployment, Game, Client, Server, and Lobby.
 
-## Upstream boardgame.io Notes
-- boardgame.io is an engine for turn-based games that provides state management, realtime multiplayer sync, lobby support, storage integration, AI bots, logs, time travel, and plugins.
-- Its README emphasizes that you describe state transitions as simple move functions while boardgame.io handles networking and storage.
-- The upstream repository includes `examples/`, `docs/`, and `packages/`, which are useful references. Those directories belong to boardgame.io, not to this repository.
-- The upstream project is TypeScript-heavy, so prefer TypeScript-first examples and patterns when choosing between JS and TS implementations.
+- `G` holds game data; `ctx` holds framework-managed turn metadata such as current player, turn
+  number, and player count.
+- Implement player actions as `moves` that deterministically update `G` without external state or
+  browser-only side effects.
+- Use framework `events` for turn and phase progression, `phases` for large rule changes, and `stages`
+  for per-player substeps.
+- Relevant docs areas: Multiplayer, Turn Order, Phases, Stages, Events, Secret State, Randomness,
+  Testing, Deployment, Game, Client, Server, and Lobby.
 
-## Repository Notes
-- This repository uses `concurrently` to run the Vite client and local boardgame.io server together during development.
-- The in-game screen is wired to real gameplay state and multiplayer flow, and page-level UI docs live under `docs/ui-pages/`.
-- Finished matches are archived locally under `data/completed-games/`, with detailed snapshots in `matches/` and compact analysis lines in `index/games.ndjson` and `index/player-games.ndjson`.
-- Live matches persist to `data/matches/` through boardgame.io's `FlatFile` store, so rooms survive crashes and `--watch` restarts. The store is asynchronous, so anything wrapping `server.db` must `await` it. Stale `isConnected` flags are cleared when the store opens, and matches nobody has touched for 24 hours are swept away.
-- The client keeps its whole seat (match, player, credentials, name) in `localStorage`, so reloading a tab reconnects to the same table instead of returning to the lobby.
-- Each lobby room has a Clear button that deletes it, allowed only when the game has ended or nobody is connected. `getRoomClearBlockReason` in `src/lobbyRooms.ts` is shared by the button and the server's `/clear` route, so room-level rules belong there rather than in both places.
-- `npm run lint` currently reports pre-existing problems in `src/ui/BlowCowBoard.tsx` and `src/App.tsx`. Those are not caused by new work and should not be fixed unless asked.
+## External References
+
+- boardgame.io docs: https://boardgame.io/documentation/#/
+- boardgame.io repo: https://github.com/boardgameio/boardgame.io — its `examples/`, `docs/`, and
+  `packages/` directories are useful references. They belong to boardgame.io, not to this repository.

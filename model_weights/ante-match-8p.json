@@ -1,0 +1,251 @@
+{
+  "format": "ante-round-policy/1",
+  "source": "rl/runs/m2-8p/final.pt",
+  "steps": 2000559,
+  "numPlayers": 8,
+  "numRanks": 12,
+  "hidden": 256,
+  "typeDim": 32,
+  "headDim": 64,
+  "extraWidth": 146,
+  "valueScale": 23.0,
+  "roundLimit": 20,
+  "startingGold": 5,
+  "observationSize": 429,
+  "actionSize": 1458,
+  "floats": 226318,
+  "tensors": [
+    {
+      "name": "off_deck_slot",
+      "offset": 0,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.0.weight",
+      "offset": 32,
+      "shape": [
+        32,
+        7
+      ]
+    },
+    {
+      "name": "type_encoder.0.bias",
+      "offset": 256,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.2.weight",
+      "offset": 288,
+      "shape": [
+        32,
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.2.bias",
+      "offset": 1312,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "trunk.0.weight",
+      "offset": 1344,
+      "shape": [
+        256,
+        402
+      ]
+    },
+    {
+      "name": "trunk.0.bias",
+      "offset": 104256,
+      "shape": [
+        256
+      ]
+    },
+    {
+      "name": "trunk.2.weight",
+      "offset": 104512,
+      "shape": [
+        256,
+        256
+      ]
+    },
+    {
+      "name": "trunk.2.bias",
+      "offset": 170048,
+      "shape": [
+        256
+      ]
+    },
+    {
+      "name": "context.weight",
+      "offset": 170304,
+      "shape": [
+        64,
+        256
+      ]
+    },
+    {
+      "name": "context.bias",
+      "offset": 186688,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "simple_head.weight",
+      "offset": 186752,
+      "shape": [
+        2,
+        256
+      ]
+    },
+    {
+      "name": "simple_head.bias",
+      "offset": 187264,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "single_head.0.weight",
+      "offset": 187266,
+      "shape": [
+        64,
+        96
+      ]
+    },
+    {
+      "name": "single_head.0.bias",
+      "offset": 193410,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "single_head.2.weight",
+      "offset": 193474,
+      "shape": [
+        2,
+        64
+      ]
+    },
+    {
+      "name": "single_head.2.bias",
+      "offset": 193602,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "pair_head.0.weight",
+      "offset": 193604,
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "name": "pair_head.0.bias",
+      "offset": 201796,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "pair_head.2.weight",
+      "offset": 201860,
+      "shape": [
+        2,
+        64
+      ]
+    },
+    {
+      "name": "pair_head.2.bias",
+      "offset": 201988,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "slot_head.0.weight",
+      "offset": 201990,
+      "shape": [
+        64,
+        96
+      ]
+    },
+    {
+      "name": "slot_head.0.bias",
+      "offset": 208134,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "slot_head.2.weight",
+      "offset": 208198,
+      "shape": [
+        1,
+        64
+      ]
+    },
+    {
+      "name": "slot_head.2.bias",
+      "offset": 208262,
+      "shape": [
+        1
+      ]
+    },
+    {
+      "name": "static_gate.weight",
+      "offset": 208263,
+      "shape": [
+        6,
+        256
+      ]
+    },
+    {
+      "name": "static_gate.bias",
+      "offset": 209799,
+      "shape": [
+        6
+      ]
+    },
+    {
+      "name": "value_head.0.weight",
+      "offset": 209805,
+      "shape": [
+        64,
+        256
+      ]
+    },
+    {
+      "name": "value_head.0.bias",
+      "offset": 226189,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "value_head.2.weight",
+      "offset": 226253,
+      "shape": [
+        1,
+        64
+      ]
+    },
+    {
+      "name": "value_head.2.bias",
+      "offset": 226317,
+      "shape": [
+        1
+      ]
+    }
+  ]
+}

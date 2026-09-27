@@ -9,6 +9,7 @@ import {
 import {
   BLOW_COW_RULE_IDS,
   canRuleTakeStatus,
+  createDefaultRulesState,
   getRuleDefinition,
   getRemovableRuleIDs,
   isBlowCowRuleID,
@@ -20,15 +21,34 @@ import {
 } from './blowCowRules.ts'
 import {
   BLOW_COW_MAX_STATUSES_PER_PLAYER,
+  BLOW_COW_STATUS_IDS,
   DEFAULT_BLOW_COW_STATUS_TURNS,
   MAX_BLOW_COW_STATUS_TURNS,
   formatStatusTitles,
   getOpposedStatusID,
+  getStatusDefinition,
   isBlowCowStatusID,
   normalizeStatusSelection,
   normalizeStatusTurns,
   type BlowCowStatusID,
 } from './blowCowStatuses.ts'
+import {
+  BLOW_COW_ANTE_ROUND_GOLD,
+  DEFAULT_BLOW_COW_ANTE_STARTING_GOLD,
+  DEFAULT_BLOW_COW_GAME_MODE,
+  DEFAULT_BLOW_COW_ROUND_LIMIT,
+  MAX_BLOW_COW_ANTE_STARTING_GOLD,
+  MAX_BLOW_COW_ROUND_LIMIT,
+  MIN_BLOW_COW_ANTE_STARTING_GOLD,
+  MIN_BLOW_COW_ROUND_LIMIT,
+  createEmptyAnteSeatRecord,
+  getAnteStandardRankCount,
+  isBlowCowGameMode,
+  normalizeAnteStartingGold,
+  normalizeRoundLimit,
+  type BlowCowAnteSeatRecord,
+  type BlowCowGameMode,
+} from './blowCowAnte.ts'
 import { comparePokerHands, evaluatePokerHand } from './blowCowPoker.ts'
 
 export const BLOW_COW_GAME_NAME = 'blow-cow'
@@ -49,6 +69,18 @@ export const BLOW_COW_EMOTE_COUNT = 26
  * the order the card writes the three branches in, so a total over it never takes a parity branch.
  */
 export const BLOW_COW_THINKER_WIPE_THRESHOLD = 12
+/**
+ * How long the status a revealed Plague inflicts lasts. One status per card at this many turns, per
+ * afflicted seat — several Plagues turned up together spread across several seats rather than piling
+ * a longer counter onto one.
+ */
+export const BLOW_COW_PLAGUE_STATUS_TURNS = 2
+/**
+ * What every seat is worth at the start of a match. Nothing spends it or awards it yet — gold is a
+ * third number on the seat block and nothing more — so this doubles as the fallback `getPlayerGold`
+ * reads for a seat restored from before the field existed.
+ */
+export const BLOW_COW_STARTING_GOLD = 5
 const INVALID_MOVE = 'INVALID_MOVE' as const
 /**
  * boardgame.io's `Stage.NULL`, which is the literal `null`: a player who is active but in no stage.
@@ -61,14 +93,26 @@ const INVALID_MOVE = 'INVALID_MOVE' as const
 const NULL_STAGE = null as unknown as string
 
 export const BLOW_COW_RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'] as const
+/**
+ * The action ranks, each printed in the same four suits as everything else and opted into per match
+ * from the lobby. They are dealt, held, played and lied with exactly like a standard card; the whole
+ * of the difference is what happens when the Reveal Rule turns one face up.
+ *
+ * `BlowCowRank` deliberately stays the standard thirteen rather than widening to include these. Every
+ * reader of a trump rank — selection, Manipulate, the Rank Change Rule, `claimedRank` — is typed
+ * against it, so "these ranks cannot be trump" is enforced by the type rather than by thirteen
+ * separate filters. Only `card.rank` is ever wide enough to hold one.
+ */
+export const BLOW_COW_SPECIAL_RANKS = ['Plague', 'Skip', 'Peek'] as const
 export const BLOW_COW_SUITS = ['clubs', 'diamonds', 'hearts', 'spades'] as const
 export const BLOW_COW_DIRECTIONS = ['clockwise', 'counterclockwise'] as const
 
 export type BlowCowRank = (typeof BLOW_COW_RANKS)[number]
+export type BlowCowSpecialRank = (typeof BLOW_COW_SPECIAL_RANKS)[number]
 export type BlowCowSpeedMultiplier = (typeof BLOW_COW_SPEED_MULTIPLIERS)[number]
 export type BlowCowSuit = (typeof BLOW_COW_SUITS)[number]
 export type BlowCowDirection = (typeof BLOW_COW_DIRECTIONS)[number]
-export type BlowCowCardRank = BlowCowRank | 'Joker'
+export type BlowCowCardRank = BlowCowRank | BlowCowSpecialRank | 'Joker'
 export type BlowCowCardSuit = BlowCowSuit | 'joker'
 export type BlowCowGameStatus = 'staging' | 'active' | 'finished'
 export type BlowCowRoundStatus = 'awaitingTrumpSelection' | 'inProgress' | 'betweenRounds'
@@ -87,7 +131,12 @@ export type BlowCowCard = {
 
 export type BlowCowScoredSet = {
   id: string
-  rank: BlowCowRank
+  /**
+   * An action rank here is a set that was removed from the hand without paying a point. Nothing else
+   * distinguishes the two, on purpose — `doesScoredSetAwardPoint` reads the answer back off the rank,
+   * so a match archived before action ranks existed needs no flag it was never written with.
+   */
+  rank: BlowCowRank | BlowCowSpecialRank
   cards: BlowCowCard[]
   awardedAtRound: number
   awardedAtTurn: number
@@ -129,6 +178,23 @@ export type BlowCowPlayerState = {
   character: BlowCowCharacterName | null
   hand: BlowCowCard[]
   points: number
+  /**
+   * This player's gold, drawn beside their hand count and points and public in exactly the same way.
+   * Nothing reads it yet: no move spends it, no rule awards it, and it never moves off
+   * `BLOW_COW_STARTING_GOLD`. Optional in the type as well as in practice, for the same restore
+   * reason `statuses` is — `getPlayerGold` is the one reader, so the fallback lives in one place.
+   */
+  gold?: number
+  /**
+   * What the table has watched this seat do over the match's **completed** rounds — Ante only, and
+   * public in exactly the way `gold` is. Written by `recordAnteRoundOutcome` at every round ending
+   * and read by no rule: it exists so a multi-round agent can see an opponent's honesty history,
+   * which is otherwise unrecoverable from a client's `G` (the archive is emptied for clients and
+   * `history` is prose).
+   *
+   * Optional for the usual restore reason, and `getAnteSeatRecord` is its one reader.
+   */
+  anteRecord?: BlowCowAnteSeatRecord
   scoredSets: BlowCowScoredSet[]
   matchStats: BlowCowPlayerMatchStats
   pendingRevealPlayID: string | null
@@ -217,6 +283,13 @@ export type BlowCowPlayerMatchStats = {
   cardsPlayed: number
   punishmentCount: number
   bsWinCount: number
+  /** How often this seat was the one called BS on. Counted at the call, like `callBSCount`. */
+  bsTargetCount: number
+  /**
+   * How often that call went their way. Exactly one of caller and target walks away unpunished, so
+   * this and `bsWinCount` are the two halves of the same tally read from opposite ends of the table.
+   */
+  bsTargetWinCount: number
   accusationCount: number
   accusationWinCount: number
 }
@@ -249,6 +322,17 @@ export type BlowCowRoundState = {
    * existed has no turn on record, and its first real turn start writes one.
    */
   startedTurnNumber?: number | null
+  /**
+   * The seats a revealed Skip has taken the next turn away from, in the order the turn would have
+   * reached them. Written when the Reveal Rule turns the card up and spent by the very next ordinary
+   * turn hand-over, so it never survives the turn that earned it: `advanceTurn` walks past everyone
+   * named here and clears the list, and `handleTurnStart` clears it again for every other way a turn
+   * can end.
+   *
+   * Seats rather than a count, so the board can mark them and the log can name them. Optional for the
+   * same reason as the two fields above it.
+   */
+  skippedPlayerIDs?: string[]
   maxCardsOnTable: number
 }
 
@@ -423,6 +507,26 @@ export type BlowCowEncore = {
  * play, Cat-rehidden ones included. Publishing ids leaks nothing: `hideSecretState` masks faces and
  * never ids, and these cards are a second away from being face up in front of the whole table.
  */
+/**
+ * The hands a revealed Peek has opened, and the one seat allowed to read them.
+ *
+ * It is not a procedure. Nothing waits on it: the cards are already turned up, the effect has already
+ * happened, and what is left is one player reading a panel on their own turn. `hideSecretState` is
+ * what actually enforces it — every other seat's copy of those hands stays masked — so the panel is a
+ * view of state the viewer has rather than a promise their client is trusted to keep.
+ *
+ * Dismissed by its owner, and dropped by the next turn start regardless, so it can never outlive the
+ * turn that revealed it.
+ */
+export type BlowCowHandPeek = {
+  id: string
+  /** The seat that revealed the Peek card(s). The only viewer these hands are unmasked for. */
+  playerID: string
+  /** Whose hands were opened, in the order the turn would have reached them. */
+  targetPlayerIDs: string[]
+  turnNumber: number
+}
+
 export type BlowCowTurnReveal = {
   playID: string
   cardIDs: string[]
@@ -481,6 +585,12 @@ export type BlowCowMimicry = {
   points: number
   /** The scored ranks behind `points`, for the pill's tooltip. */
   pointRanks: BlowCowRank[]
+  /**
+   * The copied purse. Gold buys nothing yet, but it is a number on the block, and a disguise that
+   * showed The Mime's own would be two blocks differing in one place. Optional for the usual restore
+   * reason; the board falls back to the seat's own gold.
+   */
+  gold?: number
   /**
    * The copied hand count. What the board shows is this minus whatever The Mime has played since,
    * which is the same subtraction the source's own block performs on itself — see `resolveMimic`.
@@ -545,7 +655,13 @@ export type BlowCowBSResolution = BlowCowRevealWalk & {
   punishment: BlowCowBSPunishment | null
 }
 
-export type BlowCowTableReturnResolutionKind = 'reset' | 'roundReturn'
+/**
+ * Which procedure raised the shared table-reveal walk. The first two are the classic game's; the last
+ * two are Ante's second and third round endings, which reuse the walk rather than growing one of their
+ * own — see `beginAnteRoundEndReveal`. Nothing is returned to anybody in either Ante case, so the
+ * `TableReturn` in the name is the classic half's; what the four share is the walk itself.
+ */
+export type BlowCowTableReturnResolutionKind = 'reset' | 'roundReturn' | 'antePassEnding' | 'anteEmptyHand'
 
 /**
  * The caller-driven walk shared by both table-reveal procedures. One step per player holding
@@ -587,6 +703,10 @@ export type BlowCowResetShowdown = {
 
 export type BlowCowResetResolution = BlowCowRevealWalk & {
   id: string
+  /**
+   * Whoever drives the walk. A Reset's caller, the last of `n` passers, or — in Ante's third ending —
+   * the player whose empty hand just won them the round.
+   */
   callerPlayerID: string
   kind: BlowCowTableReturnResolutionKind
   /**
@@ -620,6 +740,12 @@ export type BlowCowTelemetryEvent = {
   roundNumber: number
   turnNumber: number
   handCountsByPlayer: Record<string, number>
+  /**
+   * The purses at the moment of the event, which is what the endgame chart plots for Ante Mode the
+   * way it plots hand counts for Classic. Optional in the type as well as in practice: a match
+   * recorded before the field existed restores without it, and gold never moved in it anyway.
+   */
+  goldByPlayer?: Record<string, number>
 }
 
 export type BlowCowTelemetryState = {
@@ -632,6 +758,8 @@ export type BlowCowArchiveInitialPlayerState = {
   character: BlowCowCharacterName | null
   hand: BlowCowCard[]
   points: number
+  /** The opening purse. Additive within `schemaVersion` 1, like `gameMode` on the state beside it. */
+  gold?: number
   scoredSets: BlowCowScoredSet[]
 }
 
@@ -645,11 +773,21 @@ export type BlowCowArchiveInitialState = {
   useCharacters: boolean
   characterPool: BlowCowImplementedCharacterName[]
   rules: BlowCowRulesState
+  /*
+   * Which game was played, and the two dials that only mean anything in one of them. Optional so a
+   * reader that predates Ante Mode sees keys it does not know rather than a changed shape — the same
+   * additive rule action ranks came in under. `deckConfig.selectedRanks` is the *opening* deck in an
+   * Ante match and shrinks as players are eliminated, so `endgame` is what says what it finished on.
+   */
+  gameMode?: BlowCowGameMode
+  roundLimit?: number
+  startingGold?: number
   players: Record<string, BlowCowArchiveInitialPlayerState>
 }
 
 export type BlowCowArchiveTurnActionKind =
   | 'revealPendingPlay'
+  | 'revealedCardEffect'
   | 'toggleDirection'
   | 'seekCharacter'
   | 'breakRule'
@@ -670,6 +808,8 @@ export type BlowCowArchiveTurnActionKind =
   | 'callReset'
   | 'resolveReset'
   | 'roundReturn'
+  /** Ante only: one round settled, and the gold that moved for it. */
+  | 'anteRoundResult'
   | 'leave'
 
 export type BlowCowArchiveTurnAction = {
@@ -720,13 +860,35 @@ export type BlowCowArchiveState = {
 export type BlowCowDeckConfig = {
   rankSelectionMode: BlowCowRankSelectionMode
   selectedRanks: BlowCowRank[]
+  /**
+   * The action ranks this match was dealt, in `BLOW_COW_SPECIAL_RANKS` order. Empty is the default
+   * and the ordinary case.
+   *
+   * Optional in the type as well as in practice: a match staged before action ranks existed restores
+   * from `data/matches/` without the field, and its deck never held one. Every reader defaults it.
+   */
+  specialRanks?: BlowCowSpecialRank[]
   includesJokers: true
   defaultRankCount: number
 }
 
 export type BlowCowSetupData = {
+  /**
+   * Which game the room is playing. Absent means `classic`, so every room created before Ante Mode
+   * existed is one, and so is every caller that has never heard of the field.
+   */
+  gameMode?: BlowCowGameMode
+  /** Ante Mode only: how many rounds the match lasts. Ignored by a classic room. */
+  roundLimit?: number
+  /** Ante Mode only: what every seat starts with. Ignored by a classic room. */
+  startingGold?: number
   rankSelectionMode?: BlowCowRankSelectionMode
   selectedRanks?: BlowCowRank[]
+  /**
+   * Which action ranks the host opted into. Independent of `rankSelectionMode`, which governs the
+   * standard thirteen alone: a default deck and a manual one both take whatever is chosen here.
+   */
+  specialRanks?: BlowCowSpecialRank[]
   speedMultiplier?: BlowCowSpeedMultiplier
   useCharacters?: boolean
   characterPool?: BlowCowImplementedCharacterName[]
@@ -743,6 +905,22 @@ export type BlowCowState = {
   tableStatus: string
   gameStatus: BlowCowGameStatus
   hostPlayerID: string
+  /*
+   * Which game this room is playing, and the field every Ante branch in this module hangs off.
+   * Public, and never changes after staging.
+   *
+   * Optional in the type as well as in practice, for the usual restore reason: a match staged before
+   * Ante Mode existed comes back without it, and `getGameMode` is the one reader, so what such a
+   * match is playing is decided in one place.
+   */
+  gameMode?: BlowCowGameMode
+  /*
+   * Ante Mode's two dials, carried from the lobby and read for the whole match. `roundLimit` is what
+   * `beginNextAnteRound` counts against; `startingGold` is spent at the deal and kept only so the
+   * staging summary and the results screen can say what everyone began with.
+   */
+  roundLimit?: number
+  startingGold?: number
   deckConfig: BlowCowDeckConfig
   speedMultiplier: BlowCowSpeedMultiplier
   useCharacters: boolean
@@ -806,6 +984,11 @@ export type BlowCowState = {
    * taken restores without the field, and the next `handleTurnStart` writes one.
    */
   turnOpening?: BlowCowTurnOpening | null
+  /*
+   * Optional for the same restore reason as `conspiracy`. Nobody is holding an open hand in a match
+   * whose deck never had a Peek in it.
+   */
+  handPeek?: BlowCowHandPeek | null
   history: BlowCowHistoryEvent[]
   telemetry: BlowCowTelemetryState
   archive: BlowCowArchiveState
@@ -897,6 +1080,10 @@ export type BlowCowFinalizeTurnRevealArgs = {
   openingID: string
 }
 
+export type BlowCowDismissHandPeekArgs = {
+  peekID: string
+}
+
 export type BlowCowRevealBSCardArgs = {
   resolutionID: string
   cardID: string
@@ -940,6 +1127,8 @@ export type BlowCowGameOver = {
   placements: string[]
   winnerID: string
   pointsByPlayer: Record<string, number>
+  /** Every seat's final purse. The score in Ante, and an untouched 5 everywhere in a classic match. */
+  goldByPlayer?: Record<string, number>
 }
 
 type BlowCowShuffle = <Value>(values: Value[]) => Value[]
@@ -1005,9 +1194,14 @@ const RANK_SORT_INDEX: Record<BlowCowCardRank, number> = {
   Q: 11,
   K: 12,
   Joker: 13,
+  // Sorted past the Jokers so a hand keeps its action cards together at the far end, where they read
+  // as the separate thing they are rather than falling between two standard ranks.
+  Plague: 14,
+  Skip: 15,
+  Peek: 16,
 }
 
-const RANK_TO_SPRITE_SEGMENT: Record<BlowCowRank, string> = {
+const RANK_TO_SPRITE_SEGMENT: Record<BlowCowRank | BlowCowSpecialRank, string> = {
   A: 'ace',
   '2': '02',
   '3': '03',
@@ -1021,14 +1215,26 @@ const RANK_TO_SPRITE_SEGMENT: Record<BlowCowRank, string> = {
   J: 'jack',
   Q: 'queen',
   K: 'king',
+  Plague: 'plague',
+  Skip: 'skip',
+  Peek: 'peek',
 }
 
-function getCardSpriteFilename(suit: BlowCowSuit, rank: BlowCowRank) {
+function getCardSpriteFilename(suit: BlowCowSuit, rank: BlowCowRank | BlowCowSpecialRank) {
   return `${suit}_${RANK_TO_SPRITE_SEGMENT[rank]}.png`
 }
 
 function isBlowCowRank(value: unknown): value is BlowCowRank {
   return typeof value === 'string' && (BLOW_COW_RANKS as readonly string[]).includes(value)
+}
+
+export function isBlowCowSpecialRank(value: unknown): value is BlowCowSpecialRank {
+  return typeof value === 'string' && (BLOW_COW_SPECIAL_RANKS as readonly string[]).includes(value)
+}
+
+/** True for a Plague, Skip or Peek card of any suit. Jokers and standard ranks are both false. */
+export function isSpecialCard(card: BlowCowCard) {
+  return isBlowCowSpecialRank(card.rank)
 }
 
 function isBlowCowSuit(value: unknown): value is BlowCowSuit {
@@ -1056,6 +1262,21 @@ function normalizeSelectedRanks(selectedRanks: readonly BlowCowRank[] | undefine
   return sortRanks(
     [...new Set(selectedRanks)].filter((rank): rank is BlowCowRank => isBlowCowRank(rank)),
   )
+}
+
+/**
+ * The single sanitiser for a special-rank selection, the way `normalizeRulesSelection` is for rule
+ * cards. Unknown ranks are dropped and duplicates collapse, and the result is ordered by
+ * `BLOW_COW_SPECIAL_RANKS` rather than by the order the host clicked, so two identical selections
+ * always produce the same deck.
+ */
+function normalizeSpecialRankSelection(value: unknown): BlowCowSpecialRank[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const selected = new Set(value.filter((rank): rank is BlowCowSpecialRank => isBlowCowSpecialRank(rank)))
+  return BLOW_COW_SPECIAL_RANKS.filter((rank) => selected.has(rank))
 }
 
 function createSeatOrder(numPlayers: number) {
@@ -1196,6 +1417,9 @@ function createTelemetryEvent(
     handCountsByPlayer: Object.fromEntries(
       Object.entries(state.players).map(([targetPlayerID, player]) => [targetPlayerID, player.hand.length]),
     ),
+    goldByPlayer: Object.fromEntries(
+      Object.entries(state.players).map(([targetPlayerID, player]) => [targetPlayerID, getPlayerGold(player)]),
+    ),
   } satisfies BlowCowTelemetryEvent
 }
 
@@ -1225,6 +1449,25 @@ function appendHistoryEvent(
   appendTelemetryEvent(state, kind, title, detail, playerID, turnNumber)
 }
 
+/**
+ * Whether a completed four-of-a-kind pays its owner a point. Every standard rank does; no action rank
+ * does. The removal itself is identical either way, which is why this is the only place the two are
+ * told apart.
+ */
+export function doesScoredSetAwardPoint(scoredSet: Pick<BlowCowScoredSet, 'rank'>) {
+  return !isBlowCowSpecialRank(scoredSet.rank)
+}
+
+/**
+ * The ranks behind a seat's point total, for the tooltip that lists them. Action ranks are dropped
+ * rather than listed as zeroes, so the tooltip goes on being a reading of the number beside it.
+ */
+export function getPointScoringRanks(scoredSets: readonly BlowCowScoredSet[]) {
+  return scoredSets
+    .filter((scoredSet) => doesScoredSetAwardPoint(scoredSet))
+    .map((scoredSet) => scoredSet.rank as BlowCowRank)
+}
+
 function appendPointHistoryEvents(
   state: BlowCowState,
   playerID: string,
@@ -1232,11 +1475,17 @@ function appendPointHistoryEvents(
   turnNumber: number,
 ) {
   for (const scoredSet of scoredSets) {
+    // Logged under the same kind as a scoring set rather than as an action: a player hunting for
+    // where four cards went is reading this column either way, and the title carries the difference.
     appendHistoryEvent(
       state,
       'point',
-      `${formatPlayerLabel(state, playerID)} gained 1 point`,
-      `Removed four ${scoredSet.rank}s from hand.`,
+      doesScoredSetAwardPoint(scoredSet)
+        ? `${formatPlayerLabel(state, playerID)} gained 1 point`
+        : `${formatPlayerLabel(state, playerID)} discarded four ${scoredSet.rank}s for no point`,
+      doesScoredSetAwardPoint(scoredSet)
+        ? `Removed four ${scoredSet.rank}s from hand.`
+        : `Removed four ${scoredSet.rank}s from hand. Action ranks leave the hand the same way, but pay nothing.`,
       playerID,
       turnNumber,
     )
@@ -1245,6 +1494,50 @@ function appendPointHistoryEvents(
 
 function getPlayerState(state: BlowCowState, playerID: string) {
   return state.players[playerID]
+}
+
+/**
+ * The one reader of the optional `gold` field, the way `getPlayerStatuses` is for `statuses`. A seat
+ * restored from before gold existed has never spent or earned any, so the starting purse is the only
+ * honest answer for it.
+ */
+export function getPlayerGold(player: Pick<BlowCowPlayerState, 'gold'>) {
+  return player.gold ?? BLOW_COW_STARTING_GOLD
+}
+
+/**
+ * The one reader of the optional `gameMode` field, and so the single place a match staged before Ante
+ * Mode existed is decided to be a classic one.
+ */
+export function getGameMode(state: Pick<BlowCowState, 'gameMode'>) {
+  return state.gameMode ?? DEFAULT_BLOW_COW_GAME_MODE
+}
+
+/**
+ * The gate in front of every Ante branch in this module. Asked at the enforcement site rather than
+ * folded into the rule cards, because Ante does not use the rule card system at all: `G.rules` stays
+ * every-card-active there and nothing reads it, so a rule that differs between the two modes has to
+ * ask this instead of asking `isRuleRemoved`.
+ */
+export function isAnteMode(state: Pick<BlowCowState, 'gameMode'>) {
+  return getGameMode(state) === 'ante'
+}
+
+export function getRoundLimit(state: Pick<BlowCowState, 'roundLimit'>) {
+  return state.roundLimit ?? DEFAULT_BLOW_COW_ROUND_LIMIT
+}
+
+export function getAnteStartingGold(state: Pick<BlowCowState, 'startingGold'>) {
+  return state.startingGold ?? DEFAULT_BLOW_COW_ANTE_STARTING_GOLD
+}
+
+/**
+ * Whether four of a kind still leaves the hand and pays a point. Ante has no point system at all,
+ * which is what lets the whole deck be redealt every round — a scored set never comes back, so any
+ * removal there would shrink the deck the mode promises to deal out in full.
+ */
+function doesMatchScorePoints(state: Pick<BlowCowState, 'gameMode'>) {
+  return !isAnteMode(state)
 }
 
 function cloneCard(card: BlowCowCard): BlowCowCard {
@@ -1306,6 +1599,9 @@ function createInitialArchiveState(state: BlowCowState): BlowCowArchiveInitialSt
     useCharacters: state.useCharacters,
     characterPool: [...state.characterPool],
     rules: { ...state.rules },
+    gameMode: getGameMode(state),
+    roundLimit: getRoundLimit(state),
+    startingGold: getAnteStartingGold(state),
     players: Object.fromEntries(
       Object.entries(state.players).map(([playerID, player]) => [
         playerID,
@@ -1315,6 +1611,7 @@ function createInitialArchiveState(state: BlowCowState): BlowCowArchiveInitialSt
           character: player.character,
           hand: cloneCards(player.hand),
           points: player.points,
+          gold: getPlayerGold(player),
           scoredSets: cloneScoredSets(player.scoredSets),
         },
       ]),
@@ -1406,6 +1703,8 @@ function createInitialPlayerMatchStats(): BlowCowPlayerMatchStats {
     cardsPlayed: 0,
     punishmentCount: 0,
     bsWinCount: 0,
+    bsTargetCount: 0,
+    bsTargetWinCount: 0,
     accusationCount: 0,
     accusationWinCount: 0,
   }
@@ -1418,6 +1717,7 @@ function createEmptyPlayerState(playerID: string, seatIndex: number): BlowCowPla
     character: null,
     hand: [],
     points: 0,
+    gold: BLOW_COW_STARTING_GOLD,
     scoredSets: [],
     matchStats: createInitialPlayerMatchStats(),
     pendingRevealPlayID: null,
@@ -1554,7 +1854,7 @@ export function getMaxCardsOnTable(playerCount: number) {
   }
 
   if (playerCount === 5) {
-    return 15
+    return 10
   }
 
   if (playerCount === 6) {
@@ -1588,12 +1888,25 @@ export function getDefaultStandardRankCount(playerCount: number) {
   return BLOW_COW_RANKS.length
 }
 
+/**
+ * The rank count for a player count, in whichever mode is being played. The two tables are genuinely
+ * different games — Ante's is smaller at every seat count, because it deals the whole deck out every
+ * round and a round is meant to be short — so they are separate functions rather than one with a
+ * modifier, and this is the only place a caller has to know which it wants.
+ */
+export function getStandardRankCountForMode(gameMode: BlowCowGameMode, playerCount: number) {
+  return gameMode === 'ante'
+    ? getAnteStandardRankCount(playerCount)
+    : getDefaultStandardRankCount(playerCount)
+}
+
 function getDefaultSelectedRanks(
+  gameMode: BlowCowGameMode,
   numPlayers: number,
   shuffle?: BlowCowShuffle,
   requiredRanks: readonly BlowCowRank[] = [],
 ) {
-  const defaultRankCount = getDefaultStandardRankCount(numPlayers)
+  const defaultRankCount = getStandardRankCountForMode(gameMode, numPlayers)
 
   if (defaultRankCount >= BLOW_COW_RANKS.length) {
     return [...BLOW_COW_RANKS]
@@ -1625,8 +1938,16 @@ function resolveDeckConfig(
   setupData: BlowCowSetupData | undefined,
   shuffle?: BlowCowShuffle,
 ): BlowCowDeckConfig {
-  const defaultRankCount = getDefaultStandardRankCount(numPlayers)
+  const gameMode = resolveGameMode(setupData)
+  const defaultRankCount = getStandardRankCountForMode(gameMode, numPlayers)
   const selectedCharacterPool = normalizeCharacterPoolSelection(setupData?.characterPool)
+  /*
+   * Chosen the same way whichever mode the standard ranks are in — the two selections never interact.
+   * Ante takes none: an action rank fires off the Reveal Rule and hands out a status, and Ante has no
+   * status system to receive one. Forced here rather than validated away, so a host who somehow sends
+   * a selection gets a deck without them rather than a room that refuses to open.
+   */
+  const specialRanks = gameMode === 'ante' ? [] : normalizeSpecialRankSelection(setupData?.specialRanks)
 
   if (setupData?.rankSelectionMode === 'manual') {
     const selectedRanks = normalizeSelectedRanks(setupData.selectedRanks)
@@ -1635,6 +1956,7 @@ function resolveDeckConfig(
       return {
         rankSelectionMode: 'manual',
         selectedRanks,
+        specialRanks,
         includesJokers: true,
         defaultRankCount,
       }
@@ -1644,13 +1966,20 @@ function resolveDeckConfig(
   return {
     rankSelectionMode: 'default',
     selectedRanks: getDefaultSelectedRanks(
+      gameMode,
       numPlayers,
       shuffle,
+      // Ante seats no characters, so nothing there can lock a rank into the deck.
       selectedCharacterPool.includes('The Confused') ? ['J'] : [],
     ),
+    specialRanks,
     includesJokers: true,
     defaultRankCount,
   }
+}
+
+function resolveGameMode(setupData: BlowCowSetupData | undefined): BlowCowGameMode {
+  return isBlowCowGameMode(setupData?.gameMode) ? setupData.gameMode : DEFAULT_BLOW_COW_GAME_MODE
 }
 
 function resolveSpeedMultiplier(setupData: BlowCowSetupData | undefined) {
@@ -1659,7 +1988,18 @@ function resolveSpeedMultiplier(setupData: BlowCowSetupData | undefined) {
     : DEFAULT_BLOW_COW_SPEED_MULTIPLIER
 }
 
+/*
+ * Ante seats no characters. Every character is an exception to a rule written in `RULES.md`, and Ante
+ * does not play half of those rules — so rather than auditing twenty cards against a different game,
+ * the mode simply has none. Forced here, which is also what makes `resolveCharacterPool` below empty
+ * and what keeps `canCheat` false for every seat: cheating needs The Dreamer or a removed No Cheating
+ * Rule, and Ante has neither.
+ */
 function resolveUseCharacters(setupData: BlowCowSetupData | undefined) {
+  if (resolveGameMode(setupData) === 'ante') {
+    return false
+  }
+
   return setupData?.useCharacters ?? true
 }
 
@@ -1671,16 +2011,44 @@ function resolveCharacterPool(setupData: BlowCowSetupData | undefined) {
     : [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES]
 }
 
+/*
+ * Ante does not use the rule card system, so it takes the default all-active selection and nothing
+ * reads it. The rules it plays differently are branched on `isAnteMode` at their enforcement sites
+ * instead — see the note on that helper for why the two are not folded together.
+ */
 function resolveRules(setupData: BlowCowSetupData | undefined) {
+  if (resolveGameMode(setupData) === 'ante') {
+    return createDefaultRulesState()
+  }
+
   return normalizeRulesSelection(setupData?.rules)
 }
 
+/** Ante has no status system, so the lobby's testing lever is refused there along with the rest. */
 function resolveInitialStatuses(setupData: BlowCowSetupData | undefined) {
+  if (resolveGameMode(setupData) === 'ante') {
+    return [] as BlowCowStatusID[]
+  }
+
   return normalizeStatusSelection(setupData?.initialStatuses)
+}
+
+function resolveRoundLimit(setupData: BlowCowSetupData | undefined) {
+  return normalizeRoundLimit(setupData?.roundLimit)
+}
+
+function resolveStartingGold(setupData: BlowCowSetupData | undefined) {
+  return normalizeAnteStartingGold(setupData?.startingGold)
 }
 
 function resolveInitialStatusTurns(setupData: BlowCowSetupData | undefined) {
   return normalizeStatusTurns(setupData?.initialStatusTurns)
+}
+
+function formatSpecialRanksSummary(specialRanks: readonly BlowCowSpecialRank[] | undefined) {
+  return specialRanks && specialRanks.length > 0
+    ? `added the ${specialRanks.join(', ')} action rank(s)`
+    : 'added no action ranks'
 }
 
 function formatInitialStatusesSummary(statusIDs: readonly BlowCowStatusID[], turns: number) {
@@ -1702,6 +2070,35 @@ function formatRulesSummary(rules: BlowCowRulesState) {
 }
 
 export function validateBlowCowSetupData(setupData: BlowCowSetupData | undefined) {
+  if (setupData?.gameMode !== undefined && !isBlowCowGameMode(setupData.gameMode)) {
+    return 'Choose a valid game mode.'
+  }
+
+  /*
+   * Both dials are validated wherever they appear rather than only in Ante rooms. A classic room that
+   * sends one is ignoring it, and a value it would never read is still worth refusing at the door — a
+   * room that opens with nonsense in its setup data is a room somebody has to explain later.
+   */
+  if (setupData?.roundLimit !== undefined) {
+    if (
+      !Number.isInteger(setupData.roundLimit)
+      || setupData.roundLimit < MIN_BLOW_COW_ROUND_LIMIT
+      || setupData.roundLimit > MAX_BLOW_COW_ROUND_LIMIT
+    ) {
+      return `A match must last between ${MIN_BLOW_COW_ROUND_LIMIT} and ${MAX_BLOW_COW_ROUND_LIMIT} rounds.`
+    }
+  }
+
+  if (setupData?.startingGold !== undefined) {
+    if (
+      !Number.isInteger(setupData.startingGold)
+      || setupData.startingGold < MIN_BLOW_COW_ANTE_STARTING_GOLD
+      || setupData.startingGold > MAX_BLOW_COW_ANTE_STARTING_GOLD
+    ) {
+      return `Starting gold must be between ${MIN_BLOW_COW_ANTE_STARTING_GOLD} and ${MAX_BLOW_COW_ANTE_STARTING_GOLD}.`
+    }
+  }
+
   if (setupData?.rules !== undefined) {
     if (typeof setupData.rules !== 'object' || setupData.rules === null || Array.isArray(setupData.rules)) {
       return 'Choose a valid rule selection.'
@@ -1747,6 +2144,20 @@ export function validateBlowCowSetupData(setupData: BlowCowSetupData | undefined
       || setupData.initialStatusTurns > MAX_BLOW_COW_STATUS_TURNS
     ) {
       return `Starting statuses must last between 1 and ${MAX_BLOW_COW_STATUS_TURNS} turns.`
+    }
+  }
+
+  if (setupData?.specialRanks !== undefined) {
+    if (!Array.isArray(setupData.specialRanks)) {
+      return 'Choose a valid action rank selection.'
+    }
+
+    if (setupData.specialRanks.some((rank) => !isBlowCowSpecialRank(rank))) {
+      return 'Action rank selection contains an unknown rank.'
+    }
+
+    if (new Set(setupData.specialRanks).size !== setupData.specialRanks.length) {
+      return 'Action rank selection cannot contain duplicate ranks.'
     }
   }
 
@@ -1871,14 +2282,24 @@ export function sortCards(cards: BlowCowCard[]) {
   })
 }
 
-export function createDeck(selectedRanks: readonly BlowCowRank[] = BLOW_COW_RANKS) {
+/**
+ * `idPrefix` exists for Ante, which builds a fresh deck at the start of every round. Card ids are
+ * positional, so two rounds dealt from the same prefix would hand the client the same id for two
+ * different cards — the keys and flip animations on the board are keyed off them. A classic match
+ * builds its deck once and keeps the original `card-` prefix, so nothing about it changes.
+ */
+export function createDeck(
+  selectedRanks: readonly BlowCowRank[] = BLOW_COW_RANKS,
+  specialRanks: readonly BlowCowSpecialRank[] = [],
+  idPrefix = 'card',
+) {
   const deck: BlowCowCard[] = []
   let deckOrder = 0
 
   for (const suit of BLOW_COW_SUITS) {
-    for (const rank of selectedRanks) {
+    for (const rank of [...selectedRanks, ...specialRanks]) {
       deck.push({
-        id: `card-${deckOrder}`,
+        id: `${idPrefix}-${deckOrder}`,
         rank,
         suit,
         sprite: getCardSpriteFilename(suit, rank),
@@ -1890,7 +2311,7 @@ export function createDeck(selectedRanks: readonly BlowCowRank[] = BLOW_COW_RANK
 
   for (let jokerIndex = 1; jokerIndex <= 2; jokerIndex += 1) {
     deck.push({
-      id: `card-${deckOrder}`,
+      id: `${idPrefix}-${deckOrder}`,
       rank: 'Joker',
       suit: 'joker',
       sprite: `Joker${jokerIndex}.png`,
@@ -1915,6 +2336,115 @@ function dealCards(deck: BlowCowCard[], seatOrder: string[]) {
   return hands
 }
 
+/**
+ * Ante's deal, which differs from `dealCards` in exactly one thing: where the remainder lands.
+ *
+ * Round-robin hands the extra cards to the seats dealt first, and in Ante that is backwards. Emptying
+ * your hand wins the round, so holding fewer cards is an advantage, and the seat at the front of
+ * `turnOrder` is already the one that picks the trump rank and acts first. The remainder is therefore
+ * dealt to the seats **latest** in turn order. Only 4 and 8 players fail to divide, and both leave
+ * exactly 2 cards over.
+ */
+function dealAnteHands(deck: BlowCowCard[], turnOrder: string[]) {
+  const hands = Object.fromEntries(
+    turnOrder.map((playerID) => [playerID, [] as BlowCowCard[]]),
+  ) as Record<string, BlowCowCard[]>
+
+  if (turnOrder.length === 0) {
+    return hands
+  }
+
+  const baseHandSize = Math.floor(deck.length / turnOrder.length)
+  const remainder = deck.length % turnOrder.length
+  let cursor = 0
+
+  turnOrder.forEach((playerID, seatPosition) => {
+    const handSize = baseHandSize + (seatPosition >= turnOrder.length - remainder ? 1 : 0)
+    hands[playerID] = deck.slice(cursor, cursor + handSize)
+    cursor += handSize
+  })
+
+  return hands
+}
+
+/**
+ * Turn order for the round about to be dealt: the starting player, then round the ring in the current
+ * direction. `getRoundStartPlayerOrder` answers almost the same question but applies The Privileged's
+ * claim on the way, and Ante seats no characters, so this walks the ring plainly instead.
+ */
+function getAnteTurnOrder(state: BlowCowState, startingPlayerID: string) {
+  const activePlayerIDs = getActivePlayerIDs(state)
+  const turnOrder = activePlayerIDs.includes(startingPlayerID) ? [startingPlayerID] : [...activePlayerIDs.slice(0, 1)]
+
+  while (turnOrder.length > 0 && turnOrder.length < activePlayerIDs.length) {
+    const nextPlayerID = getNextActivePlayerID(
+      turnOrder[turnOrder.length - 1],
+      state.seatOrder,
+      state.round.direction,
+      activePlayerIDs,
+    )
+
+    if (!nextPlayerID || turnOrder.includes(nextPlayerID)) {
+      break
+    }
+
+    turnOrder.push(nextPlayerID)
+  }
+
+  return turnOrder
+}
+
+/**
+ * Trims the deck down to the rank count for however many players are left, and returns the ranks that
+ * went. Only ever shrinks: Ante's table is monotonic in the player count, and a rank that has left the
+ * match never comes back even if a later count would allow it.
+ *
+ * Which ranks go is drawn from the ranks currently in play rather than computed, so a host who picked
+ * their own deck loses ranks from the deck they picked instead of having it replaced.
+ */
+function resizeAnteDeck(state: BlowCowState, shuffle?: BlowCowShuffle) {
+  const targetRankCount = getAnteStandardRankCount(getActivePlayerCount(state))
+  const currentRanks = state.deckConfig.selectedRanks
+
+  if (currentRanks.length <= targetRankCount) {
+    return [] as BlowCowRank[]
+  }
+
+  const shuffledRanks = shuffleCards([...currentRanks], shuffle)
+  const keptRanks = new Set(shuffledRanks.slice(0, targetRankCount))
+
+  state.deckConfig.selectedRanks = sortRanks(currentRanks.filter((rank) => keptRanks.has(rank)))
+  state.deckConfig.defaultRankCount = targetRankCount
+
+  return sortRanks(currentRanks.filter((rank) => !keptRanks.has(rank)))
+}
+
+/**
+ * Gathers every card in the game and deals it out again. This is the whole of Ante's round setup: no
+ * card survives a round boundary in anybody's hand, which is what makes "no cards move between players
+ * inside a round" a rule about the round rather than about the match.
+ *
+ * Deliberately does not run `scoreHand` — see `doesMatchScorePoints` — and deliberately writes no
+ * history line, because its two callers want different ones: the opening deal is covered by `Match
+ * initialized`, and every later one is announced by `endAnteRound`. Returns the deck size so both can
+ * say how many cards went out.
+ */
+function dealAnteRound(state: BlowCowState, shuffle?: BlowCowShuffle) {
+  const turnOrder = getAnteTurnOrder(state, state.round.startingPlayerID)
+  const deck = shuffleCards(
+    createDeck(state.deckConfig.selectedRanks, [], `r${state.round.roundNumber}`),
+    shuffle,
+  )
+  const hands = dealAnteHands(deck, turnOrder)
+
+  for (const player of Object.values(state.players)) {
+    player.hand = player.hasLeft ? [] : sortCards(hands[player.id] ?? [])
+    player.pendingRevealPlayID = null
+  }
+
+  return deck.length
+}
+
 // Scoring removes each complete four-of-a-kind immediately and can award multiple
 // points for the same rank when a player receives 8 or more matching cards.
 export function scoreHand(
@@ -1925,7 +2455,7 @@ export function scoreHand(
   awardedAtTurn: number,
 ) {
   const sortedHand = sortCards(hand)
-  const cardsByRank = new Map<BlowCowRank, BlowCowCard[]>()
+  const cardsByRank = new Map<BlowCowRank | BlowCowSpecialRank, BlowCowCard[]>()
 
   for (const card of sortedHand) {
     if (card.rank === 'Joker') {
@@ -1940,7 +2470,11 @@ export function scoreHand(
   const scoredCardIDs = new Set<string>()
   const scoredSets: BlowCowScoredSet[] = []
 
-  for (const rank of BLOW_COW_RANKS) {
+  // Action ranks go round the same loop, and are removed on exactly the same terms — four of a kind
+  // leaves the hand the moment it completes. Only the point differs, and that is read back off the
+  // rank by `doesScoredSetAwardPoint` rather than recorded as a field, so nothing that restores an
+  // older match has to be told which of its sets counted.
+  for (const rank of [...BLOW_COW_RANKS, ...BLOW_COW_SPECIAL_RANKS]) {
     const matchingCards = cardsByRank.get(rank) ?? []
     const setCount = Math.floor(matchingCards.length / 4)
 
@@ -1964,7 +2498,7 @@ export function scoreHand(
   return {
     remainingHand: sortedHand.filter((card) => !scoredCardIDs.has(card.id)),
     scoredSets,
-    pointsAwarded: scoredSets.length,
+    pointsAwarded: scoredSets.filter((scoredSet) => doesScoredSetAwardPoint(scoredSet)).length,
   } satisfies BlowCowScoreHandResult
 }
 
@@ -2030,6 +2564,44 @@ export function getNextActivePlayerID(
   return null
 }
 
+/**
+ * The next `count` active seats round from `playerID`, in the current direction — the "next x
+ * players" every action rank counts out.
+ *
+ * The walk stops after one full lap however large `count` is, so a table smaller than the number of
+ * cards revealed simply runs out of seats rather than naming one twice. It deliberately does not
+ * exclude `playerID`: on a two-player table the second seat round is the revealer, and a Skip that
+ * comes back to them is exactly the UNO behaviour of handing themselves another turn.
+ */
+function getNextActivePlayerIDsInOrder(
+  state: Pick<BlowCowState, 'seatOrder' | 'players' | 'round'>,
+  playerID: string,
+  count: number,
+) {
+  const activePlayerIDs = getActivePlayerIDs(state)
+  const lapLength = Math.min(count, activePlayerIDs.length)
+  const orderedPlayerIDs: string[] = []
+  let cursorPlayerID = playerID
+
+  for (let step = 0; step < lapLength; step += 1) {
+    const nextPlayerID = getNextActivePlayerID(
+      cursorPlayerID,
+      state.seatOrder,
+      state.round.direction,
+      activePlayerIDs,
+    )
+
+    if (!nextPlayerID) {
+      break
+    }
+
+    orderedPlayerIDs.push(nextPlayerID)
+    cursorPlayerID = nextPlayerID
+  }
+
+  return orderedPlayerIDs
+}
+
 export function getTableCardCount(table: BlowCowTableState) {
   return table.plays.reduce((totalCards, play) => totalCards + play.cards.length, 0)
 }
@@ -2057,13 +2629,16 @@ function addCardsToPlayerHand(
   }
 
   const player = getPlayerState(state, playerID)
-  const scoredHand = scoreHand(
-    [...player.hand, ...cards],
-    playerID,
-    source,
-    state.round.roundNumber,
-    turnNumber,
-  )
+  /*
+   * Ante scores nothing, so nothing is removed either. The Ante branches never move cards between
+   * players, but this is still reached there by the rollback paths in `performPlay` — a play refused
+   * after the cards left the hand — and an Ante hand is dealt without a four-of-a-kind check, so it
+   * can genuinely be holding one. Scoring on the way back in would delete four cards a player never
+   * put down.
+   */
+  const scoredHand = doesMatchScorePoints(state)
+    ? scoreHand([...player.hand, ...cards], playerID, source, state.round.roundNumber, turnNumber)
+    : { remainingHand: sortCards([...player.hand, ...cards]), scoredSets: [], pointsAwarded: 0 }
 
   player.hand = scoredHand.remainingHand
   player.points += scoredHand.pointsAwarded
@@ -2252,8 +2827,8 @@ export function hasStatus(state: BlowCowState, playerID: string, statusID: BlowC
  * The one door in. Re-afflicting a status the player already has refreshes its counter rather than
  * stacking a second copy, and the cap is enforced here rather than left to the caller.
  *
- * Nothing in the game calls this outside setup yet — it exists so the character or rule card that
- * eventually hands statuses out has somewhere to hand them to.
+ * Two callers: `startMatchState` dealing the lobby's testing selection, and a revealed Plague card.
+ * Both are held to the same cap and the same opposition, which is the point of there being one door.
  */
 export function addPlayerStatus(
   state: BlowCowState,
@@ -2872,6 +3447,17 @@ function resolveBSTargetSelection(
 }
 
 function isFinalTwoResolutionTurn(state: BlowCowState, currentPlayerID: string) {
+  /*
+   * Ante has no Final Two Players Rule. The classic one exists because an opponent who empties their
+   * hand is about to leave the game, so the last player is held to the one action that can still stop
+   * it. Here they win a round instead and the match carries on, so nothing needs holding: Play and
+   * Pass stay open, and Call BS is the answer because it is the only one that works, not because it
+   * is the only one offered.
+   */
+  if (isAnteMode(state)) {
+    return false
+  }
+
   const activePlayerIDs = getActivePlayerIDs(state)
   if (activePlayerIDs.length !== 2) {
     return false
@@ -3040,6 +3626,34 @@ function createResetResolution(
   } satisfies BlowCowResetResolution
 }
 
+/**
+ * Ante's second and third endings both finish by turning the table over, and both borrow the Reset
+ * walk to do it: the winner flips each face-down pile in turn and the round settles at the Continue
+ * that follows. Reusing it rather than growing a third procedure is what gets the lead-in, the
+ * per-card flips, the reconnect behaviour and `finalizeResetResolution`'s single exit for free.
+ *
+ * Returns whether a walk was actually raised. It refuses an empty one for the reason `openTurnReveal`
+ * skips its own: a table with nothing face down has nothing a client can be asked to click, and
+ * holding the round open for a Continue that reveals nothing is a pause rather than a procedure. That
+ * is the ordinary case for `Ending 2` and never the case for `Ending 3` — reaching `n` consecutive
+ * passes means every seat has taken a turn since its last play, so the Reveal Rule has already opened
+ * the whole table, while a hand-emptying play is by construction one the Reveal Rule never reached.
+ */
+function beginAnteRoundEndReveal(
+  state: BlowCowState,
+  winnerPlayerID: string,
+  kind: 'antePassEnding' | 'anteEmptyHand',
+) {
+  if (getTableRevealOrder(state, winnerPlayerID).length === 0) {
+    return false
+  }
+
+  state.resetResolution = createResetResolution(state, winnerPlayerID, kind)
+  state.tableStatus = buildTurnStatus(state, winnerPlayerID)
+
+  return true
+}
+
 function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
   if (state.gameStatus !== 'active') {
     return state.tableStatus
@@ -3071,6 +3685,15 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     // who is losing it. That is the reveal's to tell.
     const callLabel = state.resetResolution.kind === 'roundReturn'
       ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} passed. Everyone passed, so the table cards are returning to their owners.`
+      /*
+       * Ante's two silent endings. Both name their winner outright, which gives nothing away: an
+       * empty hand and a pass streak are public, and what the table is waiting to find out is whether
+       * the plays behind them were honest.
+       */
+      : state.resetResolution.kind === 'antePassEnding'
+      ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} passed. Everyone passed, so the round is theirs once the table is face up.`
+      : state.resetResolution.kind === 'anteEmptyHand'
+      ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} started the turn with an empty hand and won the round. The table goes face up.`
       : state.resetResolution.showdown
       ? `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} called Reset. The Gambler makes it a showdown, so the weakest hand takes the table.`
       : `${formatPlayerLabel(state, state.resetResolution.callerPlayerID)} called Reset. Returning the table cards before redistributing them.`
@@ -3092,7 +3715,19 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
   const tableCardCount = getTableCardCount(state.table)
   const hasBSTarget = Boolean(getDefaultBSTargetPlayerID(state, currentPlayerID))
   const hasPawnEnPassantTarget = Boolean(getPawnEnPassantTargetSelection(state, currentPlayerID))
-  const canReset = tableCardCount >= state.round.maxCardsOnTable
+  // Ante has neither a table cap nor a Call Reset to unlock at one.
+  const canReset = !isAnteMode(state) && tableCardCount >= state.round.maxCardsOnTable
+  /*
+   * Ante counts its rounds down to a finish, so the round is part of the standing summary rather
+   * than something the opening line mentions once. `maxCardsOnTable` is left out for the same reason
+   * Call Reset is: there is no cap for the count to be out of.
+   */
+  const roundSummary = isAnteMode(state)
+    ? `Round ${state.round.roundNumber} of ${getRoundLimit(state)}`
+    : `Round ${state.round.roundNumber}`
+  const tableCountSummary = isAnteMode(state)
+    ? `Table ${tableCardCount} card(s).`
+    : `Table ${tableCardCount}/${state.round.maxCardsOnTable}.`
   const directionActionDetail = isCat(state, currentPlayerID)
     ? ' Change Direction is also available.'
     : canCheat(state, currentPlayerID)
@@ -3104,7 +3739,7 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
   const hasEncore = state.encore?.playerID === currentPlayerID
   // With the table cap gone, a full table no longer closes Play, so the two stop being exclusive.
   const canPlayMore = !hasEncore
-    && (isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable)
+    && (isAnteMode(state) || isRuleRemoved(state, 'maxCardsOnTable') || tableCardCount < state.round.maxCardsOnTable)
 
   // A conspiracy leaves exactly one legal move, so the status names it instead of listing an action
   // space that no longer applies.
@@ -3112,8 +3747,8 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     const conspiracyLabel = `${playerLabel} opened ${formatPlayerLabel(state, state.conspiracy.targetPlayerID)}'s hand and must play out of it.`
 
     return trumpRank
-      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${conspiracyLabel}`
-      : `Round ${state.round.roundNumber}. ${conspiracyLabel} A trump rank is chosen with it.`
+      ? `Trump is ${trumpRank}. ${tableCountSummary} ${conspiracyLabel}`
+      : `${roundSummary}. ${conspiracyLabel} A trump rank is chosen with it.`
   }
 
   /*
@@ -3130,14 +3765,14 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
   if (state.mimicry
     && (currentPlayerID === state.mimicry.playerID || currentPlayerID === state.mimicry.sourcePlayerID)) {
     return trumpRank
-      ? `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}. ${playerLabel} to act.`
-      : `Round ${state.round.roundNumber}. ${playerLabel} to act. A trump rank is chosen with the first play.`
+      ? `Trump is ${trumpRank}. ${tableCountSummary} ${playerLabel} to act.`
+      : `${roundSummary}. ${playerLabel} to act. A trump rank is chosen with the first play.`
   }
 
   if (!trumpRank) {
     return canPass
-      ? `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play, or pass.${directionActionDetail}`
-      : `Round ${state.round.roundNumber}. ${playerLabel} to act. Choose a trump rank and play.${directionActionDetail}`
+      ? `${roundSummary}. ${playerLabel} to act. Choose a trump rank and play, or pass.${directionActionDetail}`
+      : `${roundSummary}. ${playerLabel} to act. Choose a trump rank and play.${directionActionDetail}`
   }
 
   // The round was opened for them, rank and all, so there is one action left and the status says it
@@ -3146,7 +3781,9 @@ function buildTurnStatus(state: BlowCowState, currentPlayerID: string) {
     return `Trump is ${trumpRank}. The Invisible Hand opened the round for ${playerLabel}, who must play and may not pass.${directionActionDetail}`
   }
 
-  const tableSummary = `Trump is ${trumpRank}. Table ${tableCardCount}/${state.round.maxCardsOnTable}.`
+  const tableSummary = isAnteMode(state)
+    ? `${roundSummary}. Trump is ${trumpRank}. ${tableCountSummary}`
+    : `Trump is ${trumpRank}. ${tableCountSummary}`
 
   if (isFinalTwoResolutionTurn(state, currentPlayerID)) {
     const targetPlayerID = getDefaultBSTargetPlayerID(state, currentPlayerID)
@@ -3195,10 +3832,28 @@ function formatActionList(actions: string[]) {
   return `${actions.slice(0, -1).join(', ')}, or ${actions[actions.length - 1]}`
 }
 
+/**
+ * Ante's placements, which invert the classic ordering in both of its terms.
+ *
+ * More gold is better, where fewer points is. And leaving *later* is better, where leaving earlier is
+ * — in the classic game an early exit is a reward for shedding cards, whereas here it means going
+ * bankrupt. A player still in the game has no `leaveOrder` at all, which is why the missing value
+ * sorts above every real one instead of below it.
+ */
+function compareAntePlacements(leftPlayer: BlowCowPlayerState, rightPlayer: BlowCowPlayerState) {
+  return getPlayerGold(rightPlayer) - getPlayerGold(leftPlayer)
+    || (rightPlayer.leaveOrder ?? Number.MAX_SAFE_INTEGER) - (leftPlayer.leaveOrder ?? Number.MAX_SAFE_INTEGER)
+    || leftPlayer.seatIndex - rightPlayer.seatIndex
+}
+
 function buildGameOverSummary(state: BlowCowState): BlowCowGameOver {
   const placements = [...state.seatOrder].sort((leftPlayerID, rightPlayerID) => {
     const leftPlayer = state.players[leftPlayerID]
     const rightPlayer = state.players[rightPlayerID]
+
+    if (isAnteMode(state)) {
+      return compareAntePlacements(leftPlayer, rightPlayer)
+    }
 
     return leftPlayer.points - rightPlayer.points
       || (leftPlayer.leaveOrder ?? Number.MAX_SAFE_INTEGER) - (rightPlayer.leaveOrder ?? Number.MAX_SAFE_INTEGER)
@@ -3210,6 +3865,11 @@ function buildGameOverSummary(state: BlowCowState): BlowCowGameOver {
     winnerID: placements[0],
     pointsByPlayer: Object.fromEntries(
       Object.entries(state.players).map(([playerID, player]) => [playerID, player.points]),
+    ),
+    // Additive beside `pointsByPlayer` rather than replacing it, so a reader that predates Ante sees
+    // a key it does not know rather than a changed shape.
+    goldByPlayer: Object.fromEntries(
+      Object.entries(state.players).map(([playerID, player]) => [playerID, getPlayerGold(player)]),
     ),
   }
 }
@@ -3258,7 +3918,8 @@ function getRoundStartPlayerOrder(state: BlowCowState) {
 
 function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statusMessage: string) {
   state.round.roundNumber += 1
-  if (!isRuleRemoved(state, 'directionChange')) {
+  // Ante does not play the Direction Change Rule, so the ring turns the same way for the whole match.
+  if (!isAnteMode(state) && !isRuleRemoved(state, 'directionChange')) {
     state.round.direction = toggleDirection(state.round.direction)
   }
   // Before the starting player is picked, not with the other per-round flags below: the round that
@@ -3274,6 +3935,10 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.round.passStreak = 0
   state.round.lastNonPassingPlayerID = null
   state.round.forcedPlayPlayerID = null
+  // Belt and braces behind `handleTurnStart`, which is the clearing site that matters. A Skip counted
+  // out in the round that just ended has no seat left to take a turn from in the one starting here.
+  state.round.skippedPlayerIDs = []
+  state.handPeek = null
   // Statuses are deliberately not touched anywhere in here. They are counted in turns, not rounds, so
   // one handed out near a boundary is meant to survive it; only their turn marker is round-scoped.
   state.round.startedTurnNumber = null
@@ -3304,12 +3969,208 @@ function beginNextRound(state: BlowCowState, nextStartingPlayerID: string, statu
   state.tableStatus = statusMessage
 }
 
+/**
+ * Moves one seat's purse and logs it. Gold is the whole of Ante's scoring, so every movement goes
+ * through here and no branch below can change a total without leaving a line saying why.
+ */
+function awardAnteGold(state: BlowCowState, playerID: string, goldDelta: number, detail: string, turnNumber: number) {
+  const player = getPlayerState(state, playerID)
+  const nextGold = Math.max(0, getPlayerGold(player) + goldDelta)
+
+  player.gold = nextGold
+  appendHistoryEvent(
+    state,
+    'point',
+    `${formatPlayerLabel(state, playerID)} ${goldDelta >= 0 ? 'won' : 'lost'} ${Math.abs(goldDelta)} gold`,
+    `${detail} Now holding ${nextGold} gold.`,
+    playerID,
+    turnNumber,
+  )
+}
+
+/**
+ * Removes everyone whose purse is empty. Only a lost BS call can take gold, so at most one seat is
+ * ever eliminated at once — but this walks the whole table rather than assuming that, since assuming
+ * it would leave a second bankrupt seat playing on if a later ending ever costs gold too.
+ *
+ * Runs before the next round is opened, so an eliminated seat can neither be dealt into it nor be
+ * chosen to start it.
+ */
+function resolveAnteEliminations(state: BlowCowState, turnNumber: number) {
+  for (const playerID of getActivePlayerIDs(state)) {
+    if (getPlayerGold(state.players[playerID]) <= 0) {
+      markPlayerLeft(state, playerID, turnNumber, 'Ran out of gold and left the game.')
+    }
+  }
+}
+
+/**
+ * The one path out of an Ante round, shared by all three endings. Each caller decides who won, who
+ * lost, and what to say about it; everything after that is the same every time.
+ *
+ * `loserPlayerID` is null for the two endings that only mint gold. That asymmetry is the mode's
+ * economy: gold only ever leaves the game through a lost BS call, which is what makes `Call BS` the
+ * only action that costs anybody anything. See `RULES-ANTE.md`.
+ */
+/**
+ * Fold the round that just ended into every seat's public record.
+ *
+ * A transcription of `rl/ante/match.py::_record_round` plus the two counters `_settle_round` moves,
+ * so the browser agent's observation is built from the same arithmetic its training was. Two things
+ * are worth stating rather than inferring.
+ *
+ * **Honesty is read off the table, not off reveal events.** Every Ante ending turns the whole table
+ * face up — a `Call BS` flips it, and the other two walk it through `beginAnteRoundEndReveal` — so an
+ * event-based count would miss the richest disclosure in the game.
+ *
+ * The test for "did the table see this" has to cover both ways a play can end up face up, and they
+ * are not the same field. The Reveal Rule turns a whole play over at once and stamps
+ * `revealedAtTurn`; every walk — the BS resolution and both round-end reveals — flips cards one at a
+ * time into `revealedCardIDs` and never stamps it. A play counts only when **all** of its cards are
+ * visible by one route or the other, so a partial flip (The Spy's single card) is not mistaken for a
+ * disclosure the table can judge.
+ *
+ * **A play with no claim is skipped.** `claimedRank` is null only for a card sneaked onto the table
+ * before the round had a trump rank, and until a rank exists there is nothing to have lied about —
+ * the same reason `settleUnclaimedPlays` counts the lie where it does.
+ */
+function recordAnteRoundOutcome(
+  state: BlowCowState,
+  winnerPlayerID: string,
+  loserPlayerID: string | null,
+  callerPlayerID: string | null,
+) {
+  const recordFor = (playerID: string): BlowCowAnteSeatRecord | null => {
+    const player = state.players[playerID]
+    if (!player) return null
+    if (!player.anteRecord) player.anteRecord = createEmptyAnteSeatRecord()
+    return player.anteRecord
+  }
+
+  for (const play of state.table.plays) {
+    if (play.claimedRank === null || play.cards.length === 0) continue
+    const revealedCardIDs = getRevealedCardIDSet(play)
+    const fullyRevealed =
+      play.revealedAtTurn !== null || play.cards.every((card) => revealedCardIDs.has(card.id))
+    if (!fullyRevealed) continue
+    const record = recordFor(play.playerID)
+    if (!record) continue
+    const character = state.players[play.playerID]?.character ?? null
+    const honest = play.cards.every((card) =>
+      isTrumpCardInMatch(state, card, play.claimedRank, character),
+    )
+    if (honest) record.honest += 1
+    else record.lies += 1
+  }
+
+  if (callerPlayerID) {
+    const caller = recordFor(callerPlayerID)
+    if (caller) {
+      caller.callsMade += 1
+      if (callerPlayerID === winnerPlayerID) caller.callsWon += 1
+    }
+  }
+
+  const winner = recordFor(winnerPlayerID)
+  if (winner) winner.roundsWon += 1
+  if (loserPlayerID) {
+    const loser = recordFor(loserPlayerID)
+    if (loser) loser.bsLosses += 1
+  }
+}
+
+function endAnteRound(
+  context: BlowCowHookContext,
+  winnerPlayerID: string,
+  loserPlayerID: string | null,
+  reasonDetail: string,
+  callerPlayerID: string | null = null,
+) {
+  const { G, ctx, events, random } = context
+  const completedRoundNumber = G.round.roundNumber
+  const roundLimit = getRoundLimit(G)
+
+  // Before the gold moves and before the eliminations, so the record is of the round as it was
+  // played and the table is still the one the seats were judged on.
+  recordAnteRoundOutcome(G, winnerPlayerID, loserPlayerID, callerPlayerID)
+
+  awardAnteGold(G, winnerPlayerID, BLOW_COW_ANTE_ROUND_GOLD, `Won round ${completedRoundNumber}. ${reasonDetail}`, ctx.turn)
+  if (loserPlayerID) {
+    awardAnteGold(G, loserPlayerID, -BLOW_COW_ANTE_ROUND_GOLD, `Lost round ${completedRoundNumber}. ${reasonDetail}`, ctx.turn)
+  }
+
+  appendArchiveTurnAction(G, winnerPlayerID, ctx.turn, {
+    kind: 'anteRoundResult',
+    detail: `${reasonDetail} ${formatPlayerLabel(G, winnerPlayerID)} won round ${completedRoundNumber}.`,
+    unpunishedPlayerID: winnerPlayerID,
+    punishedPlayerID: loserPlayerID,
+    endedRound: true,
+  })
+
+  resolveAnteEliminations(G, ctx.turn)
+
+  const activePlayerIDs = getActivePlayerIDs(G)
+  if (activePlayerIDs.length <= 1) {
+    finalizeGameForLastRemainingPlayer(G, events, winnerPlayerID, ctx.turn)
+    return
+  }
+
+  if (completedRoundNumber >= roundLimit) {
+    finalizeGame(
+      G,
+      events,
+      `All ${roundLimit} round(s) have been played. ${formatPlayerLabel(G, buildGameOverSummary(G).winnerID)} finished with the most gold.`,
+      ctx.turn,
+    )
+    return
+  }
+
+  // The winner starts, unless they were the one who just went bankrupt — which only a lost BS call
+  // can do, and a lost BS call never names its loser the winner. The fallback is here so that stays
+  // true by construction rather than by argument.
+  const nextStartingPlayerID = activePlayerIDs.includes(winnerPlayerID) ? winnerPlayerID : activePlayerIDs[0]
+
+  beginNextRound(
+    G,
+    nextStartingPlayerID,
+    `${formatPlayerLabel(G, winnerPlayerID)} won round ${completedRoundNumber}. Round ${completedRoundNumber + 1} of ${roundLimit} begins.`,
+  )
+
+  // Order matters: the deck is trimmed for whoever is left before the cards it decides are dealt out.
+  const droppedRanks = resizeAnteDeck(G, random?.Shuffle)
+  if (droppedRanks.length > 0) {
+    appendHistoryEvent(
+      G,
+      'system',
+      `The deck shrank to ${G.deckConfig.selectedRanks.length} standard rank(s)`,
+      `${droppedRanks.join(', ')} left the game with the seat that did, so the deck now uses ${G.deckConfig.selectedRanks.join(', ')} and 2 Jokers.`,
+      null,
+      ctx.turn,
+    )
+  }
+
+  const dealtCardCount = dealAnteRound(G, random?.Shuffle)
+  appendHistoryEvent(
+    G,
+    'system',
+    `Round ${G.round.roundNumber} dealt`,
+    `Shuffled all ${dealtCardCount} card(s) and dealt them out again using ${G.deckConfig.selectedRanks.join(', ')} and 2 Jokers. ${formatPlayerLabel(G, G.round.startingPlayerID)} starts.`,
+    null,
+    ctx.turn,
+  )
+  events.endTurn({ next: G.round.startingPlayerID })
+}
+
 function resolveRoundStartLeaves(state: BlowCowState, turnNumber: number) {
   const roundStartPlayerOrder = getRoundStartPlayerOrder(state)
+  // Ante has no Leave Game Rule. Nobody can start one of its rounds empty-handed anyway — every round
+  // redeals the whole deck and the smallest hand at any seat count is 5 cards — but the check is what
+  // would remove them if one ever did, so it is refused rather than left to that arithmetic.
+  const leavesOnEmptyHand = !isAnteMode(state)
   let nextStartingPlayerID: string | null = null
 
   for (const playerID of roundStartPlayerOrder) {
-    if (state.players[playerID].hand.length === 0) {
+    if (leavesOnEmptyHand && state.players[playerID].hand.length === 0) {
       markPlayerLeft(
         state,
         playerID,
@@ -3534,7 +4395,7 @@ function resolveRoundStart(state: BlowCowState, events: BlowCowEventsAPI, turnNu
   return nextStartingPlayerID ?? activePlayerIDs[0] ?? null
 }
 
-function handleTurnStart({ G, ctx, events }: BlowCowHookContext) {
+function handleTurnStart({ G, ctx, events, random }: BlowCowHookContext) {
   if (G.gameStatus !== 'active') {
     return
   }
@@ -3564,6 +4425,14 @@ function handleTurnStart({ G, ctx, events }: BlowCowHookContext) {
    * a half-walked reveal belongs to a match restored mid-flight.
    */
   G.turnOpening = null
+  /*
+   * A Peek belongs to the turn that revealed it and to nobody else's, so it comes down here whether
+   * or not its owner pressed Close. `advanceTurn` has already spent any Skip by this point; one still
+   * standing belongs to a turn that ended some other way — a BS call, an accusation, a Mimic swap —
+   * and a Skip that has missed its hand-over has missed it for good.
+   */
+  G.handPeek = null
+  G.round.skippedPlayerIDs = []
   advanceMimicryReveal(G, currentPlayerID)
   /*
    * Manipulate's lock covers exactly one turn: the one it forced. Any turn that is not the forced
@@ -3583,6 +4452,39 @@ function handleTurnStart({ G, ctx, events }: BlowCowHookContext) {
     currentPlayerID,
     ctx.turn,
   )
+
+  /*
+   * Ante's third ending, and the one the whole mode turns on. An empty hand wins the round here
+   * rather than removing its owner, and it is checked in exactly the same place the Leave Game Rule
+   * used to be: before the turn is opened, so `Take Turn` is never pressed and the Reveal Rule never
+   * runs on this seat's own terms.
+   *
+   * The round is already won by the time the walk starts — it decides nothing, and `Call BS` is still
+   * the only thing that could have stopped the play. What it settles is the question the round leaves
+   * behind: the hand-emptying play is the one card nobody had to answer, and the table now finds out
+   * whether it was honest. See `RULES-ANTE.md`.
+   */
+  if (isAnteMode(G) && getPlayerState(G, currentPlayerID).hand.length === 0) {
+    if (beginAnteRoundEndReveal(G, currentPlayerID, 'anteEmptyHand')) {
+      appendTelemetryEvent(
+        G,
+        'action',
+        `${formatPlayerLabel(G, currentPlayerID)} emptied their hand`,
+        'Their turn came round with nothing left to play, so the round ends once the table is face up.',
+        currentPlayerID,
+        ctx.turn,
+      )
+      return
+    }
+
+    endAnteRound(
+      { G, ctx, events, random },
+      currentPlayerID,
+      null,
+      `${formatPlayerLabel(G, currentPlayerID)} started the turn with an empty hand.`,
+    )
+    return
+  }
 
   if (getPlayerState(G, currentPlayerID).hand.length === 0) {
     markPlayerLeft(G, currentPlayerID, ctx.turn)
@@ -3720,6 +4622,54 @@ function handleTurnEnd({ G, ctx }: BlowCowHookContext) {
   tickPlayerStatuses(G, ctx.currentPlayer)
 }
 
+/**
+ * Who the turn actually goes to, once any Skip revealed during it has been paid.
+ *
+ * The skipped seats are always the ones counted straight out from the revealer, so walking past them
+ * one at a time from the natural next player is the same walk that named them. The list is spent
+ * whichever way that goes — a Skip buys exactly the hand-over it was revealed for — and a lap that
+ * skips the whole table falls back on the natural next player rather than finding nobody to act.
+ */
+function resolveSkippedTurnHandover(
+  state: BlowCowState,
+  currentPlayerID: string,
+  activePlayerIDs: string[],
+  turnNumber: number,
+) {
+  const naturalNextPlayerID = getNextActivePlayerID(currentPlayerID, state.seatOrder, state.round.direction, activePlayerIDs)
+  const remainingSkips = [...(state.round.skippedPlayerIDs ?? [])]
+
+  if (remainingSkips.length === 0) {
+    return naturalNextPlayerID
+  }
+
+  state.round.skippedPlayerIDs = []
+
+  const skippedPlayerIDs: string[] = []
+  let nextPlayerID = naturalNextPlayerID
+
+  while (nextPlayerID && remainingSkips.includes(nextPlayerID) && skippedPlayerIDs.length < activePlayerIDs.length) {
+    remainingSkips.splice(remainingSkips.indexOf(nextPlayerID), 1)
+    skippedPlayerIDs.push(nextPlayerID)
+    nextPlayerID = getNextActivePlayerID(nextPlayerID, state.seatOrder, state.round.direction, activePlayerIDs)
+  }
+
+  if (skippedPlayerIDs.length === 0) {
+    return naturalNextPlayerID
+  }
+
+  appendHistoryEvent(
+    state,
+    'system',
+    `${skippedPlayerIDs.map((playerID) => formatPlayerLabel(state, playerID)).join(', ')} skipped`,
+    `A revealed Skip took the turn away, so play passes to ${nextPlayerID ? formatPlayerLabel(state, nextPlayerID) : 'nobody'}.`,
+    null,
+    turnNumber,
+  )
+
+  return nextPlayerID ?? naturalNextPlayerID
+}
+
 function advanceTurn(state: BlowCowState, events: BlowCowEventsAPI, currentPlayerID: string, turnNumber: number) {
   const activePlayerIDs = getActivePlayerIDs(state)
   if (activePlayerIDs.length <= 1) {
@@ -3727,7 +4677,7 @@ function advanceTurn(state: BlowCowState, events: BlowCowEventsAPI, currentPlaye
     return
   }
 
-  const nextPlayerID = getNextActivePlayerID(currentPlayerID, state.seatOrder, state.round.direction, activePlayerIDs)
+  const nextPlayerID = resolveSkippedTurnHandover(state, currentPlayerID, activePlayerIDs, turnNumber)
   if (nextPlayerID) {
     events.endTurn({ next: nextPlayerID })
   }
@@ -3763,6 +4713,15 @@ function validateCommonPlay(
     return false
   }
 
+  /*
+   * The one place the trump-selecting play checks that the rank it was handed is a rank at all.
+   * Manipulate has always asked the same question of its own; this is what stops a client naming an
+   * action rank — or anything else — as trump, and it is why nothing downstream has to exclude them.
+   */
+  if (nextTrumpRank !== null && !isBlowCowRank(nextTrumpRank)) {
+    return false
+  }
+
   if (state.round.trumpRank === null && nextTrumpRank === null) {
     return false
   }
@@ -3771,8 +4730,10 @@ function validateCommonPlay(
     return false
   }
 
+  // Ante does not play the Rank Change Rule, so the same trump may open consecutive rounds.
   if (
     nextTrumpRank !== null
+    && !isAnteMode(state)
     && !isRuleRemoved(state, 'rankChange')
     && state.round.previousTrumpRank === nextTrumpRank
     && !canRepeatPreviousTrump(state, playerID, nextTrumpRank)
@@ -3788,7 +4749,10 @@ function validateCommonPlay(
     return false
   }
 
-  return canCheat(state, playerID)
+  // Nor the Max Cards On Table Rule: Ante's table has no cap, because a round ends on an empty hand
+  // rather than on a full table.
+  return isAnteMode(state)
+    || canCheat(state, playerID)
     || isRuleRemoved(state, 'maxCardsOnTable')
     || getTableCardCount(state.table) + cardIDs.length <= state.round.maxCardsOnTable
 }
@@ -4539,7 +5503,8 @@ function resolveMimic(context: BlowCowMoveContext) {
     turnNumber: ctx.turn,
     character: source.character,
     points: source.points,
-    pointRanks: source.scoredSets.map((scoredSet) => scoredSet.rank),
+    pointRanks: getPointScoringRanks(source.scoredSets),
+    gold: getPlayerGold(source),
     handCount: source.hand.length,
     wasSeekerPick: source.seekerPickedCharacter !== null,
     statuses: getPlayerStatuses(G, source.id).map((status) => ({ ...status })),
@@ -4897,6 +5862,7 @@ function resolveBS(context: BlowCowMoveContext, args?: BlowCowCallBSArgs) {
   }
 
   G.players[playerID].matchStats.callBSCount += 1
+  G.players[targetPlayerID].matchStats.bsTargetCount += 1
   clearMimicry(G)
   G.bsResolution = createBSResolution(G, playerID, targetPlayerID, targetPlay, trumpRank)
   G.tableStatus = `${formatPlayerLabel(G, playerID)} called BS on ${formatPlayerLabel(G, targetPlayerID)}. Resolving the table.`
@@ -5125,17 +6091,148 @@ function flipTurnRevealCard(play: BlowCowTablePlay, cardID: string) {
 }
 
 /**
+ * One action rank's effect, applied to the seats it counts out.
+ *
+ * All three take their targets the same way and take them independently of each other: each rank
+ * counts its own `count` seats from the revealer, so a Skip and a Peek turned up together open the
+ * hand of the very seat that is about to lose its turn. Nothing here consults what another rank did,
+ * which is what keeps the three from having to be resolved in a particular order.
+ */
+function applyRevealedSkips(state: BlowCowState, playerID: string, targetPlayerIDs: string[], turnNumber: number) {
+  state.round.skippedPlayerIDs = targetPlayerIDs
+  appendHistoryEvent(
+    state,
+    'action',
+    `${formatPlayerLabel(state, playerID)} skipped ${targetPlayerIDs.length} turn(s)`,
+    `Revealing Skip takes the next turn from ${targetPlayerIDs.map((targetPlayerID) => formatPlayerLabel(state, targetPlayerID)).join(', ')}.`,
+    playerID,
+    turnNumber,
+  )
+}
+
+function applyRevealedPeeks(state: BlowCowState, playerID: string, targetPlayerIDs: string[], turnNumber: number) {
+  state.handPeek = {
+    id: `peek-t${turnNumber}-p${playerID}`,
+    playerID,
+    targetPlayerIDs,
+    turnNumber,
+  }
+  // Public that a hand was opened, private what was in it — the same split a conspiracy is logged
+  // under, and for the same reason: the table is owed the fact, not the contents.
+  appendHistoryEvent(
+    state,
+    'action',
+    `${formatPlayerLabel(state, playerID)} looked at ${targetPlayerIDs.length} hand(s)`,
+    `Revealing Peek opened the hand of ${targetPlayerIDs.map((targetPlayerID) => formatPlayerLabel(state, targetPlayerID)).join(', ')}. What was in them is known only to the revealer.`,
+    playerID,
+    turnNumber,
+  )
+}
+
+function applyRevealedPlagues(
+  context: BlowCowMoveContext,
+  playerID: string,
+  targetPlayerIDs: string[],
+  turnNumber: number,
+) {
+  const { G, random } = context
+
+  for (const targetPlayerID of targetPlayerIDs) {
+    // Shuffled rather than indexed at random, because `Shuffle` is the only randomness this game
+    // takes — the same reason The Mime's coin flip is a shuffle of two entries.
+    const statusID = shuffleCards([...BLOW_COW_STATUS_IDS], random?.Shuffle)[0]
+    if (!statusID || !addPlayerStatus(G, targetPlayerID, statusID, BLOW_COW_PLAGUE_STATUS_TURNS)) {
+      /*
+       * The seat was full, or immune to the one that came up. Nothing is re-rolled: the card afflicts
+       * a random status, and a random status that will not land is a random status that did not land.
+       * Logged all the same, so the table can see the card did something rather than nothing.
+       */
+      appendHistoryEvent(
+        G,
+        'action',
+        `${formatPlayerLabel(G, targetPlayerID)} shrugged off a Plague`,
+        `${formatPlayerLabel(G, playerID)} revealed Plague, but the status it rolled could not be applied.`,
+        playerID,
+        turnNumber,
+      )
+      continue
+    }
+
+    appendHistoryEvent(
+      G,
+      'action',
+      `${formatPlayerLabel(G, targetPlayerID)} caught ${getStatusDefinition(statusID).title}`,
+      `${formatPlayerLabel(G, playerID)} revealed Plague, which afflicted ${formatPlayerLabel(G, targetPlayerID)} with ${getStatusDefinition(statusID).title} for ${BLOW_COW_PLAGUE_STATUS_TURNS} turn(s).`,
+      playerID,
+      turnNumber,
+    )
+  }
+}
+
+/**
+ * The action ranks, resolved the moment the Reveal Rule turns them face up — and only then. Every
+ * other way a card comes up (a BS walk, a Reset showdown, The Cat, an accusation) reaches the table
+ * without passing through here, which is what makes "revealed by the Reveal Rule" the whole trigger
+ * rather than a condition anything has to check.
+ *
+ * `cards` is what the reveal actually owed, so The Spy's single card triggers alone and the other one
+ * stays inert behind it.
+ */
+function applyRevealedSpecialCards(
+  context: BlowCowMoveContext,
+  playerID: string,
+  cards: readonly BlowCowCard[],
+  turnNumber: number,
+) {
+  const { G } = context
+  const revealedSpecialCards = cards.filter((card) => isSpecialCard(card))
+
+  if (revealedSpecialCards.length === 0) {
+    return
+  }
+
+  for (const specialRank of BLOW_COW_SPECIAL_RANKS) {
+    const matchingCards = revealedSpecialCards.filter((card) => card.rank === specialRank)
+    if (matchingCards.length === 0) {
+      continue
+    }
+
+    const targetPlayerIDs = getNextActivePlayerIDsInOrder(G, playerID, matchingCards.length)
+    if (targetPlayerIDs.length === 0) {
+      continue
+    }
+
+    if (specialRank === 'Skip') {
+      applyRevealedSkips(G, playerID, targetPlayerIDs, turnNumber)
+    } else if (specialRank === 'Peek') {
+      applyRevealedPeeks(G, playerID, targetPlayerIDs, turnNumber)
+    } else {
+      applyRevealedPlagues(context, playerID, targetPlayerIDs, turnNumber)
+    }
+
+    appendArchiveTurnAction(G, playerID, turnNumber, {
+      kind: 'revealedCardEffect',
+      detail: `Revealed ${matchingCards.length} ${specialRank} card(s), which resolved against ${targetPlayerIDs.map((targetPlayerID) => formatPlayerLabel(G, targetPlayerID)).join(', ')}.`,
+      cards: matchingCards,
+      targetPlayerID: targetPlayerIDs[0] ?? null,
+    })
+  }
+}
+
+/**
  * Writes what the Reveal Rule owed once every card of it is face up: the record on the play, the log
- * line, and the archive entry. The Spy's half deliberately stops at `revealedCardIDs` — their play is
- * not finished being hidden, which is the whole of the ability.
+ * line, the archive entry, and then whatever the cards that just turned over do. The Spy's half
+ * deliberately stops at `revealedCardIDs` — their play is not finished being hidden, which is the
+ * whole of the ability.
  */
 function completeTurnReveal(
-  state: BlowCowState,
+  context: BlowCowMoveContext,
   playerID: string,
   play: BlowCowTablePlay,
   reveal: BlowCowTurnReveal,
   turnNumber: number,
 ) {
+  const state = context.G
   if (!reveal.isFullReveal) {
     const revealedCards = play.cards.filter((card) => reveal.cardIDs.includes(card.id))
     const revealedLabels = revealedCards.map((card) => formatCardLabel(card)).join(', ')
@@ -5158,6 +6255,7 @@ function completeTurnReveal(
       claimedRank: play.claimedRank,
       remainingHiddenCardCount,
     })
+    applyRevealedSpecialCards(context, playerID, revealedCards, turnNumber)
     return
   }
 
@@ -5179,6 +6277,16 @@ function completeTurnReveal(
     claimedRank: play.claimedRank,
     remainingHiddenCardCount: 0,
   })
+  /*
+   * Last, and off `reveal.cardIDs` rather than off the whole pile: a card that was already face up
+   * when the turn began was not turned over by this rule, and only what this rule turns over goes off.
+   */
+  applyRevealedSpecialCards(
+    context,
+    playerID,
+    play.cards.filter((card) => reveal.cardIDs.includes(card.id)),
+    turnNumber,
+  )
 }
 
 /**
@@ -5228,7 +6336,7 @@ function openTurnReveal(context: BlowCowMoveContext, opening: BlowCowTurnOpening
     flipTurnRevealCard(play, cardID)
   }
 
-  completeTurnReveal(G, playerID, play, reveal, opening.turnNumber)
+  completeTurnReveal(context, playerID, play, reveal, opening.turnNumber)
   return null
 }
 
@@ -5311,9 +6419,24 @@ function finalizeTurnReveal(context: BlowCowMoveContext, args?: BlowCowFinalizeT
     return INVALID_MOVE
   }
 
-  completeTurnReveal(G, opening.playerID, play, reveal, opening.turnNumber)
+  completeTurnReveal(context, opening.playerID, play, reveal, opening.turnNumber)
   G.turnOpening = null
   G.tableStatus = buildTurnStatus(G, opening.playerID)
+}
+
+/**
+ * Closes the hands a Peek opened. Owner-only, and idempotent in the way that matters: a stale id from
+ * a client that pressed twice simply does not match.
+ */
+function dismissHandPeek(context: BlowCowMoveContext, args?: BlowCowDismissHandPeekArgs) {
+  const { G, playerID } = context
+  const peek = G.handPeek
+
+  if (!args || !peek || peek.id !== args.peekID || peek.playerID !== playerID) {
+    return INVALID_MOVE
+  }
+
+  G.handPeek = null
 }
 
 /**
@@ -5523,19 +6646,29 @@ function finalizeBSResolution(
   const verdictDetail = targetVerdict.targetWasHonest
     ? `${formatPlayerLabel(G, resolution.targetPlayerID)} was honest. ${outcomeDetail}`
     : `${formatPlayerLabel(G, resolution.targetPlayerID)} was dishonest.${cardLieDetail} ${outcomeDetail}`
-  const punishmentScoredSets = addCardsToPlayerHand(
-    G,
-    punishment.punishedPlayerID,
-    punishmentCards,
-    'punishment',
-    ctx.turn,
-    { deferPointHistory: true },
-  )
+  /*
+   * The one place the two modes part company inside a BS resolution. Everything above is shared —
+   * the reveal walk, the verdict, the Reverse Rule — and everything it decides still applies. What
+   * differs is the punishment: Ante moves no cards at all, so the table is simply gathered into the
+   * next round's deal and the loser pays a gold instead. See `endAnteRound`.
+   */
+  const punishmentScoredSets = isAnteMode(G)
+    ? []
+    : addCardsToPlayerHand(
+        G,
+        punishment.punishedPlayerID,
+        punishmentCards,
+        'punishment',
+        ctx.turn,
+        { deferPointHistory: true },
+      )
 
   G.players[punishment.punishedPlayerID].matchStats.punishmentCount += 1
   G.players[punishment.punishedPlayerID].wasPunishedThisRound = true
   if (punishment.unpunishedPlayerID === resolution.callerPlayerID) {
     G.players[resolution.callerPlayerID].matchStats.bsWinCount += 1
+  } else if (punishment.unpunishedPlayerID === resolution.targetPlayerID) {
+    G.players[resolution.targetPlayerID].matchStats.bsTargetWinCount += 1
   }
 
   appendHistoryEvent(
@@ -5557,8 +6690,12 @@ function finalizeBSResolution(
   appendHistoryEvent(
     G,
     'punishment',
-    `${formatPlayerLabel(G, punishment.punishedPlayerID)} took ${punishmentCards.length} card(s)`,
-    `Took ${punishmentLabels.join(', ')}. Revealed play: ${revealedTargetLabels.join(', ')}.`,
+    isAnteMode(G)
+      ? `${formatPlayerLabel(G, punishment.punishedPlayerID)} lost the BS call`
+      : `${formatPlayerLabel(G, punishment.punishedPlayerID)} took ${punishmentCards.length} card(s)`,
+    isAnteMode(G)
+      ? `No cards changed hands. Revealed play: ${revealedTargetLabels.join(', ')}.`
+      : `Took ${punishmentLabels.join(', ')}. Revealed play: ${revealedTargetLabels.join(', ')}.`,
     punishment.punishedPlayerID,
     ctx.turn,
   )
@@ -5579,6 +6716,19 @@ function finalizeBSResolution(
   })
   appendPointHistoryEvents(G, punishment.punishedPlayerID, punishmentScoredSets, ctx.turn)
 
+  if (isAnteMode(G)) {
+    // The one ending with a challenger, so the only one that moves `callsMade`/`callsWon`. The
+    // caller wins the round exactly when the target was lying, which is what `callsWon` counts.
+    endAnteRound(
+      context,
+      punishment.unpunishedPlayerID,
+      punishment.punishedPlayerID,
+      `${formatPlayerLabel(G, resolution.callerPlayerID)} called BS on ${formatPlayerLabel(G, resolution.targetPlayerID)}.`,
+      resolution.callerPlayerID,
+    )
+    return
+  }
+
   beginNextRound(
     G,
     punishment.unpunishedPlayerID,
@@ -5593,6 +6743,16 @@ function finalizeBSResolution(
 
 function resolveReset(context: BlowCowMoveContext) {
   const { G, ctx, playerID } = context
+  /*
+   * Ante has no Call Reset. It existed to recycle a full table, and Ante's table has no limit to
+   * reach: a round ends as soon as any hand is empty at the start of its owner's turn, so the table
+   * can never grow past what the deck holds. Refused here rather than removed as a rule card, because
+   * Ante does not use the rule card system — see `isAnteMode`.
+   */
+  if (isAnteMode(G)) {
+    return INVALID_MOVE
+  }
+
   if (G.gameStatus !== 'active' || isProcedureRunning(G) || ctx.currentPlayer !== playerID || isAwaitingTurnTake(G, playerID) || getTableCardCount(G.table) < G.round.maxCardsOnTable) {
     return INVALID_MOVE
   }
@@ -5723,6 +6883,36 @@ function resolveResetShowdown(
   }
 }
 
+/**
+ * The Continue at the end of an Ante round-end walk. Both kinds land here and both settle the same
+ * way, because the walk decided nothing: the winner was named the moment the round ended, and this is
+ * only the table finding out what the plays behind it were.
+ *
+ * The history line is written here rather than at the pass or the turn start for the reason
+ * `returnCardsAfterAllPass` writes its own here: until the last card is face up the round is still
+ * running, and a log that already said it was over would be describing a table nobody had seen yet.
+ */
+function endAnteRoundAfterReveal(context: BlowCowMoveContext, resolution: BlowCowResetResolution) {
+  const { G, ctx } = context
+  const winnerPlayerID = resolution.callerPlayerID
+  const winnerLabel = formatPlayerLabel(G, winnerPlayerID)
+
+  if (resolution.kind === 'antePassEnding') {
+    appendHistoryEvent(
+      G,
+      'action',
+      `${winnerLabel} passed`,
+      `Everyone passed, so the round ended and ${winnerLabel} won it by passing last.`,
+      winnerPlayerID,
+      ctx.turn,
+    )
+    endAnteRound(context, winnerPlayerID, null, `Every player passed and ${winnerLabel} passed last.`)
+    return
+  }
+
+  endAnteRound(context, winnerPlayerID, null, `${winnerLabel} started the turn with an empty hand.`)
+}
+
 function finalizeResetResolution(
   context: BlowCowMoveContext,
   args?: BlowCowFinalizeResetResolutionArgs,
@@ -5741,6 +6931,10 @@ function finalizeResetResolution(
 
    if (resolution.kind === 'roundReturn') {
     return returnCardsAfterAllPass(context)
+  }
+
+  if (resolution.kind === 'antePassEnding' || resolution.kind === 'anteEmptyHand') {
+    return endAnteRoundAfterReveal(context, resolution)
   }
 
   if (resolution.showdown) {
@@ -5826,13 +7020,22 @@ function hideSecretState(state: BlowCowState, playerID: string | null) {
    * conspiracy always names a seat, so no unseated viewer can match this.
    */
   const conspiracy = state.conspiracy?.playerID === playerID ? state.conspiracy : null
+  /*
+   * The other hands a player may see, and the same scoping for the same reason: a Peek is public as a
+   * fact and private as a reading, so every seat but the revealer's keeps the masked copy. This is
+   * what actually enforces the ability — the panel on the revealer's client is a view of what they
+   * were sent, not a promise about what they were sent.
+   */
+  const handPeek = state.handPeek?.playerID === playerID ? state.handPeek : null
 
   const nextPlayers = Object.fromEntries(
     Object.entries(state.players).map(([targetPlayerID, player]) => [
       targetPlayerID,
       {
         ...player,
-        hand: playerID === targetPlayerID || conspiracy?.targetPlayerID === targetPlayerID
+        hand: playerID === targetPlayerID
+          || conspiracy?.targetPlayerID === targetPlayerID
+          || handPeek?.targetPlayerIDs.includes(targetPlayerID)
           ? player.hand
           : player.hand.map((card) => createHiddenCard(card)),
         /*
@@ -5925,6 +7128,7 @@ function createStagedBlowCowState(
     BLOW_COW_MAX_PLAYERS,
     Math.max(BLOW_COW_MIN_PLAYERS, numPlayers),
   )
+  const gameMode = resolveGameMode(setupData)
   const deckConfig = resolveDeckConfig(normalizedPlayerCount, setupData, shuffle)
   const speedMultiplier = resolveSpeedMultiplier(setupData)
   const useCharacters = resolveUseCharacters(setupData)
@@ -5932,6 +7136,8 @@ function createStagedBlowCowState(
   const rules = resolveRules(setupData)
   const initialStatuses = resolveInitialStatuses(setupData)
   const initialStatusTurns = resolveInitialStatusTurns(setupData)
+  const roundLimit = resolveRoundLimit(setupData)
+  const startingGold = resolveStartingGold(setupData)
   const seatOrder = createSeatOrder(normalizedPlayerCount)
   const hostPlayerID = seatOrder[0] ?? '0'
   const history: BlowCowHistoryEvent[] = []
@@ -5939,6 +7145,9 @@ function createStagedBlowCowState(
     tableStatus: `Waiting for the host to start the game once all ${normalizedPlayerCount} seat(s) are filled.`,
     gameStatus: 'staging',
     hostPlayerID,
+    gameMode,
+    roundLimit,
+    startingGold,
     deckConfig,
     speedMultiplier,
     useCharacters,
@@ -5962,6 +7171,7 @@ function createStagedBlowCowState(
       lastNonPassingPlayerID: null,
       forcedPlayPlayerID: null,
       startedTurnNumber: null,
+      skippedPlayerIDs: [],
       maxCardsOnTable: getMaxCardsOnTable(normalizedPlayerCount),
     },
     table: {
@@ -5977,6 +7187,7 @@ function createStagedBlowCowState(
     mimicry: null,
     encore: null,
     turnOpening: null,
+    handPeek: null,
     emotes: [],
     emoteSequence: 0,
     history,
@@ -5991,7 +7202,9 @@ function createStagedBlowCowState(
     state,
     'system',
     'Room staged',
-    `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, ${formatRulesSummary(rules)}, ${formatInitialStatusesSummary(initialStatuses, initialStatusTurns)}, and is waiting for the host to start the match.`,
+    gameMode === 'ante'
+      ? `Prepared ${normalizedPlayerCount} seat(s) for Ante Mode over ${roundLimit} round(s), started everyone on ${startingGold} gold, selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${speedMultiplier}x, and is waiting for the host to start the match.`
+      : `Prepared ${normalizedPlayerCount} seat(s), selected ${deckConfig.selectedRanks.length} standard rank(s) (${deckConfig.selectedRanks.join(', ')}), included 2 Jokers, ${formatSpecialRanksSummary(deckConfig.specialRanks)}, set game speed to ${speedMultiplier}x, ${useCharacters ? 'enabled character cards' : 'disabled character cards'}, ${formatRulesSummary(rules)}, ${formatInitialStatusesSummary(initialStatuses, initialStatusTurns)}, and is waiting for the host to start the match.`,
     null,
     0,
   )
@@ -6000,12 +7213,22 @@ function createStagedBlowCowState(
 }
 
 function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: BlowCowShuffle) {
+  const isAnte = isAnteMode(state)
   const shuffledSeatOrder = shuffleCards([...state.seatOrder], shuffle)
-  const shuffledDeck = shuffleCards(createDeck(state.deckConfig.selectedRanks), shuffle)
+  /*
+   * Ante deals from `dealAnteRound` instead, once the starting player is settled below: its deal is
+   * ordered by turn order rather than by seat order, because that is what decides which seats take
+   * the remainder. Nothing is built here for it, so nothing has to be thrown away.
+   */
+  const shuffledDeck = isAnte
+    ? []
+    : shuffleCards(createDeck(state.deckConfig.selectedRanks, state.deckConfig.specialRanks ?? []), shuffle)
   const assignedCharacters = state.useCharacters
     ? assignRandomImplementedCharacters(shuffledSeatOrder.length, state.deckConfig.selectedRanks, state.characterPool, shuffle)
     : []
-  const dealtHands = dealCards(shuffledDeck, shuffledSeatOrder)
+  const dealtHands = isAnte
+    ? ({} as Record<string, BlowCowCard[]>)
+    : dealCards(shuffledDeck, shuffledSeatOrder)
   const seatIndexByPlayerID = new Map(shuffledSeatOrder.map((playerID, seatIndex) => [playerID, seatIndex]))
   const characterByPlayerID = new Map(shuffledSeatOrder.map((playerID, index) => [playerID, assignedCharacters[index] ?? null]))
 
@@ -6024,6 +7247,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.mimicry = null
   state.encore = null
   state.turnOpening = null
+  state.handPeek = null
   state.emotes = []
   state.emoteSequence = 0
   state.round.roundNumber = 1
@@ -6037,6 +7261,7 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   state.round.lastNonPassingPlayerID = null
   state.round.forcedPlayPlayerID = null
   state.round.startedTurnNumber = null
+  state.round.skippedPlayerIDs = []
   state.round.maxCardsOnTable = getMaxCardsOnTable(shuffledSeatOrder.length)
   state.tableStatus = INITIAL_TABLE_STATUS
   state.telemetry = {
@@ -6047,11 +7272,15 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
 
   for (const [playerID, player] of Object.entries(state.players)) {
     player.character = characterByPlayerID.get(playerID) ?? null
-    const scoredHand = scoreHand(dealtHands[playerID] ?? [], playerID, 'initialDeal', 1, turnNumber)
+    const scoredHand = doesMatchScorePoints(state)
+      ? scoreHand(dealtHands[playerID] ?? [], playerID, 'initialDeal', 1, turnNumber)
+      : { remainingHand: [] as BlowCowCard[], scoredSets: [] as BlowCowScoredSet[], pointsAwarded: 0 }
 
     player.seatIndex = seatIndexByPlayerID.get(playerID) ?? player.seatIndex
     player.hand = scoredHand.remainingHand
     player.points = scoredHand.pointsAwarded
+    // Ante's purse is a dial the host turned; a classic match's is the untouched constant.
+    player.gold = isAnte ? getAnteStartingGold(state) : BLOW_COW_STARTING_GOLD
     player.scoredSets = scoredHand.scoredSets
     player.matchStats = createInitialPlayerMatchStats()
     player.pendingRevealPlayID = null
@@ -6082,13 +7311,18 @@ function startMatchState(state: BlowCowState, turnNumber: number, shuffle?: Blow
   }
 
   state.round.startingPlayerID = getDefaultStartingPlayerID(state, shuffledSeatOrder[0] ?? state.hostPlayerID) ?? state.hostPlayerID
+  // After the starting player is settled, because Ante's deal is ordered from that seat, and before
+  // the archive snapshot, so it records the hands that were actually dealt.
+  const anteDealtCardCount = isAnte ? dealAnteRound(state, shuffle) : 0
   state.archive.initial = createInitialArchiveState(state)
 
   appendHistoryEvent(
     state,
     'system',
     'Match initialized',
-    `Shuffled ${shuffledSeatOrder.length} seat(s), selected ${state.deckConfig.selectedRanks.length} standard rank(s) (${state.deckConfig.selectedRanks.join(', ')}), included 2 Jokers, set game speed to ${state.speedMultiplier}x, dealt opening hands, ${state.useCharacters ? 'assigned character cards' : 'left character cards disabled'}, ${formatInitialStatusesSummary(state.initialStatuses ?? [], state.initialStatusTurns ?? DEFAULT_BLOW_COW_STATUS_TURNS)}, and ${formatPlayerLabel(state, state.round.startingPlayerID)} will act first.`,
+    isAnte
+      ? `Shuffled ${shuffledSeatOrder.length} seat(s), started everyone on ${getAnteStartingGold(state)} gold for ${getRoundLimit(state)} round(s), dealt all ${anteDealtCardCount} card(s) from ${state.deckConfig.selectedRanks.length} standard rank(s) (${state.deckConfig.selectedRanks.join(', ')}) plus 2 Jokers, set game speed to ${state.speedMultiplier}x, and ${formatPlayerLabel(state, state.round.startingPlayerID)} will act first.`
+      : `Shuffled ${shuffledSeatOrder.length} seat(s), selected ${state.deckConfig.selectedRanks.length} standard rank(s) (${state.deckConfig.selectedRanks.join(', ')}), included 2 Jokers, ${formatSpecialRanksSummary(state.deckConfig.specialRanks)}, set game speed to ${state.speedMultiplier}x, dealt opening hands, ${state.useCharacters ? 'assigned character cards' : 'left character cards disabled'}, ${formatInitialStatusesSummary(state.initialStatuses ?? [], state.initialStatusTurns ?? DEFAULT_BLOW_COW_STATUS_TURNS)}, and ${formatPlayerLabel(state, state.round.startingPlayerID)} will act first.`,
     null,
     turnNumber,
   )
@@ -6228,8 +7462,20 @@ export const BlowCowGame = {
     revealTurnCard: (context: BlowCowMoveContext, args: BlowCowRevealTurnCardArgs) => {
       return revealTurnCard(context, args)
     },
-    finalizeTurnReveal: (context: BlowCowMoveContext, args: BlowCowFinalizeTurnRevealArgs) => {
-      return finalizeTurnReveal(context, args)
+    finalizeTurnReveal: {
+      /*
+       * Server-only for the same two reasons `takeTurn` above it is. The action ranks resolve here:
+       * a Plague rolls its status out of `random`, and a Peek unmasks hands the client's own copy of
+       * `G` does not hold. A locally predicted run would roll a different status and open a hand of
+       * card backs, and then be corrected on both.
+       */
+      client: false,
+      move: (context: BlowCowMoveContext, args: BlowCowFinalizeTurnRevealArgs) => {
+        return finalizeTurnReveal(context, args)
+      },
+    },
+    dismissHandPeek: (context: BlowCowMoveContext, args: BlowCowDismissHandPeekArgs) => {
+      return dismissHandPeek(context, args)
     },
     selectTrumpAndPlay: {
       redact: true,
@@ -6341,6 +7587,62 @@ export const BlowCowGame = {
 
       G.players[playerID].matchStats.passCount += 1
       G.round.passStreak += 1
+
+      /*
+       * Ante's second ending. The trigger and the player it singles out are the classic Pass Ending
+       * Rule unchanged — `n` in a row, and the last of them — but there are no cards to take back
+       * because the whole deck is redealt, and that player wins the round outright rather than merely
+       * starting the next one.
+       *
+       * The reveal walk is offered on the same terms as `Ending 3`'s and is almost never taken up:
+       * reaching `n` means every seat has had a turn since its last play, so the Reveal Rule has
+       * already opened the whole table and `beginAnteRoundEndReveal` refuses an empty walk. It is here
+       * so this ending finishes the same way the other two do wherever a card is somehow still down,
+       * not because there is normally one.
+       *
+       * The classic rule's guard about who has played is not needed here. Reaching `n` means every
+       * seat still in the game chose to pass, so the round can never be handed to somebody who has
+       * not acted — which is exactly what an `n - 1` trigger would have allowed.
+       */
+      if (isAnteMode(G) && G.round.passStreak >= getActivePlayerCount(G)) {
+        appendArchiveTurnAction(G, playerID, ctx.turn, {
+          kind: 'pass',
+          detail: `Passed last of ${getActivePlayerCount(G)} consecutive passes, which ended the round.`,
+          passStreak: G.round.passStreak,
+          endedRound: true,
+        })
+
+        if (beginAnteRoundEndReveal(G, playerID, 'antePassEnding')) {
+          // Telemetry now and history at the finalize, exactly as the classic all-pass return splits
+          // them: the round is not over until the last card is face up.
+          appendTelemetryEvent(
+            G,
+            'action',
+            `${formatPlayerLabel(G, playerID)} ended the round with a pass`,
+            'Everyone passed, so the round ends once the table is face up.',
+            playerID,
+            ctx.turn,
+          )
+          return
+        }
+
+        appendHistoryEvent(
+          G,
+          'action',
+          `${formatPlayerLabel(G, playerID)} passed`,
+          `Everyone passed, so the round ended and ${formatPlayerLabel(G, playerID)} won it by passing last.`,
+          playerID,
+          ctx.turn,
+        )
+        endAnteRound(
+          context,
+          playerID,
+          null,
+          `Every player passed and ${formatPlayerLabel(G, playerID)} passed last.`,
+        )
+        return
+      }
+
       if (!isRuleRemoved(G, 'passEnding') && G.round.passStreak >= getActivePlayerCount(G)) {
         clearMimicry(G)
         G.resetResolution = createResetResolution(G, playerID, 'roundReturn')

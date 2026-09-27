@@ -1,4 +1,6 @@
 import { CARD_BACK_FILENAME, getCardLabel, getFrontCardSprite } from './cardSprites.ts'
+import { getSpecialRankEffect, getSpecialRankFromSprite } from './specialRankInfo.ts'
+import { useTooltip } from './tooltipContext.ts'
 import type { FrontCard } from './boardTypes.ts'
 
 type FrontCardRowProps = {
@@ -27,6 +29,8 @@ export function FrontCardRow({
   registerFrontCard,
   seatName,
 }: FrontCardRowProps) {
+  const tooltip = useTooltip()
+
   // An empty row renders nothing. `.seat-front-cards` keeps its min-height, so blocks stay
   // the same size and the ring radii (which assume a fixed block height) do not shift.
   if (cards.length === 0) {
@@ -36,6 +40,13 @@ export function FrontCardRow({
   return (
     <div className="front-card-row">
       {cards.map((card) => {
+        /*
+         * Read off the sprite this card actually draws rather than off the play behind it, so a card
+         * that is face down — or swapped for `unknown.png` by Blind — explains nothing. What the
+         * viewer cannot see, they cannot hover.
+         */
+        const shownSprite = card.faceDown ? CARD_BACK_FILENAME : card.sprite
+        const shownSpecialRank = getSpecialRankFromSprite(shownSprite)
         const takeBackLabel = `Palm ${getCardLabel(card.sprite)} back into your hand`
         const catHideLabel = `Use The Cat to flip ${getCardLabel(card.sprite)} face down`
         const revealLabel = `Reveal ${seatName}'s hidden card`
@@ -65,6 +76,22 @@ export function FrontCardRow({
               onRevealCard(card.cardID)
             }
           : undefined
+        /*
+         * Opened only when there is something to add: the card's own face already says what an
+         * ordinary, unclickable card is. The two halves stack — what the card does on reveal, then
+         * what clicking it would do — so a Peek a Cat could flip says both.
+         */
+        const cardTooltip = shownSpecialRank || actionLabel
+          ? {
+              title: getCardLabel(shownSprite),
+              description: (
+                <>
+                  {shownSpecialRank ? <span>{getSpecialRankEffect(shownSpecialRank)}</span> : null}
+                  {actionLabel ? <span className="tooltip-action-note">{actionLabel}</span> : null}
+                </>
+              ),
+            }
+          : null
 
         return (
           <div
@@ -85,11 +112,11 @@ export function FrontCardRow({
             }}
             role={onAction ? 'button' : undefined}
             tabIndex={onAction ? 0 : undefined}
-            title={actionLabel}
+            {...tooltip(cardTooltip)}
           >
             <img
               alt={card.faceDown ? 'Face-down card' : getCardLabel(card.sprite)}
-              src={getFrontCardSprite(card.faceDown ? CARD_BACK_FILENAME : card.sprite)}
+              src={getFrontCardSprite(shownSprite)}
             />
           </div>
         )

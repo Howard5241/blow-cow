@@ -75,7 +75,7 @@ export const BLOW_COW_RULE_DEFINITIONS: readonly BlowCowRuleDefinition[] = [
     id: 'maxCardsOnTable',
     title: 'Max Cards On Table Rule',
     description:
-      'The table holds at most MaxCardsOnTable cards, set by how many players are still in the game: 2 players 10, 3 or 4 players 12, 5 players 15, 6 players 12, 7 players 14, 8 players 16. You may not play cards that would push the table past it.',
+      'The table holds at most MaxCardsOnTable cards, set by how many players are still in the game: 2 players 10, 3 or 4 players 12, 5 players 10, 6 players 12, 7 players 14, 8 players 16. You may not play cards that would push the table past it.',
     removedDescription:
       'The table has no limit, and a play may push it to any size. Call Reset still unlocks at the original limit.',
     upgradedDescription: 'MaxCardsOnTable is doubled for every player count.',

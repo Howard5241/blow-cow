@@ -1,3 +1,4 @@
+import { useTooltip } from './tooltipContext.ts'
 import type { SeatStatus } from './boardTypes.ts'
 
 type SeatStatusColumnProps = {
@@ -8,12 +9,15 @@ type SeatStatusColumnProps = {
  * The status effects a seat is under, stacked to the right of its avatar with the turns left in the
  * corner of each sprite.
  *
- * Hovering the column opens one panel for the whole stack rather than one tooltip per icon, so a
- * player reads everything holding a seat back in a single glance. The panel is placed by CSS off the
- * block's `data-seat-half`, which points it at the hub — the same trick the seat action bubble uses,
- * and the reason nothing here has to measure the viewport to stay on screen.
+ * Hovering the column opens one tooltip for the whole stack rather than one per icon, so a player
+ * reads everything holding a seat back in a single glance. It used to place that panel itself, with a
+ * set of `[data-seat-half]` rules pointing it at the hub so it stayed on screen at every seat angle;
+ * the shared layer measures the viewport instead, so all of that is gone and the rows are the only
+ * thing left here.
  */
 export function SeatStatusColumn({ statuses }: SeatStatusColumnProps) {
+  const tooltip = useTooltip()
+
   if (statuses.length === 0) {
     return null
   }
@@ -30,16 +34,9 @@ export function SeatStatusColumn({ statuses }: SeatStatusColumnProps) {
         event.stopPropagation()
       }}
       tabIndex={0}
-    >
-      {statuses.map((status) => (
-        <span className="seat-status-badge" key={status.id}>
-          <img alt={status.title} src={status.sprite} />
-          <span className="seat-status-count">{status.turnsRemaining}</span>
-        </span>
-      ))}
-
-      <span className="seat-status-tooltip" role="tooltip">
-        {statuses.map((status) => (
+      {...tooltip({
+        title: statuses.length === 1 ? 'Status' : 'Statuses',
+        description: statuses.map((status) => (
           <span className="seat-status-tooltip-row" key={status.id}>
             <img alt="" className="seat-status-tooltip-sprite" src={status.sprite} />
             <span className="seat-status-tooltip-copy">
@@ -52,8 +49,15 @@ export function SeatStatusColumn({ statuses }: SeatStatusColumnProps) {
               <span className="seat-status-tooltip-description">{status.description}</span>
             </span>
           </span>
-        ))}
-      </span>
+        )),
+      })}
+    >
+      {statuses.map((status) => (
+        <span className="seat-status-badge" key={status.id}>
+          <img alt={status.title} src={status.sprite} />
+          <span className="seat-status-count">{status.turnsRemaining}</span>
+        </span>
+      ))}
     </div>
   )
 }

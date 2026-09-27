@@ -7,21 +7,36 @@ import {
   ACTIVE_ROOM_STORAGE_KEY,
   GAME_NAME,
   GAME_SERVER_URL,
-  GAME_TITLE,
   PLAYER_NAME_STORAGE_KEY,
 } from './config.ts'
+import { useBotSeats } from './bots/useBotSeats.ts'
 import {
   BLOW_COW_SPEED_MULTIPLIERS,
   BLOW_COW_RANKS,
+  BLOW_COW_SPECIAL_RANKS,
   BlowCowGame,
   DEFAULT_BLOW_COW_SPEED_MULTIPLIER,
-  getDefaultStandardRankCount,
+  getStandardRankCountForMode,
   validateBlowCowSetupData,
   type BlowCowRank,
   type BlowCowRankSelectionMode,
+  type BlowCowSpecialRank,
   type BlowCowSpeedMultiplier,
   type BlowCowSetupData,
 } from './game/blowCowGame.ts'
+import {
+  BLOW_COW_GAME_MODES,
+  BLOW_COW_GAME_MODE_DESCRIPTIONS,
+  BLOW_COW_GAME_MODE_LABELS,
+  DEFAULT_BLOW_COW_ANTE_STARTING_GOLD,
+  DEFAULT_BLOW_COW_GAME_MODE,
+  DEFAULT_BLOW_COW_ROUND_LIMIT,
+  MAX_BLOW_COW_ANTE_STARTING_GOLD,
+  MAX_BLOW_COW_ROUND_LIMIT,
+  MIN_BLOW_COW_ANTE_STARTING_GOLD,
+  MIN_BLOW_COW_ROUND_LIMIT,
+  type BlowCowGameMode,
+} from './game/blowCowAnte.ts'
 import {
   BLOW_COW_IMPLEMENTED_CHARACTER_NAMES,
   type BlowCowImplementedCharacterName,
@@ -42,6 +57,9 @@ import {
   MAX_BLOW_COW_STATUS_TURNS,
   type BlowCowStatusID,
 } from './game/blowCowStatuses.ts'
+import { SPECIAL_RANK_ICON_SPRITES } from './ui/iconSprites.ts'
+import { getSpecialRankTooltip } from './ui/specialRankInfo.ts'
+import { useTooltip } from './ui/tooltipContext.ts'
 import { getStatusSprite } from './ui/statusSprites.ts'
 import { getCharacterCardSpriteFrames } from './ui/characterCardSprites.ts'
 import { getRoomClearBlockReason, hasRoomGameEnded } from './lobbyRooms.ts'
@@ -274,6 +292,8 @@ function sortSelectedCharacterPool(selectedCharacterPool: BlowCowImplementedChar
 }
 
 function App() {
+  /** Builds trigger props for the shared tooltip layer. See `src/ui/Tooltip.tsx`. */
+  const tooltip = useTooltip()
   const [playerName, setPlayerName] = useState(
     () => window.localStorage.getItem(PLAYER_NAME_STORAGE_KEY) ?? '',
   )
@@ -283,6 +303,11 @@ function App() {
   const [useCharacters, setUseCharacters] = useState(true)
   const [rankSelectionMode, setRankSelectionMode] = useState<BlowCowRankSelectionMode>('default')
   const [manualSelectedRanks, setManualSelectedRanks] = useState<BlowCowRank[]>([])
+  /*
+   * The action ranks, off by default: a new room plays the vanilla deck and the host opts each one
+   * in. Independent of `rankSelectionMode`, which governs the standard thirteen alone.
+   */
+  const [selectedSpecialRanks, setSelectedSpecialRanks] = useState<BlowCowSpecialRank[]>([])
   const [selectedCharacterPool, setSelectedCharacterPool] = useState<BlowCowImplementedCharacterName[]>(
     () => [...BLOW_COW_IMPLEMENTED_CHARACTER_NAMES],
   )
@@ -300,12 +325,35 @@ function App() {
   // nothing in the game hands one out yet.
   const [selectedInitialStatuses, setSelectedInitialStatuses] = useState<BlowCowStatusID[]>([])
   const [initialStatusTurns, setInitialStatusTurns] = useState(DEFAULT_BLOW_COW_STATUS_TURNS)
+  /*
+   * Which game the room will play. It gates most of the form below it: Ante seats no characters, no
+   * rule cards, no statuses and no action ranks, so those four panels are simply not rendered for
+   * one, and the two dials that only Ante reads take their place.
+   */
+  const [gameMode, setGameMode] = useState<BlowCowGameMode>(DEFAULT_BLOW_COW_GAME_MODE)
+  const [roundLimit, setRoundLimit] = useState(DEFAULT_BLOW_COW_ROUND_LIMIT)
+  const [startingGold, setStartingGold] = useState(DEFAULT_BLOW_COW_ANTE_STARTING_GOLD)
   const [matches, setMatches] = useState<LobbyMatch[]>([])
   const [activeRoom, setActiveRoom] = useState<ActiveRoom | null>(readStoredActiveRoom)
   // A room that came from storage has to be proven to still exist; one this session just joined does
   // not, so a fresh start is verified before it begins.
   const [hasVerifiedStoredRoom, setHasVerifiedStoredRoom] = useState(() => activeRoom === null)
   const [activeRoomPlayers, setActiveRoomPlayers] = useState<LobbyPlayer[]>([])
+  /*
+   * Bot seats live here rather than in the board, because adding one is a lobby operation and the
+   * headless clients that play them must outlive any board render. See `src/bots/useBotSeats.ts`.
+   */
+  const {
+    addBot,
+    botError,
+    botSeats,
+    isBusy: isBotBusy,
+    refreshBot,
+    removeBot,
+    replaceBot,
+    resumeBot,
+    seatBot,
+  } = useBotSeats(activeRoom?.matchID ?? null, activeRoomPlayers.length || numPlayers)
   const [busyAction, setBusyAction] = useState<BusyAction>(null)
   /** The one room whose Clear button is armed. Only ever one, so arming another disarms the first. */
   const [pendingClearMatchID, setPendingClearMatchID] = useState<string | null>(null)
@@ -314,10 +362,13 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('Checking the lobby service...')
   const [errorMessage, setErrorMessage] = useState('')
 
-  const defaultRankCount = getDefaultStandardRankCount(numPlayers)
+  const isAnteMode = gameMode === 'ante'
+  const defaultRankCount = getStandardRankCountForMode(gameMode, numPlayers)
   const trimmedPlayerName = playerName.trim()
   const defaultDeckDescription = defaultRankCount === BLOW_COW_RANKS.length
     ? 'Use all 13 standard ranks and always include 2 Jokers.'
+    : isAnteMode
+    ? `Randomly select ${defaultRankCount} standard ranks and always include 2 Jokers. Ante re-derives this whenever a player is eliminated.`
     : `Randomly select ${defaultRankCount} standard ranks and always include 2 Jokers.`
   const isConfusedAvailableInManualDeck = rankSelectionMode !== 'manual' || manualSelectedRanks.includes('J')
   const effectiveCharacterPool = isConfusedAvailableInManualDeck
@@ -325,19 +376,36 @@ function App() {
     : selectedCharacterPool.filter((characterName) => characterName !== 'The Confused')
   const isUsingDefaultCharacterPool = effectiveCharacterPool.length === BLOW_COW_IMPLEMENTED_CHARACTER_NAMES.length
   const hasUnavailableConfusedSelection = !isConfusedAvailableInManualDeck && selectedCharacterPool.includes('The Confused')
-  const createRoomSetupData: BlowCowSetupData = {
-    rankSelectionMode,
-    ...(rankSelectionMode === 'manual' ? { selectedRanks: manualSelectedRanks } : {}),
-    speedMultiplier,
-    useCharacters,
-    ...(useCharacters && !isUsingDefaultCharacterPool ? { characterPool: effectiveCharacterPool } : {}),
-    // Omitted while every rule is active, the same way the full character pool is.
-    ...(isDefaultRulesSelection(selectedRuleStatuses) ? {} : { rules: selectedRuleStatuses }),
-    // Omitted entirely while nothing is selected, so an ordinary room's setup data is unchanged.
-    ...(selectedInitialStatuses.length > 0
-      ? { initialStatuses: selectedInitialStatuses, initialStatusTurns }
-      : {}),
-  }
+  /*
+   * Ante sends only what it plays. Everything the mode has no use for is omitted rather than sent and
+   * ignored, so a room's setup data reads as the game it is actually going to be — and the server
+   * forces the same four off anyway, so the two can never disagree about it.
+   */
+  const createRoomSetupData: BlowCowSetupData = isAnteMode
+    ? {
+        gameMode,
+        roundLimit,
+        startingGold,
+        rankSelectionMode,
+        ...(rankSelectionMode === 'manual' ? { selectedRanks: manualSelectedRanks } : {}),
+        speedMultiplier,
+      }
+    : {
+        // Omitted while it is the default, so a classic room's setup data is unchanged by Ante existing.
+        rankSelectionMode,
+        ...(rankSelectionMode === 'manual' ? { selectedRanks: manualSelectedRanks } : {}),
+        // Omitted while none are chosen, so an ordinary room's setup data is unchanged by this existing.
+        ...(selectedSpecialRanks.length > 0 ? { specialRanks: selectedSpecialRanks } : {}),
+        speedMultiplier,
+        useCharacters,
+        ...(useCharacters && !isUsingDefaultCharacterPool ? { characterPool: effectiveCharacterPool } : {}),
+        // Omitted while every rule is active, the same way the full character pool is.
+        ...(isDefaultRulesSelection(selectedRuleStatuses) ? {} : { rules: selectedRuleStatuses }),
+        // Omitted entirely while nothing is selected, so an ordinary room's setup data is unchanged.
+        ...(selectedInitialStatuses.length > 0
+          ? { initialStatuses: selectedInitialStatuses, initialStatusTurns }
+          : {}),
+      }
   const changedRuleDefinitions = BLOW_COW_RULE_DEFINITIONS
     .filter((definition) => selectedRuleStatuses[definition.id] !== 'active')
   const changedRuleCount = changedRuleDefinitions.length
@@ -347,7 +415,7 @@ function App() {
     .join(', ')
   const createRoomSetupError = validateBlowCowSetupData(createRoomSetupData)
   const isManualRankSelectionInvalid = rankSelectionMode === 'manual' && manualSelectedRanks.length < 2
-  const isCharacterPoolInvalid = useCharacters && effectiveCharacterPool.length < 1
+  const isCharacterPoolInvalid = !isAnteMode && useCharacters && effectiveCharacterPool.length < 1
 
   useEffect(() => {
     window.localStorage.setItem(PLAYER_NAME_STORAGE_KEY, playerName)
@@ -459,6 +527,10 @@ function App() {
 
   useEffect(() => {
     if (!activeRoom) {
+      // A one-shot clear of the roster on leaving a room, not a render-driven
+      // update: with no room left there is nothing to sync it from, and the
+      // stale list must not survive into the next room.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveRoomPlayers([])
       return
     }
@@ -474,11 +546,20 @@ function App() {
         }
 
         setActiveRoomPlayers(match.players as LobbyPlayer[])
+        /*
+         * This poll is the lobby health check for as long as a player is at a table. The effect above
+         * returns early while `activeRoom` is set, so without this `serverState` never leaves
+         * `checking` for anyone who reloaded straight into a room, and the toolbar pill reads
+         * "Checking Server" for the whole match. It says nothing about the match connection, which is
+         * the `Socket Connected` pill beside it and comes from boardgame.io's own client.
+         */
+        setServerState('online')
       } catch (error) {
         if (cancelled) {
           return
         }
 
+        setServerState('offline')
         setErrorMessage(getErrorMessage(error))
       }
     }
@@ -672,6 +753,12 @@ function App() {
       : sortSelectedRanks([...previousRanks, rank]))
   }
 
+  const toggleSpecialRank = (rank: BlowCowSpecialRank) => {
+    setSelectedSpecialRanks((previousRanks) => previousRanks.includes(rank)
+      ? previousRanks.filter((entry) => entry !== rank)
+      : BLOW_COW_SPECIAL_RANKS.filter((entry) => entry === rank || previousRanks.includes(entry)))
+  }
+
   const toggleCharacterPoolCharacter = (characterName: BlowCowImplementedCharacterName) => {
     setSelectedCharacterPool((previousCharacterPool) => {
       const previousEffectiveCharacterPool = isConfusedAvailableInManualDeck
@@ -756,10 +843,19 @@ function App() {
       <main className="app-shell table-mode">
         <section className="table-shell">
           <BlowCowClient
+            botError={botError}
+            botSeats={botSeats}
             credentials={activeRoom.credentials}
+            isBotBusy={isBotBusy}
             isLeaving={busyAction === 'leave'}
             matchID={activeRoom.matchID}
+            onAddBot={addBot}
             onLeaveRoom={handleLeaveRoom}
+            onRefreshBot={refreshBot}
+            onRemoveBot={removeBot}
+            onReplaceBot={replaceBot}
+            onResumeBot={resumeBot}
+            onSeatBot={seatBot}
             playerID={activeRoom.playerID}
             playerName={activeRoom.playerName}
             roomPlayers={activeRoomPlayers}
@@ -775,13 +871,9 @@ function App() {
   return (
     <main className="app-shell">
       <section className="hero-panel">
-        <p className="eyebrow">{GAME_TITLE} Multiplayer Lobby</p>
         <div className="hero-header">
           <div>
             <h1>Welcome to Blow Cow.</h1>
-            <p className="hero-copy">
-              Enter a display name, create a room, or join an existing one by code.
-            </p>
           </div>
           <span className={`status-pill ${serverState}`}>
             {getServerStateLabel(serverState)}
@@ -809,7 +901,6 @@ function App() {
         <article className="panel stack-gap">
           <div className="panel-header">
             <div>
-              <p className="panel-kicker">Player Setup</p>
               <h2>Enter Your Name</h2>
             </div>
             <span className="panel-badge">Required</span>
@@ -829,10 +920,42 @@ function App() {
           <form className="stack-gap" onSubmit={handleCreateRoom}>
             <div className="panel-header tight">
               <div>
-                <p className="panel-kicker">Create</p>
                 <h2>Start a New Room</h2>
               </div>
             </div>
+
+            {/*
+              * First control in the form, because it decides which of the ones below it exist. Every
+              * panel after Game Speed is conditional on it.
+              */}
+            <fieldset className="deck-mode-group">
+              <legend>Game Mode</legend>
+
+              <div className="deck-mode-options">
+                {BLOW_COW_GAME_MODES.map((mode) => (
+                  <label
+                    className={`deck-mode-option ${gameMode === mode ? 'active' : ''}`}
+                    key={mode}
+                    {...tooltip({
+                      title: `${BLOW_COW_GAME_MODE_LABELS[mode]} Mode`,
+                      description: BLOW_COW_GAME_MODE_DESCRIPTIONS[mode],
+                    })}
+                  >
+                    <input
+                      checked={gameMode === mode}
+                      name="game-mode"
+                      onChange={() => setGameMode(mode)}
+                      type="radio"
+                      value={mode}
+                    />
+                    <span className="deck-mode-title-wrap">
+                      <span className="deck-mode-title">{BLOW_COW_GAME_MODE_LABELS[mode]}</span>
+                      <span aria-hidden="true" className="deck-mode-help">?</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
 
             <label className="field">
               <span>Seats</span>
@@ -864,11 +987,75 @@ function App() {
               </select>
             </label>
 
+            {isAnteMode ? (
+              <div className="manual-rank-panel">
+                <div className="manual-rank-header">
+                  <div>
+                    <p className="panel-kicker">Ante</p>
+                    <h3>Rounds And Gold</h3>
+                    <p className="character-pool-copy">
+                      Every round is worth 1 gold. Only a lost BS call takes one, and a player who
+                      reaches 0 leaves the game.
+                    </p>
+                  </div>
+                </div>
+
+                <label className="field status-turns-field">
+                  <span>Rounds</span>
+                  <input
+                    disabled={isBusy}
+                    max={MAX_BLOW_COW_ROUND_LIMIT}
+                    min={MIN_BLOW_COW_ROUND_LIMIT}
+                    onChange={(event) => {
+                      const nextRoundLimit = Number(event.target.value)
+                      setRoundLimit(Number.isNaN(nextRoundLimit)
+                        ? DEFAULT_BLOW_COW_ROUND_LIMIT
+                        : Math.min(MAX_BLOW_COW_ROUND_LIMIT, Math.max(MIN_BLOW_COW_ROUND_LIMIT, nextRoundLimit)))
+                    }}
+                    type="number"
+                    value={roundLimit}
+                  />
+                </label>
+
+                <label className="field status-turns-field">
+                  <span>Starting Gold</span>
+                  <input
+                    disabled={isBusy}
+                    max={MAX_BLOW_COW_ANTE_STARTING_GOLD}
+                    min={MIN_BLOW_COW_ANTE_STARTING_GOLD}
+                    onChange={(event) => {
+                      const nextStartingGold = Number(event.target.value)
+                      setStartingGold(Number.isNaN(nextStartingGold)
+                        ? DEFAULT_BLOW_COW_ANTE_STARTING_GOLD
+                        : Math.min(
+                            MAX_BLOW_COW_ANTE_STARTING_GOLD,
+                            Math.max(MIN_BLOW_COW_ANTE_STARTING_GOLD, nextStartingGold),
+                          ))
+                    }}
+                    type="number"
+                    value={startingGold}
+                  />
+                </label>
+
+                <p className="room-note">
+                  Ante plays no characters, rule cards, statuses or action ranks, and keeps no points.
+                  The whole deck is redealt every round, and the deck shrinks as players are eliminated.
+                </p>
+              </div>
+            ) : null}
+
+            {isAnteMode ? null : (
             <fieldset className="deck-mode-group">
               <legend>Character Cards</legend>
 
               <div className="deck-mode-options">
-                <label className={`deck-mode-option ${useCharacters ? 'active' : ''}`}>
+                <label
+                  className={`deck-mode-option ${useCharacters ? 'active' : ''}`}
+                  {...tooltip({
+                    title: 'Characters Enabled',
+                    description: 'Randomly assign each player one public character card at match start.',
+                  })}
+                >
                   <input
                     checked={useCharacters}
                     name="use-characters"
@@ -880,12 +1067,15 @@ function App() {
                     <span className="deck-mode-title">Enabled</span>
                     <span aria-hidden="true" className="deck-mode-help">?</span>
                   </span>
-                  <span className="deck-mode-tooltip" role="tooltip">
-                    Randomly assign each player one public character card at match start.
-                  </span>
                 </label>
 
-                <label className={`deck-mode-option ${useCharacters ? '' : 'active'}`}>
+                <label
+                  className={`deck-mode-option ${useCharacters ? '' : 'active'}`}
+                  {...tooltip({
+                    title: 'Characters Disabled',
+                    description: 'Start the match without any character cards or character abilities.',
+                  })}
+                >
                   <input
                     checked={!useCharacters}
                     name="use-characters"
@@ -897,14 +1087,12 @@ function App() {
                     <span className="deck-mode-title">Disabled</span>
                     <span aria-hidden="true" className="deck-mode-help">?</span>
                   </span>
-                  <span className="deck-mode-tooltip" role="tooltip">
-                    Start the match without any character cards or character abilities.
-                  </span>
                 </label>
               </div>
             </fieldset>
+            )}
 
-            {useCharacters ? (
+            {!isAnteMode && useCharacters ? (
               <div className="manual-rank-panel">
                 <div className="manual-rank-header">
                   <div>
@@ -970,6 +1158,7 @@ function App() {
               </div>
             ) : null}
 
+            {isAnteMode ? null : (
             <div className="manual-rank-panel">
               <div className="manual-rank-header">
                 <div>
@@ -1003,11 +1192,13 @@ function App() {
                 </button>
               </div>
             </div>
+            )}
 
             {/*
               * A testing lever, and labelled as one. Nothing in the game inflicts a status yet, so
               * this is the only way to see one on the table.
               */}
+            {isAnteMode ? null : (
             <div className="manual-rank-panel">
               <div className="manual-rank-header">
                 <div>
@@ -1032,7 +1223,6 @@ function App() {
                   return (
                     <button
                       aria-pressed={isSelected}
-                      aria-describedby={`status-chip-tooltip-${definition.id}`}
                       className={`character-chip status-chip ${isSelected ? 'selected' : ''}`}
                       disabled={isBusy || isAtCap}
                       key={definition.id}
@@ -1040,16 +1230,10 @@ function App() {
                         toggleInitialStatus(definition.id)
                       }}
                       type="button"
+                      {...tooltip({ title: definition.title, description: definition.description })}
                     >
                       <img alt="" className="status-chip-sprite" src={getStatusSprite(definition.id)} />
                       {definition.title}
-                      <span
-                        className="character-chip-tooltip"
-                        id={`status-chip-tooltip-${definition.id}`}
-                        role="tooltip"
-                      >
-                        {definition.description}
-                      </span>
                     </button>
                   )
                 })}
@@ -1072,12 +1256,16 @@ function App() {
                 />
               </label>
             </div>
+            )}
 
             <fieldset className="deck-mode-group">
               <legend>Standard Ranks</legend>
 
               <div className="deck-mode-options">
-                <label className={`deck-mode-option ${rankSelectionMode === 'default' ? 'active' : ''}`}>
+                <label
+                  className={`deck-mode-option ${rankSelectionMode === 'default' ? 'active' : ''}`}
+                  {...tooltip({ title: 'Default Ranks', description: defaultDeckDescription })}
+                >
                   <input
                     checked={rankSelectionMode === 'default'}
                     name="rank-selection-mode"
@@ -1089,10 +1277,15 @@ function App() {
                     <span className="deck-mode-title">Default</span>
                     <span aria-hidden="true" className="deck-mode-help">?</span>
                   </span>
-                  <span className="deck-mode-tooltip" role="tooltip">{defaultDeckDescription}</span>
                 </label>
 
-                <label className={`deck-mode-option ${rankSelectionMode === 'manual' ? 'active' : ''}`}>
+                <label
+                  className={`deck-mode-option ${rankSelectionMode === 'manual' ? 'active' : ''}`}
+                  {...tooltip({
+                    title: 'Manual Ranks',
+                    description: 'Pick the exact standard ranks yourself. The 2 Jokers are always included.',
+                  })}
+                >
                   <input
                     checked={rankSelectionMode === 'manual'}
                     name="rank-selection-mode"
@@ -1103,9 +1296,6 @@ function App() {
                   <span className="deck-mode-title-wrap">
                     <span className="deck-mode-title">Manual</span>
                     <span aria-hidden="true" className="deck-mode-help">?</span>
-                  </span>
-                  <span className="deck-mode-tooltip" role="tooltip">
-                    Pick the exact standard ranks yourself. The 2 Jokers are always included.
                   </span>
                 </label>
               </div>
@@ -1145,6 +1335,53 @@ function App() {
                 </div>
               </div>
             ) : null}
+
+            {/*
+              * The action ranks, opted into one at a time and independently of the standard ranks
+              * above. The buttons carry their card icon rather than the rank's name: the icon is what
+              * a player will be looking at on the card itself, and the tooltip carries the effect.
+              */}
+            {isAnteMode ? null : (
+            <div className="special-rank-panel">
+              <div className="manual-rank-header">
+                <div>
+                  <p className="panel-kicker">Action Ranks</p>
+                  <h3>Add Action Cards</h3>
+                </div>
+                <span className="rank-selection-count">
+                  {selectedSpecialRanks.length} selected
+                </span>
+              </div>
+
+              <div className="special-rank-grid">
+                {BLOW_COW_SPECIAL_RANKS.map((rank) => {
+                  const isSelected = selectedSpecialRanks.includes(rank)
+
+                  return (
+                    <button
+                      aria-label={rank}
+                      aria-pressed={isSelected}
+                      className={`special-rank-chip ${isSelected ? 'selected' : ''}`}
+                      disabled={isBusy}
+                      key={rank}
+                      onClick={() => {
+                        toggleSpecialRank(rank)
+                      }}
+                      type="button"
+                      {...tooltip(getSpecialRankTooltip(rank))}
+                    >
+                      <img alt="" src={SPECIAL_RANK_ICON_SPRITES[rank]} />
+                    </button>
+                  )
+                })}
+              </div>
+
+              <p className="room-note">
+                Four of each chosen rank join the deck. They can never be trump, four of a kind still
+                leaves the hand but pays no point, and each one acts when the Reveal Rule turns it up.
+              </p>
+            </div>
+            )}
 
             <button className="primary-button" disabled={isBusy || Boolean(createRoomSetupError)} type="submit">
               {busyAction === 'create' ? 'Creating Room...' : 'Create Room'}

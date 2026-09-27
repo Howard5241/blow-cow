@@ -312,34 +312,6 @@
   font-weight: 800;
 }
 
-.deck-mode-tooltip {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: 0;
-  z-index: 6;
-  width: min(260px, calc(100vw - 72px));
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 206, 92, 0.18);
-  background: rgba(4, 14, 12, 0.96);
-  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28);
-  color: var(--soft-cream);
-  font-size: 0.84rem;
-  line-height: 1.4;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateY(-4px);
-  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
-}
-
-.deck-mode-option:hover .deck-mode-tooltip,
-.deck-mode-option:focus-within .deck-mode-tooltip {
-  opacity: 1;
-  visibility: visible;
-  transform: translateY(0);
-}
-
 .manual-rank-panel {
   display: flex;
   flex-direction: column;
@@ -399,6 +371,60 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(156px, 1fr));
   gap: 10px;
+}
+
+/*
+ * The action ranks. Same shell as the manual rank panel, but the chips are square and carry the
+ * card's icon instead of a word, so the grid is sized to the art rather than to a label.
+ */
+.special-rank-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(245, 239, 225, 0.1);
+  background: rgba(5, 16, 14, 0.42);
+}
+
+.special-rank-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.special-rank-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(245, 239, 225, 0.12);
+  background: rgba(245, 239, 225, 0.08);
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.special-rank-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* Off until chosen, so an unselected rank reads as absent from the deck rather than merely dim. */
+  filter: grayscale(1) opacity(0.45);
+  transition: filter 120ms ease;
+}
+
+.special-rank-chip:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.special-rank-chip.selected {
+  border-color: rgba(255, 206, 92, 0.34);
+  background: linear-gradient(135deg, rgba(255, 221, 134, 0.24), rgba(255, 186, 74, 0.18));
+}
+
+.special-rank-chip.selected img {
+  filter: none;
 }
 
 /* Collapsed state of the House Rules panel: what was changed, and the way in to change more. */
@@ -487,43 +513,6 @@
   color: #162019;
   border-color: rgba(255, 206, 92, 0.34);
   background: linear-gradient(135deg, #ffdd86, #ffba4a);
-}
-
-/*
- * Now carried only by the status chips. The character chips dropped theirs for the full-size card
- * preview below: their art already carries the name and the ability, and a description repeated in
- * a 280px bubble was the smaller, worse copy of it.
- */
-.character-chip-tooltip {
-  position: absolute;
-  z-index: 2;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  width: max-content;
-  max-width: min(280px, calc(100vw - 32px));
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 221, 134, 0.36);
-  border-radius: 8px;
-  background: rgba(6, 19, 17, 0.97);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
-  color: var(--cream);
-  font-size: 0.78rem;
-  font-weight: 500;
-  line-height: 1.35;
-  opacity: 0;
-  pointer-events: none;
-  text-align: left;
-  transform: translate(-50%, 4px);
-  visibility: hidden;
-  white-space: normal;
-  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
-}
-
-.character-chip:hover .character-chip-tooltip,
-.character-chip:focus-visible .character-chip-tooltip {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  visibility: visible;
 }
 
 /*
@@ -866,6 +855,15 @@
   gap: 16px;
 }
 
+/*
+ * The kicker is the whole header here. Its shared bottom margin exists to space it from the heading
+ * that used to follow it, and the panel and the bot bay both supply their own gap, so it is dropped
+ * on this surface only — every other place a kicker appears still has a heading under it.
+ */
+.room-staging-panel-header .panel-kicker {
+  margin-bottom: 0;
+}
+
 .room-staging-seat-list,
 .room-staging-settings-list {
   display: flex;
@@ -1040,6 +1038,11 @@
   z-index: 12;
   width: min(420px, calc(100% - 48px));
   margin-top: 0;
+}
+
+/* The two toasts share the corner, and a lobby error and a bot error can stand at once. */
+.board-error-toast.bot-error {
+  top: 88px;
 }
 
 .punishment-move-layer {
@@ -1351,10 +1354,6 @@
   gap: 8px;
 }
 
-.endgame-summary {
-  max-width: 720px;
-}
-
 .endgame-table-wrap {
   flex: 0 0 auto;
   overflow: auto;
@@ -1365,7 +1364,7 @@
 
 .endgame-table {
   width: 100%;
-  min-width: 1320px;
+  min-width: 1620px;
   border-collapse: collapse;
 }
 
@@ -1441,38 +1440,6 @@
   font-style: italic;
   line-height: 1;
   cursor: help;
-}
-
-.endgame-info-tooltip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  translate: -50% 0;
-  z-index: 1;
-  width: max-content;
-  max-width: 220px;
-  padding: 7px 11px;
-  border-radius: 12px;
-  border: 1px solid rgba(245, 239, 225, 0.16);
-  background: rgba(6, 18, 16, 0.98);
-  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.42);
-  color: var(--cream);
-  font-size: 0.82rem;
-  font-style: normal;
-  font-weight: 600;
-  line-height: 1.25;
-  text-align: center;
-  white-space: normal;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 140ms ease, visibility 140ms ease;
-  pointer-events: none;
-}
-
-.endgame-info-badge:hover .endgame-info-tooltip,
-.endgame-info-badge:focus-visible .endgame-info-tooltip {
-  opacity: 1;
-  visibility: visible;
 }
 
 .endgame-chart-panel {
@@ -1676,6 +1643,10 @@
     width: calc(100% - 40px);
   }
 
+  .board-error-toast.bot-error {
+    top: 84px;
+  }
+
   .hero-header,
   .status-banner,
   .panel-header,
@@ -1708,10 +1679,6 @@
 
   .deck-mode-options {
     grid-template-columns: 1fr;
-  }
-
-  .deck-mode-tooltip {
-    width: min(240px, calc(100vw - 56px));
   }
 
   .manual-rank-header {
@@ -2029,6 +1996,29 @@
   border-color: rgba(255, 90, 74, 0.92);
   background: rgba(58, 14, 12, 0.88);
   animation: seat-accused-cheat-pulse 1400ms ease-in-out infinite;
+}
+
+/*
+ * A seat with something to say outranks every seat that has not.
+ *
+ * The callout hangs outside the block, on the hub-facing side, so on a crowded ring it reaches over
+ * a neighbour — and it cannot win that on its own z-index. `.seat-block` is positioned *and*
+ * z-indexed, so each block is its own stacking context and the bubble's `z-index: 3` only orders it
+ * against its own siblings; against another block the contest is between the two blocks, which sit
+ * at the same 2 and fall back to DOM order. Whoever is dealt later covers the one before them, which
+ * is why this reads as one particular chair swallowing another's line. Raising the speaker is the
+ * whole fix, and it has to be here rather than on the bubble.
+ *
+ * Deliberately last of the z-index ladder above (2 / 3 / 4 / 5) so a speaker that is also selected or
+ * accused still clears its neighbours, and deliberately below `.focused-seat`, which is pulled to the
+ * centre of the ring for a reveal walk and outranks everything.
+ */
+.seat-block.speaking-seat {
+  z-index: 6;
+}
+
+.seat-block.speaking-seat.focused-seat {
+  z-index: 8;
 }
 
 @keyframes seat-accused-cheat-pulse {
@@ -2384,34 +2374,42 @@
   gap: 4px;
 }
 
+/*
+ * Three readouts on one line, and the narrowest block is only ~112px wide inside its padding, so
+ * every part of the row is sized against the ring rather than fixed. The three read as one cluster:
+ * the gaps between them and the padding inside each pill are kept close, so no space inside the row
+ * is wider than the space between an icon and its own number.
+ */
 .seat-stat-row {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: clamp(2px, 0.35cqw, 5px);
   width: 100%;
 }
 
 .seat-stat {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: clamp(1px, 0.25cqw, 3px);
+  min-width: 0;
 }
 
 .seat-stat-icon {
-  width: 18px;
-  height: 18px;
+  flex: 0 0 auto;
+  width: clamp(12px, 1.6cqw, 18px);
+  height: clamp(12px, 1.6cqw, 18px);
   object-fit: contain;
 }
 
 .seat-stat-value {
-  min-width: 22px;
-  padding: 2px 7px;
+  min-width: clamp(14px, 1.8cqw, 20px);
+  padding: 2px clamp(2px, 0.35cqw, 5px);
   border-radius: 999px;
   border: 1px solid rgba(245, 239, 225, 0.12);
   background: rgba(6, 19, 17, 0.72);
   color: var(--cream);
-  font-size: 0.82rem;
+  font-size: clamp(0.7rem, 0.95cqw, 0.82rem);
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
@@ -2497,7 +2495,15 @@
 /* Selection is the sticky fallback for touch, where there is no hover to reveal anything. */
 .seat-block:hover > .seat-target-actions,
 .seat-block:focus-within > .seat-target-actions,
-.seat-block.selected-seat > .seat-target-actions {
+.seat-block.selected-seat > .seat-target-actions,
+/*
+ * The one bubble that is not hover-gated, for the reason the reveal actions are not: it holds the
+ * only way forward on a table waiting for a seat that will never act, and a hidden bubble is not
+ * tabbable — `visibility: hidden` takes its buttons out of the tab order, so a keyboard or a touch
+ * screen could never reach the button that unsticks the game. A block only wears this while its
+ * seat is genuinely dead, so the noise is the point.
+ */
+.seat-block.stalled-seat > .seat-target-actions {
   opacity: 1;
   visibility: visible;
 }
@@ -2584,71 +2590,17 @@
 }
 
 /*
- * One panel for the whole stack. Like the action bubble above it, it is placed off the block's
- * `data-seat-half` so it always opens toward the hub — a bubble pointing inward on a ring cannot
- * reach a screen edge, which is why nothing here measures the viewport. The width cap is the
- * backstop for a narrow phone.
- */
-.seat-status-tooltip {
-  position: absolute;
-  z-index: 6;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: max-content;
-  max-width: min(260px, calc(100vw - 32px));
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 221, 134, 0.42);
-  border-radius: 14px;
-  background: rgba(6, 19, 17, 0.97);
-  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.46);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  text-align: left;
-  transition: opacity 140ms ease, visibility 140ms;
-}
-
-.seat-status-column:hover > .seat-status-tooltip,
-.seat-status-column:focus-visible > .seat-status-tooltip {
-  opacity: 1;
-  visibility: visible;
-}
-
-/*
  * Both bubbles want the hub-facing side, and hovering the stack necessarily hovers the block. The
- * status panel is what the pointer is actually on, so the action bubble stands down for it.
+ * status panel is what the pointer is actually on, so the action bubble stands down for it — except
+ * where the bubble is pinned open, which it is precisely because it must not be missable.
  */
-.seat-block:has(.seat-status-column:hover) > .seat-target-actions,
-.seat-block:has(.seat-status-column:focus-visible) > .seat-target-actions {
+.seat-block:not(.stalled-seat):has(.seat-status-column:hover) > .seat-target-actions,
+.seat-block:not(.stalled-seat):has(.seat-status-column:focus-visible) > .seat-target-actions {
   opacity: 0;
   visibility: hidden;
 }
 
-.seat-block[data-seat-half='bottom'] .seat-status-tooltip {
-  bottom: 100%;
-  left: 50%;
-  transform: translate(-50%, -6px);
-}
-
-.seat-block[data-seat-half='top'] .seat-status-tooltip {
-  top: 100%;
-  left: 50%;
-  transform: translate(-50%, 6px);
-}
-
-.seat-block[data-seat-half='left'] .seat-status-tooltip {
-  left: 100%;
-  top: 50%;
-  transform: translate(6px, -50%);
-}
-
-.seat-block[data-seat-half='right'] .seat-status-tooltip {
-  right: 100%;
-  top: 50%;
-  transform: translate(-6px, -50%);
-}
-
+/* The rows the shared tooltip layer draws for this stack. Placement is the layer's problem now. */
 .seat-status-tooltip-row {
   display: flex;
   align-items: flex-start;
@@ -2721,6 +2673,41 @@
 .seat-target-button.accuse:focus-visible {
   border-color: rgba(217, 184, 255, 0.8);
   background: linear-gradient(180deg, rgba(217, 184, 255, 0.26), rgba(24, 20, 38, 0.86));
+}
+
+/*
+ * The seat repairs. Not actions in the game, so they are neither gold nor purple: each takes a line
+ * of its own under the pair and reads as the repair it is. `kick` is the one that throws something
+ * away, and takes the warning colour to say so.
+ */
+.seat-target-button.bot-repair {
+  flex: 1 1 100%;
+  justify-content: center;
+  border-color: rgba(140, 226, 178, 0.34);
+  background: linear-gradient(180deg, rgba(140, 226, 178, 0.16), rgba(6, 19, 17, 0.7));
+}
+
+.seat-target-button.bot-repair:hover:not(:disabled),
+.seat-target-button.bot-repair:focus-visible {
+  border-color: rgba(140, 226, 178, 0.8);
+  background: linear-gradient(180deg, rgba(140, 226, 178, 0.26), rgba(16, 38, 30, 0.86));
+}
+
+.seat-target-button.bot-repair.kick {
+  border-color: rgba(255, 146, 122, 0.34);
+  background: linear-gradient(180deg, rgba(255, 146, 122, 0.16), rgba(6, 19, 17, 0.7));
+}
+
+.seat-target-button.bot-repair.kick:hover:not(:disabled),
+.seat-target-button.bot-repair.kick:focus-visible {
+  border-color: rgba(255, 146, 122, 0.8);
+  background: linear-gradient(180deg, rgba(255, 146, 122, 0.26), rgba(38, 22, 20, 0.86));
+}
+
+.seat-target-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+  transform: none;
 }
 
 /*
@@ -3212,54 +3199,76 @@
   text-transform: none;
 }
 
-.inline-info-tooltip {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: 50%;
-  z-index: 10;
-  width: min(240px, calc(100vw - 56px));
+/*
+ * The one tooltip on the page. It is portalled to `document.body` by `src/ui/Tooltip.tsx`, so it is
+ * outside every panel's `overflow` and every stacking context on the board — which is what stopped
+ * the action row's being clipped by `.hand-stage`. Six near-identical blocks used to live here, each
+ * placing itself relative to whatever opened it; this one is placed against the viewport in JS.
+ *
+ * `translate3d` rather than `left`/`top` so moving it never triggers layout, and `visibility` rather
+ * than `display` so the layer can still be measured while it is closed.
+ */
+.tooltip-box {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 24px));
   padding: 10px 12px;
   border-radius: 14px;
-  border: 1px solid rgba(255, 206, 92, 0.18);
-  background: rgba(4, 14, 12, 0.96);
-  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 206, 92, 0.22);
+  background: rgba(4, 14, 12, 0.97);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.42);
   color: var(--soft-cream);
   font-size: 0.84rem;
+  font-style: normal;
   font-weight: 500;
   letter-spacing: normal;
   line-height: 1.4;
-  white-space: pre-line;
+  text-align: left;
   text-transform: none;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translate(-50%, -4px);
-  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+  transition: opacity 120ms ease, visibility 120ms ease;
 }
 
-.inline-info-trigger:hover .inline-info-tooltip,
-.inline-info-trigger:focus-within .inline-info-tooltip {
+.tooltip-box.open {
   opacity: 1;
   visibility: visible;
-  transform: translate(-50%, 0);
 }
 
-.inline-info-trigger.align-start .inline-info-tooltip {
-  left: 0;
-  transform: translateY(-4px);
+.tooltip-title {
+  margin: 0;
+  color: var(--gold-text);
+  font-size: 0.86rem;
+  font-weight: 800;
 }
 
-.inline-info-trigger.align-end .inline-info-tooltip {
-  right: 0;
-  left: auto;
-  transform: translateY(-4px);
+.tooltip-description {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  /* `pre-line` so a description that carries its own line breaks keeps them. */
+  white-space: pre-line;
 }
 
-.inline-info-trigger.align-start:hover .inline-info-tooltip,
-.inline-info-trigger.align-start:focus-within .inline-info-tooltip,
-.inline-info-trigger.align-end:hover .inline-info-tooltip,
-.inline-info-trigger.align-end:focus-within .inline-info-tooltip {
-  transform: translateY(0);
+/* A second line under an effect: what clicking the thing would do, rather than what it is. */
+.tooltip-action-note {
+  color: var(--gold-text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tooltip-box {
+    transition: none;
+  }
 }
 
 /*
@@ -3442,6 +3451,68 @@
   width: min(620px, 100%);
 }
 
+/*
+ * Sized between the two: one section per opened hand, each a wrapping row of card faces. Wider than
+ * the log because a full hand is a lot of cards, narrower than the rule deck because they are small.
+ */
+.hand-peek-panel {
+  width: min(860px, 100%);
+  gap: 12px;
+}
+
+.hand-peek-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: min(58vh, 520px);
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.hand-peek-seat {
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(245, 239, 225, 0.08);
+  background: rgba(245, 239, 225, 0.04);
+}
+
+.hand-peek-seat-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.hand-peek-seat-header h3 {
+  margin: 0;
+  flex: 1;
+  font-size: 1rem;
+}
+
+.hand-peek-mark {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.hand-peek-count {
+  color: var(--muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.hand-peek-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hand-peek-cards img {
+  width: 52px;
+  height: auto;
+  border-radius: 6px;
+}
+
 /* Wider than the log: rule cards are a grid of illustrations, not a single column of entries. */
 .rules-overlay-panel {
   width: min(1240px, 100%);
@@ -3467,6 +3538,43 @@
  * shorter than the viewport: a second row of cards this size overflows and brings the scrollbar
  * back, which is the whole reason the page size is four.
  */
+/*
+ * Ante's Rules panel. A written list rather than the rule-card deck, because Ante does not play the
+ * cards — see `RulesOverlay`. Two columns so the seven entries fit the same panel without paging.
+ */
+.ante-rule-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  animation: rule-card-grid-in 260ms ease-out both;
+}
+
+.ante-rule-item {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(245, 239, 225, 0.1);
+  background: rgba(8, 24, 21, 0.72);
+}
+
+.ante-rule-item h3 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+
+.ante-rule-item p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: rgba(245, 239, 225, 0.72);
+}
+
+@media (max-width: 820px) {
+  .ante-rule-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .rule-card-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4275,7 +4383,6 @@
   .reset-pile-card-inner,
   .seat-block,
   .seat-hover-frame,
-  .seat-status-tooltip,
   .seat-target-actions,
   .seat-target-button,
   .seat-reveal-action-button,
@@ -4344,6 +4451,13 @@
 
 .seat-tag.online {
   color: #bff4d8;
+}
+
+/* A revealed Skip standing over this seat. Amber rather than alarmed: it is a lost turn, not a loss. */
+.seat-tag.skipped {
+  color: #ffdd86;
+  border-color: rgba(255, 206, 92, 0.34);
+  background: rgba(255, 206, 92, 0.14);
 }
 
 .seat-tag.offline {
@@ -5143,34 +5257,6 @@
   border: 1px solid rgba(245, 239, 225, 0.12);
 }
 
-.action-button-tooltip {
-  position: absolute;
-  top: calc(100% + 10px);
-  left: 50%;
-  z-index: 8;
-  width: min(220px, calc(100vw - 56px));
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 206, 92, 0.18);
-  background: rgba(4, 14, 12, 0.96);
-  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28);
-  color: var(--soft-cream);
-  font-size: 0.84rem;
-  line-height: 1.35;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translate(-50%, -4px);
-  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
-}
-
-.action-button-item:hover .action-button-tooltip,
-.action-button-item:focus-within .action-button-tooltip {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, 0);
-}
-
 @media (max-width: 1040px) {
   .room-staging-hero,
   .room-staging-panel-header {
@@ -5377,28 +5463,11 @@
     transform: none;
   }
 
-  .seat-block.selected-seat > .seat-target-actions {
+  /* Selection is the touch path back in — and a stalled seat's block, which is pinned open, may not
+   * be selectable at all: the table is usually mid-procedure by the time anybody notices. */
+  .seat-block.selected-seat > .seat-target-actions,
+  .seat-block.stalled-seat > .seat-target-actions {
     display: flex;
-  }
-
-  /*
-   * The stack itself stays beside the avatar — it is the readout and has to be visible — but with no
-   * hover to open the panel, a tap on the column is what does it. It hangs below the stack on every
-   * seat here rather than following `data-seat-half`, because the mobile ring is a grid and the four
-   * hub-facing rules no longer describe where the hub is.
-   */
-  .seat-block .seat-status-tooltip {
-    top: 100%;
-    right: 0;
-    bottom: auto;
-    left: auto;
-    max-width: min(240px, calc(100vw - 40px));
-    transform: translateY(6px);
-  }
-
-  .seat-status-column:focus-within > .seat-status-tooltip {
-    opacity: 1;
-    visibility: visible;
   }
 
   .table-center-hub {
@@ -5458,19 +5527,36 @@
     min-width: calc(50% - 6px);
   }
 
-  .action-button-tooltip {
-    left: 0;
-    transform: translateY(-4px);
-  }
-
-  .action-button-item:hover .action-button-tooltip,
-  .action-button-item:focus-within .action-button-tooltip {
-    transform: translateY(0);
-  }
 }
 
-/* The action row sits at the right edge on desktop, so the last tooltip opens inward. */
-.hand-action-row .action-button-item:last-child .action-button-tooltip {
-  left: auto;
-  right: 0;
+/*
+ * The bot bay, under the staging roster. It sits inside the roster panel rather than beside the
+ * start control, because adding a bot fills a seat and the seat list is what it changes.
+ */
+.room-staging-bot-bay {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(245, 239, 225, 0.1);
+}
+
+.room-staging-bot-controls {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.room-staging-bot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+@media (max-width: 640px) {
+  .room-staging-bot-controls {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
 }

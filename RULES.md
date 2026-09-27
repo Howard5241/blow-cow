@@ -1,7 +1,13 @@
 # Blow Cow Rules
 
+The vanilla game: what every player does regardless of which character they hold, played with a
+standard deck. Characters are standing exceptions to these rules and live in `CHARACTERS.md`; where
+one modifies a rule below, that section says so and names it. The optional action ranks and statuses
+live in `RULES-EXTENSIONS.md`.
+
 ## Overview
 - Blow Cow is a multiplayer bluffing card game.
+- Every player is dealt one character at the start of the match. See `CHARACTERS.md`.
 - The game consists of many rounds, and a round usually consists of many turns.
 - Supported player count: 2 to 8 players.
 - The base card pool comes from 1 deck that contains 2 Jokers.
@@ -9,6 +15,7 @@
 - The 2 Jokers are always included, even when only some standard ranks are used.
 - The chosen standard ranks can be any ranks. They are not restricted to a specific fixed subset.
 - For example, if 4 standard ranks are used, the game might use Jacks, Queens, Kings, and Aces.
+- The deck may also include optional action ranks. See `RULES-EXTENSIONS.md`.
 - At the start of the game, cards are dealt randomly and as evenly as possible to all players.
 
 ## Default Standard Ranks Used By Starting Player Count
@@ -32,7 +39,7 @@
 | --- | --- |
 | 2 | 10 |
 | 3 or 4 | 12 |
-| 5 | 15 |
+| 5 | 10 |
 | 6 | 12 |
 | 7 | 14 |
 | 8 | 16 |
@@ -62,12 +69,8 @@
   face up by hand, and they press `Continue` to send the block back and get on with the turn.
 - The whole table waits while a reveal is being performed, exactly as it does for a `Call BS`,
   `Call Reset`, or `Accuse` procedure.
-- On each turn, a player must choose exactly one action.
-- `The Clown` is the exception: their first `Play` of each round does not end their turn, and they
-  then take one more action out of the same action space, minus `Play`. The play counts in every
-  other way, so the pass counter resets on it and they become the previous non-passing player.
-- Because of that, `Call BS` taken as their second action still targets whoever was the previous
-  non-passing player before their own play, not themselves.
+- On each turn, a player must choose exactly one action. `The Clown` is the one exception, and takes
+  two — see `CHARACTERS.md`.
 - The pass counter resets after any non-passing action.
 
 ## Action Spaces
@@ -99,7 +102,7 @@
 
 ### Play
 - Put down at most 2 cards face down on the table in front of you.
-- A status can take this action away or constrain what it may claim. See `Statuses`.
+- A status can take this action away or constrain what it may claim. See `RULES-EXTENSIONS.md`.
 - Claim that the card or cards you played are of the trump rank.
 - You may not play cards if doing so would make the number of cards on the table exceed `MaxCardsOnTable`.
 - `Play` is not available when there are already at least `MaxCardsOnTable` cards on the table.
@@ -111,7 +114,7 @@
 
 ### Pass
 - End your turn without playing cards or calling anything.
-- A status can take this action away. See `Statuses`.
+- A status can take this action away. See `RULES-EXTENSIONS.md`.
 - If there are `n` consecutive passes, the round ends immediately.
 - When a round ends this way, each player takes back the card(s) in front of them and adds them back to their hand.
 - The player who passed last becomes the starting player of the next round.
@@ -138,10 +141,8 @@
 - After `Call BS` is used and every card on the table is face up, check the trump rank selected by the starting player of the round.
 - If 4 or more cards of that rank are on the table, the punishment is reversed.
 - Example: if player `X` calls BS on player `Y` and `X` would normally be punished, then `Y` is punished instead. If `Y` would normally be punished, then `X` is punished instead.
-- `The Contrarian` reverses the punishment the same way, on every `Call BS` they make and regardless
-  of what is on the table. It is a second layer rather than an override, so a call that triggers both
-  is reversed twice and the default punishment stands. Being called on by `The Contrarian` does
-  nothing; only their own calls carry it.
+- `The Contrarian` adds a second layer of this to their own calls. Two reversals cancel out. See
+  `CHARACTERS.md`.
 
 ### Call Reset
 - This action immediately ends the round.
@@ -154,69 +155,8 @@
 - The player who called `Reset` becomes the starting player of the next round.
 
 ### Reset Showdown
-- This replaces the shuffle and the deal above whenever `The Gambler` is still in the game. It applies
-  to every `Reset`, whoever called it — the ability is a rule that character imposes on the table, not
-  an action they spend.
-- After every card on the table is face up, the cards in front of each player are read as a poker
-  hand. The weakest hand takes every card on the table, and nothing is redistributed.
-- Every player still in the game is ranked, including anyone who passed all round and has nothing in
-  front of them. Nothing in front is the weakest hand there is.
-- Hands are the standard five-card categories: straight flush, four of a kind, full house, flush,
-  straight, three of a kind, two pair, pair, high card. A player holding more than five cards is read
-  as their best five.
-- Flushes and straights need a real five cards. Four to a flush is not a flush, and four to a straight
-  is not a straight — both are read as high card. A short hand is scored as it stands and is never
-  padded out, so two cards can never beat a pair.
-- The ace is high only. `A-2-3-4-5` is not a straight.
-- Jokers are wild, as the `Joker Rule` says, and stand in for whatever card makes the best hand. A
-  wild card is spent once: a Joker that completes a flush is not also completing the trips.
-  `The Confused`'s Jacks are not wild here — they stay Jacks, exactly as they do for 4-of-a-kind
-  scoring.
-- If two hands read the same, the player who has fewer cards in front is the weaker of the two.
-- If they are still tied, the player who called `Reset` chooses which of the tied players is punished.
-- The player who called `Reset` still becomes the starting player of the next round, even if they are
-  the one who just took the table.
-
-### Mimic
-- `The Mime`'s action, once per round, on their own turn. It is not one of the actions above: taking
-  it does not end the turn on its own.
-- The target is fixed. It is always the caller's next player in the current `Direction`, so there is
-  nothing to choose.
-- Two things happen, in this order.
-- First, the caller's block takes on the target's appearance: the same avatar, name, character card,
-  point total, cards-in-hand count, and the same card or cards in front. Everything is copied as it
-  stands at that moment and does not change afterwards, so cards played later stack onto the copied
-  pile and count down from the copied hand, exactly as they would on the block being copied.
-- Second, a coin is flipped. Half the time the two players swap seats, and half the time nothing
-  moves. Nobody but `The Mime` is told which happened.
-- On a swap, the two trade places in the seating: the turn stays with the chair, so the target takes
-  it over and `The Mime` becomes the player after them. Seat numbers belong to the chairs and do not
-  move, so the swap renames nothing.
-- Without a swap, `The Mime` keeps the seat and the turn, and still owes the table an action.
-- The seat swap is permanent. Nothing restores it.
-- The appearance is not, but it lasts the rest of the round. `The Mime`'s own later turns do not end
-  it: they keep acting from behind the copied block, and cards they play keep stacking onto the
-  copied pile.
-- It ends when the round ends, when either of the two players leaves the game, or the moment a
-  `Call BS`, `Call Reset`, or `Accuse` procedure begins — whichever comes first. Since every way a
-  round can end is one of those, the procedure is always what takes it off. The forced reveal a turn
-  opens with is the one procedure that leaves it standing: it is not raised by anybody, and a
-  disguise that came off every turn would not be a disguise.
-- A play of `The Mime`'s own that the disguise is no longer drawing is turned face up at `Take Turn`
-  with no procedure at all. There is nothing on screen for them to press, and nothing anybody could
-  see change either way.
-- The Reveal Rule runs per seat while the copy stands, rather than per play. Each of the two seats
-  turns the copied card or cards face up when the turn reaches it, so the pile opens on one seat and
-  then the other instead of on both at once.
-- A consequence, and an intended one: if the seats swapped, the copied player's own cards stay face
-  down on their seat until the turn comes back round to them, even though they have already revealed.
-  They are face up on the other seat by then, so nothing stays hidden for longer than one lap of the
-  table.
-- Cards that were already face up when the copy was taken stay face up on both seats. Only what was
-  still face down is held back.
-- Only the appearance is copied. `The Mime` does not gain the copied character's ability, keeps their
-  own hand, and answers for their own plays. `MaxCardsOnTable` still counts the real cards on the
-  table, not the copies drawn on top of them.
+- `The Gambler` replaces the shuffle and the deal above with a poker showdown, for every `Reset` and
+  whoever called it. See `CHARACTERS.md`.
 
 ## Other Rules
 
@@ -245,8 +185,9 @@
   pulled to the centre of the table, they turn each owed card over themselves, and `Continue` ends
   it. Nothing about it is a choice — which cards are owed is fixed before the first one is pressed,
   and the turn cannot go on until all of them are face up.
-- `The Spy` owes one card of the pair rather than both, and which one is still drawn at random. It is
-  simply the only card their client will accept a press on.
+- `The Spy` owes one card of the pair rather than both. See `CHARACTERS.md`.
+- While `The Mime`'s disguise stands, this runs per seat rather than per play. See `CHARACTERS.md`.
+- This rule is the only thing that sets an action rank off. See `RULES-EXTENSIONS.md`.
 
 ### No Cheating Rule
 - Nobody may break the rules of the game.
@@ -303,18 +244,15 @@
 - Removed 4-of-a-kind sets are not returned to any player's hand under any circumstance.
 - Those removed sets remain on the table in a permanent scored area that is separate from the active round table.
 - Scored 4-of-a-kind sets do not count toward any active table interaction, including `MaxCardsOnTable`, `Call Reset`, the Reverse Rule, or any other effect that checks cards currently on the round table.
-- `The Thinker` is the one character whose points move without any card changing hands. At the end of
-  every turn they take, their total `n` is replaced: `0` if `n` is above 12, `n / 2` if `n` is even,
-  and `3n + 1` if `n` is odd. The wipe is checked first, so a total above 12 never takes a parity
-  branch.
-- This happens however the turn ended — a play, a pass, a `Call BS` or `Call Reset` resolving, an
-  accusation, `Manipulate`, `Mimic` — because it is the end of the turn and not any one action that
-  triggers it. It is not an action, cannot be declined, and has no limit.
-- Because lower points are better, halving and the wipe are the reward and `3n + 1` is what holding an
-  odd total costs. A total of `0` is the one value that does not move, since it is even and halves to
-  itself.
-- It stops once `The Thinker` has left the game, so whatever the leave rules settled on is their final
-  total.
+- Several characters adjust points on leaving the game, and `The Thinker` moves theirs with no card
+  changing hands at all. See `CHARACTERS.md`.
+
+## Gold
+- Every player has an amount of gold, shown beside their cards in hand and their points.
+- Every player starts the match with 5 gold.
+- Gold is public. Everyone can read everyone's gold at all times.
+- Nothing in the game earns, spends, or takes gold yet, so every player still has 5 when the match
+  ends. It is a value on the table waiting for the rules that will use it.
 
 ## Rule Cards
 - Every rule above is also a card, so that a rule can be shown to players and, eventually, changed by
@@ -328,13 +266,9 @@
   moment it is removed.
 - `Upgraded` is not enforced yet. An upgraded card is shown to players with its `+` title and its
   upgraded description, but the game still plays the rule as written above.
-- `The Broken` removes one rule card at the start of the game. Only a rule that defines a `Removed`
-  variant can be chosen, and only one that is still `Active`.
-- `The Prototype` destroys one heart card from their hand and one random rule card with the `Defy`
-  action, once per round. The card must be of the heart suit; no other card, joker included, can pay
-  for it. The rule is drawn from the same pool `The Broken` picks from: rules that define a `Removed`
-  variant and are still `Active`. `Defy` is unavailable once that pool is empty, or once the hand
-  holds no heart.
+- Two characters change the rules in play: `The Broken` removes one at the start of the game, and
+  `The Prototype` destroys one per round with `Defy`. Both draw from the same pool — rules that
+  define a `Removed` variant and are still `Active`. See `CHARACTERS.md`.
 
 | Rule Card | Removed | Upgraded |
 | --- | --- | --- |
@@ -371,41 +305,10 @@
   the same, the direction tell is the same, and each player still gets one accusation per round.
   The card itself says only the first sentence — spelling the cheats out on a card everybody can
   read would hand new players a checklist and take the discovery out of it.
-- `Status Rule`: status counters are still shown but never go down, so every status a player is given
-  lasts for the rest of the match. Removing it mid-match freezes whatever counters are standing at
-  that moment; it does not clear anything and it does not hand anybody a status.
+- `Status Rule`: see `RULES-EXTENSIONS.md`.
 
 #### Character Interactions With Removed Rules
-A removed rule takes any ability built on top of it with it. This is a consequence of the removal,
-not a special case:
-- `Pass Rule` removed: The Foreigner has no way to use their ability, and The Streamer's leave
-  penalty becomes unavoidable. It can also take The Clown's second action away, since `Pass` is how
-  a kept turn is ended: with nothing to challenge and a table short of its cap, the turn is not kept
-  at all and the play ends it as usual.
-- `Joker Rule` removed: The Confused's Jacks are worthless too, because the ability makes them
-  function as Jokers and a Joker is now nothing.
-- `Reveal Rule` removed: The Spy has nothing to modify, since their ability only ever chose how much
-  of the start-of-turn reveal happened. Taking a card back off the table goes with it, for the same
-  reason running the other way: only face-up cards may be taken, and with no start-of-turn reveal
-  nothing reaches the table face up in the first place.
-- `Rank Change Rule` or `Max Cards On Table Rule` removed: the matching Dreamer cheat stops being a
-  cheat, so the play is honest and `Accuse` cannot catch it.
-- `Call Reset Rule` is the rule The Gambler overrides, and it is the one rule card that cannot be
-  removed, so the showdown has no removal interaction at all. It simply replaces the redistribution
-  for as long as that character is seated.
-- `Reverse Rule` removed: The Contrarian is the exception that proves the rule above. Their layer is
-  written on their own card and reverses their calls whatever this one says, so removing it does not
-  disarm them — it makes them the only thing that ever reverses a punishment.
-- `No Cheating Rule` removed: The Dreamer is left with an ordinary seat, because their whole ability
-  was being the exception to that rule and everyone is now the exception. This is the same mechanic as
-  the entries above, running the other way: it universalises the ability instead of deleting it.
-  The Cat is the one character it partly cuts across — their own-turn flip is still the only
-  legal one, and it is still the only flip that leaves nothing for `Accuse` to catch, but reaching
-  into somebody else's turn now makes them a cheat like anyone else.
-- `Status Rule` removed: this is the one removal that makes an effect stronger rather than weaker.
-  Nothing loses an ability; every status simply stops expiring, so a `Tilted` handed out on turn
-  three is still on that player at the end of the match. It also means the removal is worth reading
-  as a timing decision — a rule torn up mid-match freezes the counters that happen to be standing.
+A removed rule takes any ability built on top of it with it. That list is in `CHARACTERS.md`.
 
 ### Upgraded Rule Cards
 - `Max Cards On Table Rule+`: `MaxCardsOnTable` is doubled for every player count.
@@ -426,52 +329,6 @@ not a special case:
   round.
 
 None of the upgraded variants above are enforced yet.
-
-## Statuses
-A status is a temporary condition on a single player that removes or constrains one action. Statuses
-are public: every player can see who is under what, and for how much longer.
-
-- A player holds at most **2** statuses at a time.
-- Every status carries a counter. It goes down by 1 at the end of that player's own turn, and the
-  status wears off when it reaches 0. Another player's turn ending costs nothing. This is the
-  `Status Rule`; without it the counters never move and every status is permanent.
-- Statuses are counted in turns, not rounds. A status handed out near the end of a round carries over
-  into the next one.
-- No status ever forces an action. A status that makes `Play` impossible simply leaves the player
-  with their other actions.
-
-| Status | Effect |
-| --- | --- |
-| Tilted | Cannot take the `Pass` action. |
-| Worried | Cannot take the `Play` action. |
-| Mad | Must lie. A `Play` cannot be truthful, but you are never forced to play. |
-| Nervous | Must be truthful. A `Play` cannot be a lie, but you are never forced to play. |
-| Blind | Cannot see any face-up card on the table. |
-| Broken | `Play` sends one random card from your hand. You still choose the trump rank. |
-
-Notes on the edges:
-
-- Truthfulness for `Mad` and `Nervous` is the same judgement `Call BS` makes: every played card must
-  be of the claimed rank, and no rule may have been broken to make the play. A cheat that breaks a
-  rule is therefore a lie for these two as well.
-- `Mad` on a player holding only trump-rank cards leaves them no legal `Play`. So does holding `Mad`
-  and `Nervous` at once. Both are legal positions, not stalemates: `Pass`, `Call BS` and
-  `Call Reset` are unaffected.
-- `Tilted` and `Worried` never sit on the same player. Holding either one makes that player immune to
-  the other, so the status already in place wins and the second is simply never applied. This is
-  deliberately unannounced: no card says it, nothing in the game reports the refusal, and the lobby
-  will let a host pick both and hand out only the first. It is refused ahead of the two-status cap,
-  so it is a real immunity rather than a player who happened to be full.
-- `Tilted` removes `Pass`, and with it The Foreigner's pass-card pickup, for exactly the reason
-  removing the `Pass Rule` does.
-- `Worried` removes the `Play` action. It does not stop a player from cheating cards onto the table.
-- `Blind` is lifted while a `Call BS` or `Call Reset` reveal is running, so a blind caller can still
-  resolve the challenge they started.
-- `Broken` takes the choice of card, not the action. The player still chooses the trump rank when the
-  round has none, and the play is not The Drunkard's.
-
-Nothing in the game inflicts a status yet. The only source is the host's testing panel in the lobby,
-which starts every player with the same statuses at the same counter.
 
 ## Final Ranking
 - First place goes to the player with the fewest points.

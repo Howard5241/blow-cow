@@ -34,7 +34,7 @@ export type BlowCowCharacterName = (typeof BLOW_COW_CHARACTER_NAMES)[number]
  * ability printed on the art, so the one place the UI shows an ability is the card itself — the lobby
  * pool preview, the seat badge's enlarged card, and The Seeker's picker all draw the same picture.
  * A second copy in code was only ever read by a tooltip, and it could drift from the art silently.
- * `Characters.csv` and `RULES.md` are where the wording is kept for authoring.
+ * `Characters.csv` and `CHARACTERS.md` are where the wording is kept for authoring.
  */
 export const BLOW_COW_IMPLEMENTED_CHARACTER_NAMES = [
   'The Dreamer',

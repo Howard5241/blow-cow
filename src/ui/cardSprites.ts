@@ -39,6 +39,10 @@ const rankLabels: Record<string, string> = {
   jack: 'Jack',
   queen: 'Queen',
   king: 'King',
+  // The action ranks read as ranks here like any other, because on the card that is what they are.
+  plague: 'Plague',
+  skip: 'Skip',
+  peek: 'Peek',
 }
 
 export function getCardSprite(filename: string) {

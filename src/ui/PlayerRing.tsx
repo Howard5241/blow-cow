@@ -40,6 +40,8 @@ type PlayerRingProps = {
   anchorSeatID: string | null
   /** The seat scaled up and pulled to the centre for its BS reveal step. */
   focusedSeatID: string | null
+  /** Whether this match keeps points. False in Ante, which scores in gold instead. */
+  showPoints: boolean
   /** The seat caught cheating by an accusation, red until the accuser presses Punish. */
   accusedCheatSeatID: string | null
   /** Holds the BS target mark back until the call trail has finished arriving. */
@@ -114,6 +116,7 @@ export function PlayerRing({
   seats,
   selectableSeatIDSet,
   selectedSeatID,
+  showPoints,
 }: PlayerRingProps) {
   const seatCount = seats.length
   const anchorIndex = Math.max(0, seats.findIndex((seat) => seat.id === anchorSeatID))
@@ -143,6 +146,7 @@ export function PlayerRing({
             isDirectionFlipTell={seat.id === directionFlipTellSeatID}
             isRevealFocused={seat.id === focusedSeatID}
             pointsFlashDirection={pointsFlashDirectionBySeatID[seat.id] ?? null}
+            showPoints={showPoints}
             isPunishmentImpact={seat.id === punishmentImpactSeatID}
             isSelectable={isSelectable}
             isSelected={seat.id === selectedSeatID}
@@ -160,9 +164,11 @@ export function PlayerRing({
             seatLabel={getSeatLabel(seat.seatIndex)}
             showBSTargetMark={seat.id === bsTargetSeatID}
             style={{ '--seat-angle': `${angleDeg}deg` } as CSSProperties}
-            // Mounted for every selectable seat rather than only the selected one; CSS decides
-            // when it is visible, so the buttons appear the moment the block is hovered.
-            targetActions={isSelectable ? renderTargetActions(seat) : null}
+            // Mounted for every seat that has anything to offer rather than only the selected one;
+            // CSS decides when it is visible, so the buttons appear the moment the block is hovered.
+            // The renderer answers null for the seats with nothing — selectability is only half of
+            // that question now, since a stalled seat is repaired from a block nobody may target.
+            targetActions={renderTargetActions(seat)}
           />
         )
       })}

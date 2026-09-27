@@ -84,11 +84,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # ESLint currently reports 3 pre-existing errors and 14 warnings in
-      # BlowCowBoard.tsx and App.tsx. They are surfaced here for visibility but
-      # deliberately not allowed to fail the run, because a job that is red on
-      # every commit stops carrying any signal. Remove `continue-on-error` once
-      # those are cleaned up.
+      # Blocking, so a newly introduced ESLint error fails the run. ESLint exits
+      # non-zero on errors only, so the remaining react-hooks/exhaustive-deps
+      # warnings stay visible in the log without failing the job. Those deps are
+      # omitted deliberately in the animation effects, where adding them would
+      # re-trigger a sequence mid-flight.
       - name: Run ESLint
-        continue-on-error: true
         run: npm run lint

@@ -1,0 +1,251 @@
+{
+  "format": "ante-round-policy/1",
+  "source": "rl/runs/_round_fix/r6-ctrl-s1/final.pt",
+  "steps": 4003083,
+  "numPlayers": 6,
+  "numRanks": 7,
+  "hidden": 256,
+  "typeDim": 32,
+  "headDim": 64,
+  "extraWidth": 0,
+  "valueScale": 1.0,
+  "roundLimit": null,
+  "startingGold": null,
+  "observationSize": 216,
+  "actionSize": 398,
+  "floats": 180750,
+  "tensors": [
+    {
+      "name": "off_deck_slot",
+      "offset": 0,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.0.weight",
+      "offset": 32,
+      "shape": [
+        32,
+        7
+      ]
+    },
+    {
+      "name": "type_encoder.0.bias",
+      "offset": 256,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.2.weight",
+      "offset": 288,
+      "shape": [
+        32,
+        32
+      ]
+    },
+    {
+      "name": "type_encoder.2.bias",
+      "offset": 1312,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "name": "trunk.0.weight",
+      "offset": 1344,
+      "shape": [
+        256,
+        224
+      ]
+    },
+    {
+      "name": "trunk.0.bias",
+      "offset": 58688,
+      "shape": [
+        256
+      ]
+    },
+    {
+      "name": "trunk.2.weight",
+      "offset": 58944,
+      "shape": [
+        256,
+        256
+      ]
+    },
+    {
+      "name": "trunk.2.bias",
+      "offset": 124480,
+      "shape": [
+        256
+      ]
+    },
+    {
+      "name": "context.weight",
+      "offset": 124736,
+      "shape": [
+        64,
+        256
+      ]
+    },
+    {
+      "name": "context.bias",
+      "offset": 141120,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "simple_head.weight",
+      "offset": 141184,
+      "shape": [
+        2,
+        256
+      ]
+    },
+    {
+      "name": "simple_head.bias",
+      "offset": 141696,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "single_head.0.weight",
+      "offset": 141698,
+      "shape": [
+        64,
+        96
+      ]
+    },
+    {
+      "name": "single_head.0.bias",
+      "offset": 147842,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "single_head.2.weight",
+      "offset": 147906,
+      "shape": [
+        2,
+        64
+      ]
+    },
+    {
+      "name": "single_head.2.bias",
+      "offset": 148034,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "pair_head.0.weight",
+      "offset": 148036,
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "name": "pair_head.0.bias",
+      "offset": 156228,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "pair_head.2.weight",
+      "offset": 156292,
+      "shape": [
+        2,
+        64
+      ]
+    },
+    {
+      "name": "pair_head.2.bias",
+      "offset": 156420,
+      "shape": [
+        2
+      ]
+    },
+    {
+      "name": "slot_head.0.weight",
+      "offset": 156422,
+      "shape": [
+        64,
+        96
+      ]
+    },
+    {
+      "name": "slot_head.0.bias",
+      "offset": 162566,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "slot_head.2.weight",
+      "offset": 162630,
+      "shape": [
+        1,
+        64
+      ]
+    },
+    {
+      "name": "slot_head.2.bias",
+      "offset": 162694,
+      "shape": [
+        1
+      ]
+    },
+    {
+      "name": "static_gate.weight",
+      "offset": 162695,
+      "shape": [
+        6,
+        256
+      ]
+    },
+    {
+      "name": "static_gate.bias",
+      "offset": 164231,
+      "shape": [
+        6
+      ]
+    },
+    {
+      "name": "value_head.0.weight",
+      "offset": 164237,
+      "shape": [
+        64,
+        256
+      ]
+    },
+    {
+      "name": "value_head.0.bias",
+      "offset": 180621,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "name": "value_head.2.weight",
+      "offset": 180685,
+      "shape": [
+        1,
+        64
+      ]
+    },
+    {
+      "name": "value_head.2.bias",
+      "offset": 180749,
+      "shape": [
+        1
+      ]
+    }
+  ]
+}

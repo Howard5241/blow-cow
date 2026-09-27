@@ -11,6 +11,7 @@ const iconMap = Object.fromEntries(
 
 export const CARDS_ICON_SPRITE = iconMap['cards_icon.png'] ?? ''
 export const POINT_ICON_SPRITE = iconMap['point_icon.png'] ?? ''
+export const GOLD_ICON_SPRITE = iconMap['dollar_icon.png'] ?? ''
 // Drawn clockwise; the counterclockwise state mirrors it in CSS rather than shipping a second file.
 export const DIRECTION_ARROW_ICON_SPRITE = iconMap['clockwise_arrow_icon.png'] ?? ''
 export const PLAY_ICON_SPRITE = iconMap['play_icon.png'] ?? ''
@@ -27,6 +28,17 @@ export const MIMIC_ICON_SPRITE = iconMap['mimic_icon.png'] ?? ''
 export const BLOCK_HOVER_ICON_SPRITE = iconMap['block_hover_icon.png'] ?? ''
 export const BS_TARGET_ICON_SPRITE = iconMap['BS_target_icon.png'] ?? ''
 export const X_ICON_SPRITE = iconMap['x_icon.png'] ?? ''
+/*
+ * The three action ranks, keyed by rank name. They stand in for the word on the lobby's toggles and
+ * in the Peek panel's heading, which is why they are a map rather than three constants: every reader
+ * has a `BlowCowSpecialRank` in hand rather than a literal.
+ */
+export const SPECIAL_RANK_ICON_SPRITES: Record<string, string> = {
+  Plague: iconMap['plague_icon.png'] ?? '',
+  Skip: iconMap['skip_icon.png'] ?? '',
+  Peek: iconMap['peek_icon.png'] ?? '',
+}
+
 // The four toolbar controls above the action row. Each carries its own accent colour in CSS.
 export const EMOTE_ICON_SPRITE = iconMap['emote_icon.png'] ?? ''
 export const RULES_ICON_SPRITE = iconMap['rules_icon.png'] ?? ''

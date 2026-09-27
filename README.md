@@ -15,12 +15,16 @@ Blow Cow is a browser-first multiplayer card game inspired by BS. This repositor
 ## Current Status
 
 - Supports 2 to 8 players
+- Two game modes, chosen by the room's creator in the lobby: `Classic`, the full game with characters,
+  rule cards, statuses and points, and `Ante`, a fixed run of rounds played for gold with the deck
+  redealt every round
 - Includes a custom lobby to create rooms, join rooms, and view open tables
 - Includes a local multiplayer server at `server/server.cjs`
 - Includes a live in-game board with turn flow, hidden information, scoring, BS resolution, Reset resolution, and endgame results
 - Uses server-authoritative boardgame.io moves and player-specific hidden state shaping for multiplayer play
 
-See `RULES.md` for the current game rules draft.
+See `RULES.md` for the Classic Mode rules draft, `RULES-EXTENSIONS.md` for its action ranks and statuses, `RULES-ANTE.md` for how Ante Mode differs from it,
+and `CHARACTERS.md` for the character abilities and how they interact with those rules.
 
 ## Scripts
 

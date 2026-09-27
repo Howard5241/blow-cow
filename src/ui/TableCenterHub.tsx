@@ -9,6 +9,8 @@ type TableCenterHubProps = {
   frontCardsTooltip: string
   maxCardsOnTable: number
   onToggleDirection: () => void
+  /** Ante has no table cap, so the count is drawn on its own instead of out of a maximum. */
+  showTableLimit?: boolean
   totalCardsOnTable: number
   trumpLabel: string
   trumpRank: string
@@ -22,6 +24,7 @@ export function TableCenterHub({
   frontCardsTooltip,
   maxCardsOnTable,
   onToggleDirection,
+  showTableLimit = true,
   totalCardsOnTable,
   trumpLabel,
   trumpRank,
@@ -60,10 +63,14 @@ export function TableCenterHub({
       <div className="hub-table-meta">
         <span className="hub-table-count">
           {totalCardsOnTable}
-          <span className="hub-table-count-separator">/</span>
-          {maxCardsOnTable}
+          {showTableLimit ? (
+            <>
+              <span className="hub-table-count-separator">/</span>
+              {maxCardsOnTable}
+            </>
+          ) : null}
         </span>
-        <InlineInfoTooltip alignment="end" tooltip={frontCardsTooltip} />
+        <InlineInfoTooltip description={frontCardsTooltip} title="Cards On Table" />
       </div>
     </div>
   )

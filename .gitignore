@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Others
+google-colab-cli/
+
 # Build output
 dist/
 dist-ssr/
@@ -26,6 +29,15 @@ lerna-debug.log*
 # Generated project data
 data/completed-games/
 data/matches/
+
+# Python (rl/)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Training output: checkpoints and logs
+runs/
 
 # Tool caches
 .eslintcache

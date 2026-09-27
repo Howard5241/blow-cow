@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Howard/.claude/projects/c--Users-Howard-Desktop-Work-BlowCow/memory/**)",
+      "Skill(loop)",
+      "Skill(loop:*)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\Howard\\.claude\\projects\\c--Users-Howard-Desktop-Work-BlowCow\\memory"
+    ]
+  }
+}

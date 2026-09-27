@@ -5,6 +5,7 @@ import {
   BLOCK_HOVER_ICON_SPRITE,
   BS_TARGET_ICON_SPRITE,
   CARDS_ICON_SPRITE,
+  GOLD_ICON_SPRITE,
   POINT_ICON_SPRITE,
 } from './iconSprites.ts'
 import type { PointsFlashDirection, SeatHalf, SeatRow } from './boardTypes.ts'
@@ -51,8 +52,13 @@ type SeatBlockProps = {
    */
   isDirectionFlipTell?: boolean
   enteringCardIDSet: Set<string>
-  /** Which way this seat's points last moved, or null when the pill is not flashing. */
+  /** Which way this seat's score last moved, or null when the pill is not flashing. */
   pointsFlashDirection: PointsFlashDirection | null
+  /**
+   * Whether this match keeps points at all. False in Ante, which drops the pill entirely and hands
+   * its flash to the gold pill beside it, since gold is the score there.
+   */
+  showPoints?: boolean
   isPunishmentImpact: boolean
   isSelectable: boolean
   isSelected: boolean
@@ -72,8 +78,9 @@ type SeatBlockProps = {
   /** Carries only `--seat-angle`; the ring position is computed in CSS from it. */
   style?: CSSProperties
   /**
-   * The Call BS and Accuse controls. Rendered for every selectable seat and revealed by CSS on
-   * hover, focus, or sticky selection, so pointing at a block is enough to act on it.
+   * The Call BS and Accuse controls, plus whatever repair this seat needs. Revealed by CSS on hover,
+   * focus, or sticky selection, so pointing at a block is enough to act on it — except on a seat that
+   * has stopped acting altogether, which pins the bubble open.
    */
   targetActions?: React.ReactNode
 }
@@ -91,6 +98,7 @@ export function SeatBlock({
   isDirectionFlipTell = false,
   isRevealFocused = false,
   pointsFlashDirection,
+  showPoints = true,
   isPunishmentImpact,
   isSelectable,
   isSelected,
@@ -118,10 +126,19 @@ export function SeatBlock({
     isSelected ? 'selected-seat' : '',
     isRevealFocused ? 'focused-seat' : '',
     isAccusedCheat ? 'accused-cheat-seat' : '',
+    // Lifts the whole block, not the bubble: the callout hangs outside the block and each block is
+    // its own stacking context, so only the block can win against a neighbour. See App.css.
+    calloutText ? 'speaking-seat' : '',
     isDirectionFlipTell ? 'direction-flip-tell' : '',
     isPunishmentImpact ? 'punishment-impact' : '',
     seat.hasLeft ? 'left-seat' : '',
     !seat.hasLeft && !seat.isConnected ? 'disconnected-seat' : '',
+    /*
+     * Pins this block's action bubble open — see App.css for why these are not hover-gated. A bot
+     * this browser runs is deliberately left out: its repairs are a precaution rather than a rescue,
+     * and a healthy table full of bots would otherwise wear a permanent bubble on every block.
+     */
+    seat.repair && seat.repair.action !== 'local' ? 'stalled-seat' : '',
   ].filter(Boolean).join(' ')
 
   return (
@@ -241,6 +258,12 @@ export function SeatBlock({
         </strong>
         <div className="seat-block-meta">
           <span className="seat-tag">{seatLabel}</span>
+          {/* Says why the turn is about to jump over this chair, so the skip is not silent. */}
+          {seat.isSkipped ? (
+            <span className="seat-tag skipped" title="A revealed Skip takes this seat's next turn.">
+              Skipped
+            </span>
+          ) : null}
           {seat.hasLeft ? (
             <span className="seat-tag offline">Left</span>
           ) : (
@@ -265,16 +288,33 @@ export function SeatBlock({
           </span>
         </span>
 
-        <span
-          className="seat-stat seat-stat-points"
-          title={seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet'}
-        >
-          <img alt="" className="seat-stat-icon" src={POINT_ICON_SPRITE} />
+        {/*
+          * Ante keeps no points, so the pill is not drawn there rather than sitting at a permanent
+          * zero. The flash it carries moves to the gold pill below with it — see `showPoints`.
+          */}
+        {showPoints ? (
           <span
-            aria-label={`Points: ${seat.points}. ${seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet.'}`}
-            className={`seat-stat-value points-pill${pointsFlashDirection ? ` flashing ${pointsFlashDirection}` : ''}`}
+            className="seat-stat seat-stat-points"
+            title={seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet'}
           >
-            {seat.points}
+            <img alt="" className="seat-stat-icon" src={POINT_ICON_SPRITE} />
+            <span
+              aria-label={`Points: ${seat.points}. ${seat.pointRanks.length > 0 ? `Scored ranks: ${seat.pointRanks.join(', ')}` : 'No scored ranks yet.'}`}
+              className={`seat-stat-value points-pill${pointsFlashDirection ? ` flashing ${pointsFlashDirection}` : ''}`}
+            >
+              {seat.points}
+            </span>
+          </span>
+        ) : null}
+
+        {/* Buys nothing in a classic match. In Ante it is the score, and the only number that moves. */}
+        <span className="seat-stat seat-stat-gold" title={`${seat.gold} gold`}>
+          <img alt="" className="seat-stat-icon" src={GOLD_ICON_SPRITE} />
+          <span
+            aria-label={`Gold: ${seat.gold}`}
+            className={`seat-stat-value${showPoints ? '' : ` points-pill${pointsFlashDirection ? ` flashing ${pointsFlashDirection}` : ''}`}`}
+          >
+            {seat.gold}
           </span>
         </span>
       </div>

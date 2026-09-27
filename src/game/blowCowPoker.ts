@@ -125,7 +125,17 @@ function partitionCards(cards: readonly BlowCowCard[]) {
       continue
     }
 
-    concreteCards.push({ value: POKER_RANK_VALUES[card.rank], suit: card.suit })
+    /*
+     * An action rank is neither a value nor a wild: it has no poker rank to score and nothing to be
+     * substituted for. It is simply dead in a showdown, so a seat holding one is playing the hand
+     * with one card fewer — which is the same thing that makes it worthless everywhere else.
+     */
+    const value = POKER_RANK_VALUES[card.rank as keyof typeof POKER_RANK_VALUES]
+    if (value === undefined) {
+      continue
+    }
+
+    concreteCards.push({ value, suit: card.suit })
   }
 
   return { concreteCards, wildCount }

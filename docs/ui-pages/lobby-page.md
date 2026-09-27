@@ -9,11 +9,9 @@
 ```text
 main.app-shell
   section.hero-panel
-    p.eyebrow
     div.hero-header
       div
         h1
-        p.hero-copy
       span.status-pill
   section.status-banner
   p.error-banner?
@@ -36,21 +34,25 @@ main.app-shell
 | Alias | Primary HTML element | Main class / hook | Purpose | Relationship |
 | --- | --- | --- | --- | --- |
 | App Shell | `main` | `app-shell` | Root lobby container. | Parent of all lobby sections. |
-| Hero Panel | `section` | `hero-panel` | Lobby header with title, copy, and server state. | First page section. |
-| Hero Eyebrow | `p` | `eyebrow` | Shows `Blow Cow Multiplayer Lobby`. | Child of Hero Panel. |
-| Hero Header | `div` | `hero-header` | Groups the heading/copy block and the server status pill. | Main row inside Hero Panel. |
-| Server Status Pill | `span` | `status-pill` | Shows lobby availability. | Beside the hero copy. |
+| Hero Panel | `section` | `hero-panel` | Lobby header with title and server state. | First page section. |
+| Hero Header | `div` | `hero-header` | Groups the heading and the server status pill. | Main row inside Hero Panel. |
+| Server Status Pill | `span` | `status-pill` | Shows lobby availability. | Beside the hero heading. |
 | Status Banner | `section` | `status-banner` | Shows the current lobby status message and refresh action. | Between Hero Panel and Lobby Grid. |
 | Refresh Rooms Button | `button` | `secondary-button` | Refreshes the open room list. | Action inside Status Banner. |
 | Error Banner | `p` | `error-banner` | Shows page-level request or server errors. | Conditional below Status Banner. |
 | Lobby Grid | `section` | `lobby-grid` | Splits setup/create and join/browse into two panels. | Main working area. |
 | Player Setup Panel | `article` | `panel stack-gap` | Holds the display-name field and create-room form. | Left column of Lobby Grid. |
 | Display Name Field | `label` + `input` | `field` | Sets the local player name. | First control in Player Setup Panel. |
-| Create Room Form | `form` | `stack-gap` | Groups seats, speed, character-card mode, optional character pool selection, house rules, starting statuses, rank mode, optional manual ranks, and the create action. | Below Display Name Field. |
-| Seats Selector | `label` + `select` | `field` | Chooses room size. | First selector in Create Room Form. |
+| Create Room Form | `form` | `stack-gap` | Groups game mode, seats, speed, and then whichever settings that mode has: for Classic, character-card mode, optional character pool selection, house rules, starting statuses, rank mode, optional manual ranks and action ranks; for Ante, the rounds and starting-gold dials and rank mode. Ends with the create action. | Below Display Name Field. |
+| Game Mode Group | `fieldset` | `deck-mode-group` | Chooses `Classic` or `Ante`. First control in the form, because it decides which of the ones below it exist. | Top of Create Room Form. |
+| Game Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects one mode, carrying its one-line description as a shared Tooltip Box trigger. Built from `BLOW_COW_GAME_MODES`, so a third mode would appear here without a markup change. | Repeated inside Game Mode Group. |
+| Ante Settings Panel | `div` | `manual-rank-panel` | Holds the two dials only Ante reads: Rounds and Starting Gold. | Conditional, after Game Speed Selector. |
+| Ante Rounds Field | `label` + `input[type=number]` | `status-turns-field` | Sets the match length, 1 to 100, default 20. | Inside Ante Settings Panel. |
+| Ante Starting Gold Field | `label` + `input[type=number]` | `status-turns-field` | Sets every player's opening purse, 1 to 50, default 5. | Below Ante Rounds Field. |
+| Seats Selector | `label` + `select` | `field` | Chooses room size. | After Game Mode Group. |
 | Game Speed Selector | `label` + `select` | `field` | Chooses the room speed multiplier. | After Seats Selector. |
 | Character Cards Group | `fieldset` | `deck-mode-group` | Lets the room creator enable or disable character cards for the match. | After Game Speed Selector. |
-| Character Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Enabled` or `Disabled` for character cards. | Repeated inside Character Cards Group. |
+| Character Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Enabled` or `Disabled` for character cards. Carries that mode's description as a shared Tooltip Box trigger. | Repeated inside Character Cards Group. |
 | Character Pool Panel | `div` | `manual-rank-panel` | Shows the active character-card pool when characters are enabled. | Conditional below Character Cards Group. |
 | Character Pool Count | `span` | `rank-selection-count` | Shows how many eligible characters are currently in the pool. | Right side of Character Pool Panel header. |
 | Character Chip Grid | `div` | `character-chip-grid` | Holds the character-pool buttons. | Main area inside Character Pool Panel. |
@@ -68,15 +70,18 @@ main.app-shell
 | Rule Status Option | `button` | `rule-status-option`, `selected` | Selects one status. Only the statuses that rule defines are rendered, so a rule that cannot be removed shows no `Removed` button at all. | Repeated inside Rule Status Options. |
 | Initial Statuses Panel | `div` | `manual-rank-panel` | Testing lever that starts every player under the same statuses. Nothing in the game inflicts one yet, so this is the only source. | Below House Rules Panel, always shown. |
 | Initial Status Count | `span` | `rank-selection-count` | Shows `n/2 selected`, the per-player cap. | Right side of Initial Statuses Panel header. |
-| Status Chip | `button` | `character-chip status-chip` | Toggles one status on or off and shows its sprite beside its name. Unselected chips are disabled once two are picked, so the cap can never be exceeded rather than being silently truncated by the server. Its effect text is carried by the shared Character Chip Tooltip. | Repeated inside the panel's Character Chip Grid. |
+| Status Chip | `button` | `character-chip status-chip` | Toggles one status on or off and shows its sprite beside its name. Unselected chips are disabled once two are picked, so the cap can never be exceeded rather than being silently truncated by the server. Its name and effect open in the shared Tooltip Box. | Repeated inside the panel's Character Chip Grid. |
 | Status Turns Field | `label` + `input[type=number]` | `status-turns-field` | Sets the starting counter shared by every selected status, from 1 to 20. Disabled while nothing is selected. | Below the status chips. |
 | Standard Ranks Group | `fieldset` | `deck-mode-group` | Switches between default and manual rank selection. | After Game Speed Selector. |
-| Rank Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Default` or `Manual` rank mode. | Repeated inside Standard Ranks Group. |
-| Rank Mode Tooltip | `span` | `deck-mode-tooltip` | Shows the mode description on hover or focus. | Nested inside each Rank Mode Option. |
+| Rank Mode Option | `label` + `input[type=radio]` | `deck-mode-option` | Selects `Default` or `Manual` rank mode. Carries that mode's description as a shared Tooltip Box trigger, opened by hovering or focusing the whole label. | Repeated inside Standard Ranks Group. |
 | Manual Rank Panel | `div` | `manual-rank-panel` | Shows the manual rank picker when manual mode is active. | Conditional below Standard Ranks Group. |
 | Rank Selection Count | `span` | `rank-selection-count` | Shows how many standard ranks are selected. | Right side of Manual Rank Panel header. |
 | Rank Chip Grid | `div` | `rank-chip-grid` | Holds the manual rank buttons. | Main area inside Manual Rank Panel. |
 | Rank Chip | `button` | `rank-chip` | Toggles one standard rank. | Repeated inside Rank Chip Grid. |
+| Action Ranks Panel | `div` | `special-rank-panel` | Opts each action rank into the deck. Independent of rank mode, so it is always shown. | Below Manual Rank Panel, always shown. |
+| Action Rank Count | `span` | `rank-selection-count` | Shows how many action ranks are selected. | Right side of Action Ranks Panel header. |
+| Action Rank Grid | `div` | `special-rank-grid` | Holds the three action rank buttons. | Main area inside Action Ranks Panel. |
+| Action Rank Chip | `button` | `special-rank-chip` | Toggles one action rank. Carries the rank's icon rather than its name. | Repeated inside Action Rank Grid. |
 | Create Room Button | `button` | `primary-button` | Creates the room with the selected settings. | Final action in Create Room Form. |
 | Join Panel | `article` | `panel stack-gap` | Holds the direct room-code join form and room list. | Right column of Lobby Grid. |
 | Room Code Form | `form` | `stack-gap` | Accepts a room code and submits a join request. | First form in Join Panel. |
@@ -100,7 +105,28 @@ main.app-shell
 ## Notes
 
 - `status-banner` and `error-banner` are page-level state, not panel-local state.
-- Create-room order is: seats, game speed, character cards, optional character pool selection, house rules, rank mode, then optional manual rank selection.
+- Create-room order is: game mode, seats, game speed, then the mode's own settings. In `Classic`:
+  character cards, optional character pool selection, house rules, starting statuses, rank mode,
+  optional manual rank selection, then action ranks. In `Ante`: the rounds and starting-gold dials,
+  rank mode, and optional manual rank selection — nothing else.
+- **Ante hides four panels rather than disabling them**: Character Cards, Character Pool, House Rules,
+  Initial Statuses and Action Ranks are simply not rendered, because none of them exist in that mode.
+  `createRoomSetupData` omits the matching keys for the same reason, so a room's setup data reads as
+  the game it is going to be. The server forces all four off independently in `resolveUseCharacters`,
+  `resolveRules`, `resolveInitialStatuses` and `resolveDeckConfig`, so the lobby and the engine can
+  never disagree about it — the hiding here is about what a host is asked, not about enforcement.
+- Rank mode is offered in both modes. Its `Default` tooltip reads the mode's own rank table through
+  `getStandardRankCountForMode`, and in Ante it adds that the count is re-derived on every
+  elimination. `RULES.md` and `RULES-ANTE.md` hold the two tables.
+- The action ranks are a separate axis from rank mode: the panel is shown in both `Default` and `Manual`, and all three are off unless the host turns them on, so `specialRanks` is omitted from `setupData` entirely while none are chosen.
+- The action rank chips carry `plague_icon.png`, `skip_icon.png` and `peek_icon.png` in place of a
+  label, greyed out until selected. The card art carries no text the lobby can show, so each button's
+  `title` is the one place a host reads what the rank does; `RULES-EXTENSIONS.md` is the source of truth for it.
+  The tooltip says what one card does and stops there — how several of the same rank revealed together
+  fan out across the table is left to `RULES-EXTENSIONS.md`. The wording lives in `src/ui/specialRankInfo.ts`,
+  shared with the two places a card shows the same effect during a match.
+- Every tooltip on this page is the shared Tooltip Box, documented on the Table Page: a trigger is an
+  element with `useTooltip()` props spread onto it, and nothing renders a tooltip of its own.
 - The character pool defaults to all implemented characters and only narrows when the creator deselects specific cards.
 - House rules default to every rule card `Active`, and `rules` is omitted from `setupData` entirely while that holds, the same way a full character pool is.
 - A rule card only offers the statuses it defines. `removedDescription` and `upgradedDescription` in `src/game/blowCowRules.ts` are what make a variant exist, so an undescribed variant cannot be selected here and cannot reach the server.
@@ -108,9 +134,9 @@ main.app-shell
 - `Removed` is enforced during the match. `Upgraded` is not yet — the card's `+` title and upgraded description are shown to players, but the game still plays the rule as written, which is what the overlay's subtitle says.
 - Character abilities are shown only as card art. The sprites already print each character's name and
   ability, so `src/game/blowCowCharacters.ts` holds no description table and the chips carry no
-  tooltip; `Characters.csv` and `RULES.md` are where the wording is authored. The `character card art`
-  check in `scripts/check-blowcow-gameplay.ts` is what stops an implemented character shipping with no
-  art, which would now leave it with nothing a player can read.
+  tooltip; `Characters.csv` and `CHARACTERS.md` are where the wording is authored. The `character card
+  art` and `character documentation` checks in `scripts/check-blowcow-gameplay.ts` are what stop an
+  implemented character shipping with no art and no written rule.
 - The preview is `position: fixed` and `pointer-events: none`, so it follows the viewport rather than
   the scroll and never intercepts a click meant for the Join panel it overlaps. It cannot be hovered
   either, which is what stops it holding itself open. Below 980px the lobby is one column, so it
